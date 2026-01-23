@@ -23,9 +23,9 @@ A_CRUISE_MIN = -4.0
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 
-# Thresholds to separate noise from turns
-CURVE_PEAK_THRESHOLD = 0.0020
-AREA_THRESHOLD = 0.012
+# Thresholds (Lowered for maximum sensitivity)
+CURVE_PEAK_THRESHOLD = 0.0012
+AREA_THRESHOLD = 0.008
 
 def get_max_accel(v_ego):
   return interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
@@ -80,30 +80,43 @@ class LongitudinalPlanner:
       v_raw = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.velocity.x)
       a = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.acceleration.x)
       
+      # Use raw model velocity but prevent noise drops
       v_corrected = np.maximum(v_raw, v_ego - 1.5) - model_error
       raw_curv = np.abs(np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.orientationRate.z)) / np.clip(v_corrected, 0.3, 100.0)
       
       # SAFE INDEXING for Anticipation
       num_idx = len(raw_curv)
+      
+      # Look at the MAX horizon (3-6s out) to start "Coasting" early
       far_curv_peak = np.max(raw_curv[min(10, num_idx-1):min(32, num_idx)])
-      anticipatory_slowdown = interp(far_curv_peak, [0.0008, 0.003], [1.0, 0.78])
+      
+      # If ANY curve is seen far out, cap speed to 80% immediately
+      # This initiates the "Lift Off" feeling well before the turn
+      anticipatory_slowdown = interp(far_curv_peak, [0.0006, 0.0025], [1.0, 0.80])
 
       curve_area = np.sum(raw_curv[:25]) * 0.2
       max_curv_ahead = np.max(raw_curv[2:20]) 
       
+      # Core Curve Logic
       if curve_area > AREA_THRESHOLD or max_curv_ahead > CURVE_PEAK_THRESHOLD:
         lat_stress_factor = (v_ego ** 2) * max_curv_ahead
         torque_multiplier = interp(lat_stress_factor, [0.015, 0.05], [1.0, 0.65])
         dynamic_multiplier = interp(max_curv_ahead, [0.0015, 0.008], [1.0, 0.70])
         
+        # Merge all multipliers
         max_v_curve = dynamic_multiplier * torque_multiplier * anticipatory_slowdown * np.sqrt(2.1 / (max_curv_ahead + 1e-4))
+        
+        # Aggressive filter (15.0) to force immediate target drop
         v_turn_filter.k = 15.0 if max_v_curve < v_turn_filter.x else 0.3
         v = np.minimum(v_turn_filter.update(max_v_curve), v_corrected)
         return x, v, a, j, True
       
+      # If no core curve yet, still apply "pre-braking" if far curve is seen
       v = v_corrected
       if anticipatory_slowdown < 1.0:
-        v = np.minimum(v * anticipatory_slowdown, v)
+        # Force a 2 m/s drop immediately if anticipation triggers
+        v_coast = max(v_ego - 2.0, 0.0)
+        v = np.minimum(v * anticipatory_slowdown, v_coast)
         
       return x, v, a, j, (anticipatory_slowdown < 0.98)
       
@@ -134,19 +147,26 @@ class LongitudinalPlanner:
 
     x, v, a, j, self.curve_detected = self.parse_model(sm['modelV2'], self.v_model_error, v_ego, self.v_turn_filter)
 
-    # --- CUSTOM TESLA REGEN WEIGHTS ---
+    self.mpc.set_weights(prev_accel_constraint, personality=self.personality)
+    
     if self.curve_detected:
-      # l_v=2.0 (High priority on speed target)
-      # l_a=5.0 (Low cost for regen)
-      # l_j=40.0 (Low cost for jerk)
-      self.mpc.set_weights(prev_accel_constraint, personality=self.personality, weights=[2.0, 5.0, 40.0])
-      self.mpc.set_accel_limits(accel_limits_turns[0], min(self.a_desired - 0.3, -0.1))
+      # REGEN-SAFE LIMITS:
+      # Max safe braking for regen-only is approx -2.5 m/s^2.
+      safe_decel_limit = -2.5
+      
+      # We ask for a max braking of -0.3 m/s^2 normally, but we ensure the floor
+      # is never lower than safe_decel_limit to prevent disengagement.
+      turn_accel_min = max(min(self.a_desired - 0.2, -0.1), safe_decel_limit)
+      
+      self.mpc.set_accel_limits(accel_limits_turns[0], turn_accel_min)
     else:
-      self.mpc.set_weights(prev_accel_constraint, personality=self.personality)
       self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
 
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    v_target = v if self.curve_detected else np.maximum(v, v_cruise - 0.1)
+    
+    # Clip target to v_cruise, but obey the Curve Slowdown
+    v_target = np.minimum(v, v_cruise)
+    
     self.mpc.update(sm['carState'], sm['radarState'], v_cruise, x, v_target, a, j, personality=self.personality)
 
     self.v_desired_trajectory_full = np.interp(ModelConstants.T_IDXS, T_IDXS_MPC, self.mpc.v_solution)
