@@ -4,9 +4,11 @@ from typing import Optional
 RESERVED_PORT = 8022  # sshd
 STARTING_PORT = 8001
 
+
 def new_port(port: int):
   port += STARTING_PORT
   return port + 1 if port >= RESERVED_PORT else port
+
 
 class Service:
   def __init__(self, port: int, should_log: bool, frequency: float, decimation: Optional[int] = None):
@@ -14,6 +16,7 @@ class Service:
     self.should_log = should_log
     self.frequency = frequency
     self.decimation = decimation
+
 
 services: dict[str, tuple] = {
   # service: (should_log, frequency, qlog decimation (optional))
@@ -80,6 +83,7 @@ services: dict[str, tuple] = {
   "microphone": (True, 10., 10),
   "gpsLocationTesla": (False, 0.),
 
+
   # debug
   "uiDebug": (True, 0., 1),
   "testJoystick": (True, 0.),
@@ -96,8 +100,9 @@ services: dict[str, tuple] = {
   "customReservedRawData0": (True, 0.),
   "customReservedRawData1": (True, 0.),
   "customReservedRawData2": (True, 0.),
-  # mapd integration
-  "mapdOut": (True, 20., 20),
+  "mapdOut": (True, 20., 20,),
+  "mapdIn": (False, 0.),
+  "mapdExtendedOut": (False, 0.),
 }
 SERVICE_LIST = {name: Service(new_port(idx), *vals) for
                 idx, (name, vals) in enumerate(services.items())}

@@ -2283,7 +2283,11 @@ struct Event {
     customReservedRawData1 @125 :Data;
     customReservedRawData2 @126 :Data;
 
-    # *********** Custom: reserved for forks ***********
+        # *********** Custom: reserved for forks ***********
+    # These fields are reserved for custom forks.
+    # DO change the name of the field and struct
+    # DON'T change the ID (e.g. @107)
+    # DON'T change which struct it points to
     customReserved0 @107 :Custom.CustomReserved0;
     customReserved1 @108 :Custom.CustomReserved1;
     customReserved2 @109 :Custom.CustomReserved2;
@@ -2291,8 +2295,28 @@ struct Event {
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
-    
-    # Updated slots for mapd
+    customReserved7 @114 :Custom.CustomReserved7;
+    customReserved8 @115 :Custom.CustomReserved8;
+    customReserved9 @116 :Custom.CustomReserved9;
+	#filler to keep ordinals dense up to customReserved10/mapd
+	reserved128 @128 :Void;
+    reserved129 @129 :Void;
+    reserved130 @130 :Void;
+    reserved131 @131 :Void;
+    reserved132 @132 :Void;
+    reserved133 @133 :Void;
+    reserved134 @134 :Void;
+    reserved135 @135 :Void;
+	
+    customReserved10 @136 :Custom.CustomReserved10;
+    customReserved11 @137 :Custom.CustomReserved11;
+    customReserved12 @138 :Custom.CustomReserved12;
+    customReserved13 @139 :Custom.CustomReserved13;
+    customReserved14 @140 :Custom.CustomReserved14;
+    customReserved15 @141 :Custom.CustomReserved15;
+    customReserved16 @142 :Custom.CustomReserved16;
+
+    # mapd (match mapd-main)
     mapdExtendedOut @143 :Custom.MapdExtendedOut;
     mapdIn @144 :Custom.MapdIn;
     mapdOut @145 :Custom.MapdOut;
