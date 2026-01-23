@@ -2291,9 +2291,11 @@ struct Event {
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
-    customReserved7 @114 :Custom.CustomReserved7;
-    customReserved8 @115 :Custom.CustomReserved8;
-    customReserved9 @116 :Custom.CustomReserved9;
+    
+    # Updated slots for mapd
+    mapdExtendedOut @143 :Custom.MapdExtendedOut;
+    mapdIn @144 :Custom.MapdIn;
+    mapdOut @145 :Custom.MapdOut;
 
     # *********** legacy + deprecated ***********
     model @9 :Legacy.ModelData; # TODO: rename modelV2 and mark this as deprecated
