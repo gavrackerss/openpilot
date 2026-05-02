@@ -476,7 +476,7 @@ def _model_summary(model: Any) -> dict[str, Any]:
   return out
 
 
-def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str, Any], lead2: dict[str, Any], long_log: dict[str, Any] | None) -> dict[str, Any]:
+def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str, Any], lead2: dict[str, Any], mapd: dict[str, Any], long_log: dict[str, Any] | None) -> dict[str, Any]:
   cruise = car.get("cruiseState", {}) if isinstance(car.get("cruiseState"), dict) else {}
   current_set = _safe_float(cruise.get("speed"), 0.0)
   v_ego = _safe_float(car.get("vEgo"), 0.0)
@@ -498,12 +498,26 @@ def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str,
     "clearRoadCandidate": bool(no_actual_lead and not _safe_bool(car.get("brakePressed", False)) and v_ego > 4.0),
     "plannerDropVsSet": bool(plan_drop),
     "longHasPlannerOwner": ("planner" in long_src),
-    "longHasCurveOwner": ("curve_hold" in long_src or "hard_entry" in long_src),
+    "longHasCurveOwner": any(
+      token in long_src
+      for token in (
+        "curve_hold",
+        "hard_entry",
+        "curve_fused",
+        "roundabout_fused",
+        "mapd_roundabout",
+        "roundabout_cap",
+        "lat_sat_hard_cap",
+        "steer_busy_hard",
+        "state[CURVE",
+      )
+    ),
     "longSource": long_src,
     "currentSet": current_set,
     "vEgo": v_ego,
     "pNear": p_near,
     "pPreview": p_preview,
+    "mapd": mapd if isinstance(mapd, dict) else {},
     "followGap": follow_gap,
     "closingLead": bool((lead1.get("status") or lead2.get("status")) and (primary_vrel < -0.5 or a_target < -0.15)),
     "steeringBusy": bool(abs(_safe_float(car.get("steeringAngleDeg"), 0.0)) > 8.0 or abs(_safe_float(car.get("steeringRateDeg"), 0.0)) > 25.0),
@@ -561,6 +575,14 @@ class SwaglogTail:
     "lead_takeover_after_autoengage",
     "mapd_cap",
     "mapd_comfort",
+    "curve_fused",
+    "roundabout_fused",
+    "mapd_roundabout",
+    "roundabout_cap",
+    "lat_sat_hard_cap",
+    "steer_busy_hard",
+    "lead_far_release",
+    "map_only_unconfirmed",
   )
 
   def __init__(self) -> None:
@@ -676,6 +698,7 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
   long_log = record.get("long_log") or {}
   flap = record.get("leadState", {})
   follow = flags.get("followGap", {}) if isinstance(flags.get("followGap"), dict) else {}
+  mapd = flags.get("mapd", {}) if isinstance(flags.get("mapd"), dict) else {}
   line = (
     f"{record['wall_time']} "
     f"vEgo={flags['vEgo']:.2f} "
@@ -690,6 +713,9 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"toggles={_safe_int(flap.get('presenceToggles', 0))} "
     f"gapS={_safe_float(follow.get('actualGapS'), 0.0):.2f} "
     f"desiredTF={_safe_float(follow.get('desiredTF'), 0.0):.2f} "
+    f"pNear={_safe_float(flags.get('pNear'), 0.0):.2f} "
+    f"map={_safe_float(mapd.get('mapCurveSpeed'), 0.0):.2f} "
+    f"vis={_safe_float(mapd.get('visionCurveSpeed'), 0.0):.2f} "
     f"followS={_safe_int(follow.get('followS'), 255)} "
     f"stalkGap={_safe_float(follow.get('stalkGap'), 0.0):.1f} "
     f"stalkField={_safe_str(follow.get('stalkGapField'), '-') or '-'} "
@@ -780,6 +806,7 @@ def main() -> int:
         plan=plan,
         lead1=radar["leadOne"],
         lead2=radar["leadTwo"],
+        mapd=mapd,
         long_log=long_log,
       )
 
@@ -796,7 +823,20 @@ def main() -> int:
         interesting = True
       if d["closingLead"] and d["plannerDropVsSet"]:
         interesting = True
-      if any(marker in d["longSource"] for marker in ("autoengage", "lead_flap", "lead_takeover")):
+      if any(
+        marker in d["longSource"]
+        for marker in (
+          "autoengage",
+          "lead_flap",
+          "lead_takeover",
+          "curve_fused",
+          "roundabout_fused",
+          "mapd_roundabout",
+          "lat_sat_hard_cap",
+          "steer_busy_hard",
+          "lead_far_release",
+        )
+      ):
         interesting = True
 
       if interesting:

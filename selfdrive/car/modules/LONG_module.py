@@ -7,7 +7,7 @@ making lead-follow recovery smoother and less sticky:
 
 v61 adds an explicit final LONG arbitration state machine.
 
-v64 ports stalk follow distance timing, restores far-lead release, and hardens roundabout/curve caps.
+v65 keeps stalk follow timing and adds low-biased map/vision curve fusion with slow curve release.
 
 - lead critical / lead follow / curve pre-entry / curve active / curve exit / cruise sync are resolved in one final pass
 - stale lead/planner ownership is expired before it can hold speed down after curves
@@ -100,7 +100,14 @@ class LongController:
   _MAPD_ONLY_HIGHWAY_ENTRY_PERSIST_MS = 460
   _MAPD_ONLY_ENTRY_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DUAL_SOURCE_AGREE_MS = 4.0 * CV.MPH_TO_MS
-  _MAPD_DISAGREE_COMFORT_BLEND = 0.90
+  _MAPD_DISAGREE_COMFORT_BLEND = 0.35
+  _MAPD_FUSION_SMALL_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
+  _MAPD_FUSION_LARGE_DISAGREE_MS = 16.0 * CV.MPH_TO_MS
+  _MAPD_FUSION_BLEND_SMALL = 0.45
+  _MAPD_FUSION_BLEND_MEDIUM = 0.35
+  _MAPD_FUSION_BLEND_LARGE = 0.25
+  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.20
+  _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_PLANNER_CONFIRM_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_STEER_CONFIRM_DEG = 3.5
   _MAPD_ONLY_HIGHWAY_SPEED_MS = 55.0 * CV.MPH_TO_MS
@@ -241,8 +248,8 @@ class LongController:
   _ARBITRATION_CURVE_EGO_DROP_MS = 1.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EXIT_RELEASE_MS = 650
-  _ARBITRATION_CURVE_ENTRY_STEP_MS = 2.2 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EXIT_STEP_MS = 3.6 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_ENTRY_STEP_MS = 3.2 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_EXIT_STEP_MS = 0.75 * CV.MPH_TO_MS
   _FOLLOW_GAP_DEFAULT_S = 1.30
   _FOLLOW_GAP_MIN_S = 0.70
   _FOLLOW_GAP_MAX_S = 1.90
@@ -264,9 +271,9 @@ class LongController:
   _ROUNDABOUT_MAP_ONLY_MAX_EGO_MS = 48.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_CAP_MS = 25.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_DROP_MS = 6.5 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_MIN_SPEED_MS = 20.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_CAP_MS = 24.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_DROP_MS = 7.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_MIN_SPEED_MS = 18.0 * CV.MPH_TO_MS
 
 
   _LEAD_CLOSE_CANCEL_MIN_SPEED_MS = 5.0 * CV.MPH_TO_MS
@@ -305,6 +312,9 @@ class LongController:
     self._mapd_vision_curve_ms: Optional[float] = None
     self._mapd_last_ns: int = 0
     self._mapd_comfort_bias_active: bool = False
+    self._mapd_low_biased_fusion_active: bool = False
+    self._mapd_fusion_roundabout_hint: bool = False
+    self._mapd_fusion_blend: float = 0.0
 
     self._last_info_log_ms: int = 0
     self._enabled_since_ms: int = 0
@@ -514,6 +524,9 @@ class LongController:
     planner_curve_active: bool = False,
   ) -> Optional[float]:
     self._mapd_comfort_bias_active = False
+    self._mapd_low_biased_fusion_active = False
+    self._mapd_fusion_roundabout_hint = False
+    self._mapd_fusion_blend = 0.0
     if int(self._mapd_last_ns) <= 0:
       return None
     if (int(now_ns) - int(self._mapd_last_ns)) >= int(self._MAPD_FRESH_NS):
@@ -544,9 +557,12 @@ class LongController:
       and float(planner_near_ms) <= (low_ms + float(self._MAPD_DISAGREE_PLANNER_CONFIRM_MS))
     )
     steering_confirms_low = abs(float(current_angle_deg)) >= float(self._MAPD_DISAGREE_STEER_CONFIRM_DEG)
-    strong_map_only_disagreement = bool(
+    map_is_low = bool(
       self._mapd_map_curve_ms is not None
-      and float(self._mapd_map_curve_ms) <= (low_ms + 0.05)
+      and abs(float(self._mapd_map_curve_ms) - low_ms) <= 0.05
+    )
+    strong_map_only_disagreement = bool(
+      map_is_low
       and disagreement_ms >= float(self._MAPD_MAP_ONLY_STRONG_DISAGREE_MS)
     )
     if not strong_map_only_disagreement:
@@ -557,8 +573,28 @@ class LongController:
     elif planner_confirms_low and steering_confirms_low and abs(float(current_angle_deg)) >= float(self._MAPD_MAP_ONLY_LOW_CONF_STEER_DEG):
       return low_ms
 
+    reference_ok = bool(reference_ms is not None and float(reference_ms) > 0.1)
+    roundabout_hint = bool(
+      map_is_low
+      and reference_ok
+      and low_ms <= float(self._MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS)
+      and low_ms <= (float(reference_ms) - float(self._ROUNDABOUT_MAP_ONLY_MIN_DROP_MS))
+    )
+    if roundabout_hint:
+      blend = float(self._MAPD_FUSION_BLEND_ROUNDABOUT)
+    elif disagreement_ms <= float(self._MAPD_FUSION_SMALL_DISAGREE_MS):
+      blend = float(self._MAPD_FUSION_BLEND_SMALL)
+    elif disagreement_ms <= float(self._MAPD_FUSION_LARGE_DISAGREE_MS):
+      blend = float(self._MAPD_FUSION_BLEND_MEDIUM)
+    else:
+      blend = float(self._MAPD_FUSION_BLEND_LARGE)
+
+    fused_ms = float(low_ms + (disagreement_ms * blend))
     self._mapd_comfort_bias_active = True
-    return float(low_ms + (disagreement_ms * float(self._MAPD_DISAGREE_COMFORT_BLEND)))
+    self._mapd_low_biased_fusion_active = True
+    self._mapd_fusion_roundabout_hint = bool(roundabout_hint)
+    self._mapd_fusion_blend = float(blend)
+    return float(fused_ms)
 
   def _curve_specific_mapd_sources(self, *, now_ns: int) -> tuple[Optional[float], Optional[float]]:
     if int(self._mapd_last_ns) <= 0:
@@ -2512,6 +2548,12 @@ class LongController:
         return float(lat_target_ms), lat_reason
       return None, "no_curve"
 
+    map_low_disagrees_with_vision = bool(
+      map_supports
+      and raw_map_ms is not None
+      and raw_vision_ms is not None
+      and float(raw_vision_ms) > (float(raw_map_ms) + float(self._ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS))
+    )
     map_only_low = bool(
       map_supports
       and not vision_supports
@@ -2520,13 +2562,22 @@ class LongController:
         or float(raw_vision_ms) > (float(raw_map_ms) + float(self._ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS))
       )
     )
-    map_only_roundabout = bool(
-      map_only_low
+    map_roundabout_hint = bool(
+      map_supports
       and raw_map_ms is not None
       and float(v_ego_ms) <= float(self._ROUNDABOUT_MAP_ONLY_MAX_EGO_MS)
       and float(raw_map_ms) <= float(self._ROUNDABOUT_MAP_ONLY_MAX_TARGET_MS)
       and float(raw_map_ms) <= (float(reference_ms) - float(self._ROUNDABOUT_MAP_ONLY_MIN_DROP_MS))
       and float(raw_map_ms) <= (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS))
+    )
+    map_only_roundabout = bool(
+      map_roundabout_hint
+      and (
+        map_only_low
+        or map_low_disagrees_with_vision
+        or bool(steer_busy)
+        or bool(self._lat_limit_saturated)
+      )
     )
 
     if map_only_low and not (
@@ -2554,7 +2605,14 @@ class LongController:
     )
     if curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
       curve_candidates.append(float(curve_specific_ms))
-      owner_parts.append("mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd")
+      if bool(self._mapd_low_biased_fusion_active):
+        blend_pct = int(round(float(self._mapd_fusion_blend) * 100.0))
+        if bool(self._mapd_fusion_roundabout_hint):
+          owner_parts.append(f"roundabout_fused[b{blend_pct}]")
+        else:
+          owner_parts.append(f"curve_fused[map+vision:b{blend_pct}]")
+      else:
+        owner_parts.append("mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd")
 
     if bool(map_only_roundabout) and raw_map_ms is not None:
       curve_candidates.append(float(raw_map_ms) + float(self._CURVE_FORCE_ENTRY_TARGET_OFFSET_MS))
@@ -2565,14 +2623,15 @@ class LongController:
 
     target_ms = float(min(curve_candidates))
     comfort_bias_ms = float(self._CURVE_CONFIRMED_COMFORT_BIAS_MS)
-    if bool(map_only_roundabout):
+    if bool(self._mapd_low_biased_fusion_active):
+      comfort_bias_ms = min(float(comfort_bias_ms), 0.75 * CV.MPH_TO_MS)
+      if bool(self._mapd_fusion_roundabout_hint) or bool(map_only_roundabout):
+        comfort_bias_ms = min(float(comfort_bias_ms), 0.25 * CV.MPH_TO_MS)
+    elif bool(map_only_roundabout):
       comfort_bias_ms = min(float(comfort_bias_ms), 0.50 * CV.MPH_TO_MS)
-    elif (
-      raw_map_ms is not None
-      and raw_vision_ms is not None
-      and float(raw_vision_ms) > (float(raw_map_ms) + float(self._ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS))
-    ):
+    elif bool(map_low_disagrees_with_vision):
       comfort_bias_ms += float(self._CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS)
+
     target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
     if float(target_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
       return None, "curve_too_small"
@@ -2788,6 +2847,7 @@ class LongController:
         "hard_entry" in out_src
         or "curve_pre_entry(hard)" in out_src
         or "mapd_roundabout" in str(curve_source)
+        or "roundabout_fused" in str(curve_source)
       )
       if bool(hard_entry_context) and float(v_ego_ms) >= float(self._ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS):
         capped_target_ms = min(float(target_ms), float(self._ROUNDABOUT_HARD_ENTRY_CAP_MS))
