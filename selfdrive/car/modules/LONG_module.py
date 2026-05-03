@@ -65,9 +65,9 @@ class LongController:
   _LEAD_PLANNER_GUARD_MAX_GAP_M = 72.0
 
   _CURVE_ENTRY_PERSIST_MS = 240
-  _CURVE_EXIT_PERSIST_MS = 420
-  _CURVE_EXIT_RECOVERY_MS_PER_S = 3.2
-  _CURVE_HOLD_ENTRY_FREEZE_MS = 900
+  _CURVE_EXIT_PERSIST_MS = 180
+  _CURVE_EXIT_RECOVERY_MS_PER_S = 7.0
+  _CURVE_HOLD_ENTRY_FREEZE_MS = 350
   _CURVE_HOLD_DROP_PERSIST_MS = 260
   _CURVE_HOLD_DROP_RATE_MS_PER_S = 1.8
   _CURVE_HOLD_HARD_DROP_EXTRA_MS = 5.0 * CV.MPH_TO_MS
@@ -75,16 +75,16 @@ class LongController:
   _CURVE_PRE_ENTRY_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
   _CURVE_PRE_ENTRY_PREVIEW_DROP_MS = 5.0 * CV.MPH_TO_MS
   _CURVE_PRE_ENTRY_MIN_RATIO = 0.42
-  _CURVE_MIN_CRUISE_HOLD_MARGIN_MS = 5.0 * CV.MPH_TO_MS
+  _CURVE_MIN_CRUISE_HOLD_MARGIN_MS = 1.0 * CV.MPH_TO_MS
   _CURVE_MAPD_MIN_HOLD_MARGIN_MS = 0.5 * CV.MPH_TO_MS
   _CURVE_HARD_ENTRY_EXTRA_MS = 3.0 * CV.MPH_TO_MS
   _CURVE_RELEASE_NEAR_TARGET_MARGIN_MS = 0.4 * CV.MPH_TO_MS
   _CURVE_HOLD_DROP_DEADBAND_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_FRESH_NS = 1_500_000_000
-  _CURVE_MAPD_RELEASE_PERSIST_MS = 220
-  _CURVE_PLANNER_RELEASE_PERSIST_MS = 180
+  _CURVE_MAPD_RELEASE_PERSIST_MS = 120
+  _CURVE_PLANNER_RELEASE_PERSIST_MS = 120
   _CURVE_PLANNER_RELEASE_MAPD_TOLERANCE_MS = 5.5 * CV.MPH_TO_MS
-  _CURVE_PLANNER_RELEASE_OVERRIDE_MS = 260
+  _CURVE_PLANNER_RELEASE_OVERRIDE_MS = 160
   _LEAD_HOLD_PERSIST_MS = 560
   _LEAD_HOLD_RELEASE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
   _LEAD_OPENING_VREL_MS = 0.12
@@ -106,7 +106,7 @@ class LongController:
   _MAPD_FUSION_BLEND_SMALL = 0.45
   _MAPD_FUSION_BLEND_MEDIUM = 0.35
   _MAPD_FUSION_BLEND_LARGE = 0.25
-  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.20
+  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.35
   _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_PLANNER_CONFIRM_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_STEER_CONFIRM_DEG = 3.5
@@ -192,6 +192,13 @@ class LongController:
   _MAPD_MAP_ONLY_COMFORT_EXTRA_MS = 8.0 * CV.MPH_TO_MS
   _MAPD_MAP_ONLY_COMFORT_FLOOR_MS = 27.0 * CV.MPH_TO_MS
   _MAPD_MAP_ONLY_LOW_CONF_STEER_DEG = 24.0
+  _CURVE_DYNAMIC_CLEAR_PERSIST_MS = 160
+  _CURVE_DYNAMIC_CLEAR_VISION_MARGIN_MS = 3.0 * CV.MPH_TO_MS
+  _CURVE_DYNAMIC_CLEAR_PLANNER_MARGIN_MS = 2.0 * CV.MPH_TO_MS
+  _CURVE_DYNAMIC_CLEAR_MAX_STEER_DEG = 8.0
+  _CURVE_DYNAMIC_CLEAR_MAX_STEER_RATE_DEG = 22.0
+  _ROUNDABOUT_RAW_MAP_STRONG_STEER_DEG = 8.0
+  _ROUNDABOUT_RAW_MAP_STRONG_STEER_RATE_DEG = 22.0
 
 
   _LEAD_STUCK_CANCEL_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
@@ -247,9 +254,9 @@ class LongController:
   _ARBITRATION_CURVE_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EGO_DROP_MS = 1.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EXIT_RELEASE_MS = 650
+  _ARBITRATION_CURVE_EXIT_RELEASE_MS = 240
   _ARBITRATION_CURVE_ENTRY_STEP_MS = 3.2 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EXIT_STEP_MS = 0.75 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_EXIT_STEP_MS = 3.0 * CV.MPH_TO_MS
   _FOLLOW_GAP_DEFAULT_S = 1.30
   _FOLLOW_GAP_MIN_S = 0.70
   _FOLLOW_GAP_MAX_S = 1.90
@@ -333,6 +340,7 @@ class LongController:
     self._curve_hold_last_update_ms: int = 0
     self._curve_mapd_release_candidate_since_ms: int = 0
     self._curve_planner_release_candidate_since_ms: int = 0
+    self._curve_dynamic_release_candidate_since_ms: int = 0
     self._mapd_entry_candidate_since_ms: int = 0
     self._lead_hold_until_ms: int = 0
     self._lead_recently_cleared_until_ms: int = 0
@@ -866,7 +874,7 @@ class LongController:
         candidates.append(val)
     if not candidates:
       return None
-    return float(max(candidates))
+    return float(min(candidates))
 
   def _should_hold_min_cruise_for_curve(self, *, now_ns: int, desired_ms: float, no_lead: bool) -> bool:
     if (not no_lead) or float(desired_ms) >= float(self.MIN_CRUISE_SPEED_MS):
@@ -879,7 +887,10 @@ class LongController:
     if curve_floor_ms is None:
       return False
 
-    return float(curve_floor_ms) >= (float(self.MIN_CRUISE_SPEED_MS) - float(self._CURVE_MAPD_MIN_HOLD_MARGIN_MS))
+    return bool(
+      float(curve_floor_ms) >= (float(self.MIN_CRUISE_SPEED_MS) - float(self._CURVE_MAPD_MIN_HOLD_MARGIN_MS))
+      and float(curve_floor_ms) <= (float(self.MIN_CRUISE_SPEED_MS) + float(self._CURVE_MAPD_MIN_HOLD_MARGIN_MS))
+    )
 
   def _maybe_release_curve_hold_from_mapd(self, *, now_ms: int, now_ns: int, reference_ms: float) -> bool:
     if not self._curve_hold_active:
@@ -926,6 +937,65 @@ class LongController:
       self._reset_curve_hold()
       return True
     return False
+
+
+  def _should_dynamic_curve_release(
+    self,
+    *,
+    now_ms: int,
+    now_ns: int,
+    reference_ms: float,
+    planner_near_ms: float,
+    current_angle_deg: float,
+    steering_rate_deg: float,
+  ) -> bool:
+    if not self._curve_hold_active:
+      self._curve_dynamic_release_candidate_since_ms = 0
+      return False
+
+    reference_ms = float(reference_ms)
+    if reference_ms <= 0.1:
+      self._curve_dynamic_release_candidate_since_ms = 0
+      return False
+
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    map_supports_curve = bool(
+      raw_map_ms is not None
+      and float(raw_map_ms) > 0.1
+      and float(raw_map_ms) < (reference_ms - float(self._CURVE_DYNAMIC_CLEAR_PLANNER_MARGIN_MS))
+    )
+    vision_says_clear = bool(
+      raw_vision_ms is not None
+      and float(raw_vision_ms) >= (reference_ms - float(self._CURVE_DYNAMIC_CLEAR_VISION_MARGIN_MS))
+    )
+    planner_says_clear = bool(
+      float(planner_near_ms) <= 0.1
+      or float(planner_near_ms) >= (reference_ms - float(self._CURVE_DYNAMIC_CLEAR_PLANNER_MARGIN_MS))
+    )
+    steering_is_not_hard = bool(
+      abs(float(current_angle_deg)) <= float(self._CURVE_DYNAMIC_CLEAR_MAX_STEER_DEG)
+      and abs(float(steering_rate_deg)) <= float(self._CURVE_DYNAMIC_CLEAR_MAX_STEER_RATE_DEG)
+    )
+
+    # Revalidate active curve holds every cycle. If map no longer advertises a low
+    # curve and vision/planner are clear, release the held target instead of
+    # dragging the set speed through the next straight.
+    should_release = bool(
+      (not map_supports_curve)
+      and vision_says_clear
+      and (planner_says_clear or steering_is_not_hard)
+      and not bool(self._lat_limit_saturated)
+    )
+
+    if not should_release:
+      self._curve_dynamic_release_candidate_since_ms = 0
+      return False
+
+    if int(self._curve_dynamic_release_candidate_since_ms) == 0:
+      self._curve_dynamic_release_candidate_since_ms = int(now_ms)
+      return False
+
+    return (int(now_ms) - int(self._curve_dynamic_release_candidate_since_ms)) >= int(self._CURVE_DYNAMIC_CLEAR_PERSIST_MS)
 
   def _should_force_curve_release(
     self,
@@ -974,6 +1044,7 @@ class LongController:
     self._curve_hold_last_update_ms = 0
     self._curve_mapd_release_candidate_since_ms = 0
     self._curve_planner_release_candidate_since_ms = 0
+    self._curve_dynamic_release_candidate_since_ms = 0
     self._mapd_entry_candidate_since_ms = 0
     self._curve_force_entry_candidate_since_ms = 0
     self._curve_steer_limit_hold_until_ms = 0
@@ -2619,8 +2690,17 @@ class LongController:
         owner_parts.append("mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd")
 
     if bool(map_only_roundabout) and raw_map_ms is not None:
-      curve_candidates.append(float(raw_map_ms) + float(self._CURVE_FORCE_ENTRY_TARGET_OFFSET_MS))
-      owner_parts.append("mapd_roundabout")
+      raw_map_strongly_confirmed = bool(
+        bool(self._lat_limit_saturated)
+        or abs(float(current_angle_deg)) >= float(self._ROUNDABOUT_RAW_MAP_STRONG_STEER_DEG)
+        or abs(float(steering_rate_deg)) >= float(self._ROUNDABOUT_RAW_MAP_STRONG_STEER_RATE_DEG)
+        or bool(vision_supports)
+      )
+      if raw_map_strongly_confirmed:
+        curve_candidates.append(float(raw_map_ms) + float(self._CURVE_FORCE_ENTRY_TARGET_OFFSET_MS))
+        owner_parts.append("mapd_roundabout")
+      else:
+        owner_parts.append("mapd_roundabout_soft")
 
     if not curve_candidates:
       return None, "no_curve_target"
@@ -3228,21 +3308,38 @@ class LongController:
             v_ego_ms=float(v_ego_ms),
           )
 
-          if self._should_force_curve_release(
+          current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
+          steering_rate_deg = abs(float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0))
+          dynamic_curve_release = self._should_dynamic_curve_release(
+            now_ms=int(now),
+            now_ns=now_ns,
+            reference_ms=float(reference_ms),
+            planner_near_ms=float(planner_near_ms),
+            current_angle_deg=float(current_angle_deg),
+            steering_rate_deg=float(steering_rate_deg),
+          )
+          planner_curve_release = self._should_force_curve_release(
             now_ms=int(now),
             now_ns=now_ns,
             reference_ms=float(reference_ms),
             planner_last_ms=float(planner_last_ms),
             planner_near_ms=float(planner_near_ms),
-          ):
+          )
+          if dynamic_curve_release or planner_curve_release:
             self._reset_curve_hold()
             self._curve_recent_clear_until_ms = int(now) + int(self._CURVE_REENTRY_BLOCK_MS)
             desired_ms = float(base_target_ms)
-            src = f"{src}+curve_clear(planner)"
+            src = f"{src}+curve_clear({'dynamic' if dynamic_curve_release else 'planner'})"
           else:
-            current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
+            stale_no_lead_planner_curve = self._stale_planner_lead_without_live_lead(
+              now_ms=int(now),
+              base_target_ms=float(reference_ms),
+              planner_ms=float(planner_near_ms),
+              v_ego_ms=float(v_ego_ms),
+            )
             planner_curve_active = bool(
               lp_fresh
+              and not bool(stale_no_lead_planner_curve)
               and float(planner_near_ms) < (float(reference_ms) - float(self._PLANNER_CURVE_ENTRY_MARGIN_MS))
             )
             mapd_target_ms = self._mapd_curve_active_target_ms(
@@ -3392,8 +3489,15 @@ class LongController:
             float(self._CURVE_RELEASE_NEAR_TARGET_MARGIN_MS),
             float(self._PLANNER_CURVE_ENTRY_MARGIN_MS),
           )
-          planner_curve_active = float(planner_near_ms) < (
-            float(resume_ceiling_ms) - float(planner_curve_margin_ms)
+          stale_no_lead_planner_curve = self._stale_planner_lead_without_live_lead(
+            now_ms=int(now),
+            base_target_ms=float(resume_ceiling_ms),
+            planner_ms=float(planner_near_ms),
+            v_ego_ms=float(v_ego_ms),
+          )
+          planner_curve_active = bool(
+            not bool(stale_no_lead_planner_curve)
+            and float(planner_near_ms) < (float(resume_ceiling_ms) - float(planner_curve_margin_ms))
           )
 
           if (
@@ -3426,8 +3530,10 @@ class LongController:
 
           if curve_candidates_ms:
             raw_curve_target_ms = float(min(curve_candidates_ms))
-          else:
+          elif bool(planner_curve_active):
             raw_curve_target_ms = float(planner_near_ms)
+          else:
+            raw_curve_target_ms = float(resume_ceiling_ms)
 
           curve_target_ms, curve_state = self._stabilize_no_lead_curve_target(
             now_ms=int(now),
@@ -3435,17 +3541,26 @@ class LongController:
             reference_ms=float(resume_ceiling_ms),
           )
 
-          if self._should_force_curve_release(
+          dynamic_curve_release = self._should_dynamic_curve_release(
+            now_ms=int(now),
+            now_ns=now_ns,
+            reference_ms=float(resume_ceiling_ms),
+            planner_near_ms=float(planner_near_ms),
+            current_angle_deg=float(current_angle_deg),
+            steering_rate_deg=float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0),
+          )
+          planner_curve_release = self._should_force_curve_release(
             now_ms=int(now),
             now_ns=now_ns,
             reference_ms=float(resume_ceiling_ms),
             planner_last_ms=float(planner_last_ms),
             planner_near_ms=float(planner_near_ms),
-          ):
+          )
+          if dynamic_curve_release or planner_curve_release:
             self._reset_curve_hold()
             self._curve_recent_clear_until_ms = int(now) + int(self._CURVE_REENTRY_BLOCK_MS)
             curve_target_ms = float(resume_ceiling_ms)
-            curve_state = "curve_clear(planner)"
+            curve_state = f"curve_clear({'dynamic' if dynamic_curve_release else 'planner'})"
 
           if curve_owner_parts:
             curve_state = f"{curve_state}|{'+'.join(curve_owner_parts)}"
