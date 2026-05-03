@@ -157,8 +157,12 @@ class CarSpecificEvents:
         events.add(EventName.buttonCancel)
 
     # Handle permanent and temporary steering faults
+    reverse_or_wrong_gear = bool(
+      CS.gearShifter == GearShifter.reverse
+      or (CS.gearShifter != GearShifter.drive and CS.gearShifter not in CI.DRIVABLE_GEARS)
+    )
     self.steering_unpressed = 0 if CS.steeringPressed else self.steering_unpressed + 1
-    if CS.steerFaultTemporary:
+    if CS.steerFaultTemporary and not reverse_or_wrong_gear:
       if CS.steeringPressed and (not CS_prev.steerFaultTemporary or self.no_steer_warning):
         self.no_steer_warning = True
       else:

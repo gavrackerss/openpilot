@@ -37,6 +37,7 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 EventName = log.OnroadEvent.EventName
 ButtonType = car.CarState.ButtonEvent.Type
+GearShifter = car.CarState.GearShifter
 SafetyModel = car.CarParams.SafetyModel
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
@@ -452,11 +453,16 @@ class SelfdriveD:
     # we want to disengage openpilot. However the status from the panda goes through
     # another socket other than the CAN messages and one can arrive earlier than the other.
     # Therefore we allow a mismatch for two samples, then we trigger the disengagement.
-    if not self.enabled:
+    reverse_or_wrong_gear = bool(
+      CS.gearShifter == GearShifter.reverse
+      or CS.gearShifter not in (GearShifter.drive, GearShifter.sport, GearShifter.low, GearShifter.eco)
+    )
+
+    if not self.enabled or reverse_or_wrong_gear:
       self.mismatch_counter = 0
 
-    # All pandas not in silent mode must have controlsAllowed when openpilot is enabled
-    if self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
+    # Panda safety drops controlsAllowed immediately on reverse; carState arrives on another socket.
+    if self.enabled and not reverse_or_wrong_gear and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
            if ps.safetyModel not in IGNORED_SAFETY_MODES):
       self.mismatch_counter += 1
 

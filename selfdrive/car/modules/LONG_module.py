@@ -7,7 +7,7 @@ making lead-follow recovery smoother and less sticky:
 
 v61 adds an explicit final LONG arbitration state machine.
 
-v65 keeps stalk follow timing and adds low-biased map/vision curve fusion with slow curve release.
+v66 keeps v65 curve fusion and fixes reverse-safe disengage plus lead-release ownership before stale curve/planner holds.
 
 - lead critical / lead follow / curve pre-entry / curve active / curve exit / cruise sync are resolved in one final pass
 - stale lead/planner ownership is expired before it can hold speed down after curves
@@ -254,16 +254,20 @@ class LongController:
   _FOLLOW_GAP_MIN_S = 0.70
   _FOLLOW_GAP_MAX_S = 1.90
   _FOLLOW_GAP_STALK_STEP_S = 0.20
-  _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.55
+  _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.35
   _FOLLOW_GAP_RELEASE_VREL_MS = -0.20
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 2.0 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 1.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
-  _FAR_LEAD_RELEASE_MIN_GAP_S = 3.10
-  _FAR_LEAD_RELEASE_MARGIN_S = 0.85
-  _FAR_LEAD_RELEASE_MIN_DREL_M = 36.0
+  _FAR_LEAD_RELEASE_MIN_GAP_S = 2.55
+  _FAR_LEAD_RELEASE_MARGIN_S = 0.45
+  _FAR_LEAD_RELEASE_MIN_DREL_M = 30.0
   _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.85
   _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.90
+  _FAR_LEAD_SOFT_RELEASE_MARGIN_S = 0.35
+  _FAR_LEAD_SOFT_RELEASE_MIN_DREL_M = 24.0
+  _FAR_LEAD_SOFT_RELEASE_MAX_CLOSING_MS = -0.50
+  _FAR_LEAD_SOFT_RELEASE_MAX_DECEL_MS2 = -0.65
   _FAR_LEAD_STRONG_CLOSING_MS = -1.15
   _FAR_LEAD_STRONG_DECEL_MS2 = -1.10
   _ROUNDABOUT_HARD_ENTRY_CAP_MS = 31.0 * CV.MPH_TO_MS
@@ -2706,6 +2710,19 @@ class LongController:
       and float(self._lead_vrel) > float(self._FAR_LEAD_RELEASE_MAX_CLOSING_MS)
       and float(self._lp_a_target) > float(self._FAR_LEAD_RELEASE_MAX_DECEL_MS2)
     )
+    soft_lead_release_gap_s = max(
+      float(desired_follow_s) + float(self._FAR_LEAD_SOFT_RELEASE_MARGIN_S),
+      float(self._FOLLOW_GAP_MIN_S) + 0.45,
+    )
+    lead_soft_release = bool(
+      live_lead
+      and not bool(far_lead_release)
+      and float(lead_time_gap_s) >= float(soft_lead_release_gap_s)
+      and float(self._lead_drel) >= float(self._FAR_LEAD_SOFT_RELEASE_MIN_DREL_M)
+      and not bool(strong_lead_closing)
+      and float(self._lead_vrel) > float(self._FAR_LEAD_SOFT_RELEASE_MAX_CLOSING_MS)
+      and float(self._lp_a_target) > float(self._FAR_LEAD_SOFT_RELEASE_MAX_DECEL_MS2)
+    )
 
     stale_planner_lead = self._stale_planner_lead_without_live_lead(
       now_ms=int(now_ms),
@@ -2713,7 +2730,7 @@ class LongController:
       planner_ms=float(planner_last_ms),
       v_ego_ms=float(v_ego_ms),
     )
-    planner_lead_valid = bool(bool(lp_fresh) and bool(self._lp_has_lead) and not stale_planner_lead and not bool(far_lead_release))
+    planner_lead_valid = bool(bool(lp_fresh) and bool(self._lp_has_lead) and not stale_planner_lead and not bool(far_lead_release) and not bool(lead_soft_release))
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_below_reference = bool(
       float(planner_floor_ms) > 0.1
@@ -2732,13 +2749,14 @@ class LongController:
       current_angle_deg=float(current_angle_deg),
       steering_rate_deg=float(steering_rate_deg),
       lp_fresh=bool(lp_fresh),
-      live_lead_context=bool(live_lead or planner_lead_valid or int(now_ms) <= int(self._lead_recently_cleared_until_ms)),
+      live_lead_context=bool((live_lead or planner_lead_valid or int(now_ms) <= int(self._lead_recently_cleared_until_ms)) and not bool(far_lead_release) and not bool(lead_soft_release)),
     )
     curve_confirmed = curve_candidate_ms is not None
 
     lead_critical = bool(
       live_lead
       and not bool(far_lead_release)
+      and not bool(lead_soft_release)
       and not lead_opening_clear
       and (
         lead_time_gap_s <= float(lead_critical_gap_s)
@@ -2753,6 +2771,7 @@ class LongController:
     lead_follow = bool(
       live_lead
       and not bool(far_lead_release)
+      and not bool(lead_soft_release)
       and not lead_opening_clear
       and (
         lead_critical
@@ -2771,6 +2790,7 @@ class LongController:
       live_lead
       and (
         bool(far_lead_release)
+        or bool(lead_soft_release)
         or (
           not lead_closing
           and (
@@ -2814,6 +2834,26 @@ class LongController:
         out_src = f"{out_src}+lead_flap_block_resume"
       out_src = f"{out_src}+state[LEAD_FOLLOW]"
       return float(out_ms), out_src
+
+    if lead_clear_for_recovery:
+      self._reset_lead_hold()
+      self._reset_lead_curve_hold()
+      self._reset_curve_hold()
+      self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+      self._arbitration_curve_target_ms = 0.0
+      if bool(far_lead_release):
+        out_ms = max(float(out_ms), float(reference_ms))
+        out_src = f"{out_src}+lead_far_release"
+      elif bool(lead_soft_release):
+        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+        out_src = f"{out_src}+lead_soft_release"
+      elif (
+        ("planner[lead" in out_src or "lead_hold" in out_src or "lead_guard" in out_src)
+        and float(out_ms) < (float(reference_ms) - float(self._CLEAR_NO_LEAD_STALE_OWNER_DROP_MS))
+      ):
+        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+        out_src = f"{out_src}+lead_gap_release"
+      return float(out_ms), f"{out_src}+state[CRUISE_SYNC]+lead_release[g={lead_time_gap_s:.1f}/tf={desired_follow_s:.1f}]"
 
     no_live_lead = bool(not live_lead and not planner_lead_valid)
     stale_low_target = bool(
@@ -2953,6 +2993,9 @@ class LongController:
       if bool(far_lead_release):
         out_ms = max(float(out_ms), float(reference_ms))
         out_src = f"{out_src}+lead_far_release"
+      elif bool(lead_soft_release):
+        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+        out_src = f"{out_src}+lead_soft_release"
       elif (
         ("planner[lead" in out_src or "lead_hold" in out_src or "lead_guard" in out_src)
         and float(out_ms) < (float(reference_ms) - float(self._CLEAR_NO_LEAD_STALE_OWNER_DROP_MS))
