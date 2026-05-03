@@ -506,6 +506,7 @@ def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str,
         "curve_fused",
         "roundabout_fused",
         "mapd_roundabout",
+        "mapd_roundabout_soft",
         "roundabout_cap",
         "lat_sat_hard_cap",
         "steer_busy_hard",
@@ -582,6 +583,15 @@ class SwaglogTail:
     "lat_sat_hard_cap",
     "steer_busy_hard",
     "lead_far_release",
+    "lead_soft_release",
+    "lead_observer",
+    "curve_clear(dynamic)",
+    "curve_clear(vision)",
+    "CURVE_EXIT_RELEASE",
+    "mapd_vision_clear",
+    "mapd_roundabout_soft",
+    "low_speed_floor",
+    "high_speed_drop_clamp",
     "map_only_unconfirmed",
   )
 
@@ -834,7 +844,11 @@ def main() -> int:
           "mapd_roundabout",
           "lat_sat_hard_cap",
           "steer_busy_hard",
+          "curve_clear(vision)",
+          "mapd_vision_clear",
+          "planner_lead_ignored",
           "lead_far_release",
+          "lead_soft_release",
         )
       ):
         interesting = True

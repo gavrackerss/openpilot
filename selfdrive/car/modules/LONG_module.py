@@ -7,12 +7,12 @@ making lead-follow recovery smoother and less sticky:
 
 v61 adds an explicit final LONG arbitration state machine.
 
-v68 keeps the reverse-safe fix, makes curve release more dynamic, and de-weights stale lead/map-only curve owners.
+v69 keeps the reverse-safe fix and switches curve/lead behavior toward a release-biased final arbiter.
 
-- lead critical / lead follow / curve pre-entry / curve active / curve exit / cruise sync are resolved in one final pass
-- stale lead/planner ownership is expired before it can hold speed down after curves
-- map-only curve caps are ignored when vision/steering/planner do not confirm the bend
-- curve exit releases cleanly so speed can resume after roundabouts
+- stale lead/planner ownership is neutralized before curve arbitration
+- mapd is advisory unless vision/steering/planner confirm a real curve
+- curve targets are clamped by speed context to avoid low-speed/high-speed over-slowing
+- curve exit releases immediately when current inputs no longer confirm the hold
 
 XNOR architecture adaptations retained:
 - 5 Hz cruise stalk pacing
@@ -65,9 +65,9 @@ class LongController:
   _LEAD_PLANNER_GUARD_MAX_GAP_M = 72.0
 
   _CURVE_ENTRY_PERSIST_MS = 240
-  _CURVE_EXIT_PERSIST_MS = 80
-  _CURVE_EXIT_RECOVERY_MS_PER_S = 18.0
-  _CURVE_HOLD_ENTRY_FREEZE_MS = 140
+  _CURVE_EXIT_PERSIST_MS = 40
+  _CURVE_EXIT_RECOVERY_MS_PER_S = 30.0
+  _CURVE_HOLD_ENTRY_FREEZE_MS = 80
   _CURVE_HOLD_DROP_PERSIST_MS = 320
   _CURVE_HOLD_DROP_RATE_MS_PER_S = 1.8
   _CURVE_HOLD_HARD_DROP_EXTRA_MS = 5.0 * CV.MPH_TO_MS
@@ -75,14 +75,14 @@ class LongController:
   _CURVE_PRE_ENTRY_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
   _CURVE_PRE_ENTRY_PREVIEW_DROP_MS = 5.0 * CV.MPH_TO_MS
   _CURVE_PRE_ENTRY_MIN_RATIO = 0.42
-  _CURVE_MIN_CRUISE_HOLD_MARGIN_MS = 1.0 * CV.MPH_TO_MS
+  _CURVE_MIN_CRUISE_HOLD_MARGIN_MS = 0.0 * CV.MPH_TO_MS
   _CURVE_MAPD_MIN_HOLD_MARGIN_MS = 0.5 * CV.MPH_TO_MS
   _CURVE_HARD_ENTRY_EXTRA_MS = 3.0 * CV.MPH_TO_MS
-  _CURVE_RELEASE_NEAR_TARGET_MARGIN_MS = 0.4 * CV.MPH_TO_MS
+  _CURVE_RELEASE_NEAR_TARGET_MARGIN_MS = 0.15 * CV.MPH_TO_MS
   _CURVE_HOLD_DROP_DEADBAND_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_FRESH_NS = 1_500_000_000
-  _CURVE_MAPD_RELEASE_PERSIST_MS = 120
-  _CURVE_PLANNER_RELEASE_PERSIST_MS = 120
+  _CURVE_MAPD_RELEASE_PERSIST_MS = 40
+  _CURVE_PLANNER_RELEASE_PERSIST_MS = 40
   _CURVE_PLANNER_RELEASE_MAPD_TOLERANCE_MS = 5.5 * CV.MPH_TO_MS
   _CURVE_PLANNER_RELEASE_OVERRIDE_MS = 160
   _LEAD_HOLD_PERSIST_MS = 560
@@ -103,13 +103,13 @@ class LongController:
   _MAPD_DISAGREE_COMFORT_BLEND = 0.35
   _MAPD_FUSION_SMALL_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
   _MAPD_FUSION_LARGE_DISAGREE_MS = 16.0 * CV.MPH_TO_MS
-  _MAPD_FUSION_BLEND_SMALL = 0.55
-  _MAPD_FUSION_BLEND_MEDIUM = 0.50
-  _MAPD_FUSION_BLEND_LARGE = 0.45
-  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.50
+  _MAPD_FUSION_BLEND_SMALL = 0.75
+  _MAPD_FUSION_BLEND_MEDIUM = 0.70
+  _MAPD_FUSION_BLEND_LARGE = 0.65
+  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.60
   _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_PLANNER_CONFIRM_MS = 2.0 * CV.MPH_TO_MS
-  _MAPD_DISAGREE_STEER_CONFIRM_DEG = 3.5
+  _MAPD_DISAGREE_STEER_CONFIRM_DEG = 5.5
   _MAPD_ONLY_HIGHWAY_SPEED_MS = 55.0 * CV.MPH_TO_MS
   _MAPD_ONLY_HIGHWAY_MAX_DROP_MS = 24.0 * CV.MPH_TO_MS
   _MAPD_ONLY_HIGHWAY_MAX_PLANNER_DELTA_MS = 16.0 * CV.MPH_TO_MS
@@ -247,34 +247,34 @@ class LongController:
   _LOW_SPEED_LEAD_BLOCK_OPENING_VREL_MS = 1.0
   _LOW_SPEED_LEAD_BLOCK_TARGET_MARGIN_MS = 0.35 * CV.MPH_TO_MS
   _ARBITRATION_LEAD_CRITICAL_TIME_GAP_S = 1.35
-  _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 1.55
+  _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 1.25
   _ARBITRATION_LEAD_CLOSING_MS = -0.15
   _ARBITRATION_LEAD_PLANNER_DROP_MS = 1.5 * CV.MPH_TO_MS
   _ARBITRATION_STALE_LOW_TARGET_DROP_MS = 3.0 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EGO_DROP_MS = 1.0 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_EGO_DROP_MS = 2.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EXIT_RELEASE_MS = 80
-  _ARBITRATION_CURVE_ENTRY_STEP_MS = 3.2 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EXIT_STEP_MS = 8.0 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_EXIT_RELEASE_MS = 40
+  _ARBITRATION_CURVE_ENTRY_STEP_MS = 5.0 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_EXIT_STEP_MS = 25.0 * CV.MPH_TO_MS
   _FOLLOW_GAP_DEFAULT_S = 1.30
   _FOLLOW_GAP_MIN_S = 0.70
   _FOLLOW_GAP_MAX_S = 1.90
   _FOLLOW_GAP_STALK_STEP_S = 0.20
   _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.35
   _FOLLOW_GAP_RELEASE_VREL_MS = -0.20
-  _CURVE_CONFIRMED_COMFORT_BIAS_MS = 2.0 * CV.MPH_TO_MS
+  _CURVE_CONFIRMED_COMFORT_BIAS_MS = 3.5 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 1.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
   _FAR_LEAD_RELEASE_MIN_GAP_S = 2.55
-  _FAR_LEAD_RELEASE_MARGIN_S = 0.45
-  _FAR_LEAD_RELEASE_MIN_DREL_M = 30.0
+  _FAR_LEAD_RELEASE_MARGIN_S = 0.25
+  _FAR_LEAD_RELEASE_MIN_DREL_M = 24.0
   _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.85
-  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.90
-  _FAR_LEAD_SOFT_RELEASE_MARGIN_S = 0.20
-  _FAR_LEAD_SOFT_RELEASE_MIN_DREL_M = 18.0
+  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -1.75
+  _FAR_LEAD_SOFT_RELEASE_MARGIN_S = 0.10
+  _FAR_LEAD_SOFT_RELEASE_MIN_DREL_M = 14.0
   _FAR_LEAD_SOFT_RELEASE_MAX_CLOSING_MS = -0.85
-  _FAR_LEAD_SOFT_RELEASE_MAX_DECEL_MS2 = -0.95
+  _FAR_LEAD_SOFT_RELEASE_MAX_DECEL_MS2 = -1.75
   _FAR_LEAD_STRONG_CLOSING_MS = -1.15
   _FAR_LEAD_STRONG_DECEL_MS2 = -1.10
   _ROUNDABOUT_HARD_ENTRY_CAP_MS = 31.0 * CV.MPH_TO_MS
@@ -282,9 +282,17 @@ class LongController:
   _ROUNDABOUT_MAP_ONLY_MAX_EGO_MS = 48.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_CAP_MS = 38.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_DROP_MS = 3.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_MIN_SPEED_MS = 28.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_CAP_MS = 46.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_DROP_MS = 2.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_MIN_SPEED_MS = 38.0 * CV.MPH_TO_MS
+
+  _ARB_LOW_SPEED_VISION_CLEAR_MS = 35.0 * CV.MPH_TO_MS
+  _ARB_LOW_SPEED_CURVE_FLOOR_MS = 26.0 * CV.MPH_TO_MS
+  _ARB_LOW_SPEED_CURVE_FLOOR_MAX_EGO_MS = 30.0 * CV.MPH_TO_MS
+  _ARB_HIGH_SPEED_CURVE_MIN_REF_MS = 45.0 * CV.MPH_TO_MS
+  _ARB_HIGH_SPEED_CURVE_MAX_DROP_MS = 11.0 * CV.MPH_TO_MS
+  _ARB_STRONG_STEER_CONFIRM_DEG = 7.0
+  _ARB_STRONG_STEER_CONFIRM_RATE_DEG = 24.0
 
 
   _LEAD_CLOSE_CANCEL_MIN_SPEED_MS = 5.0 * CV.MPH_TO_MS
@@ -2779,6 +2787,45 @@ class LongController:
       comfort_bias_ms += float(self._CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS)
 
     target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
+
+    strong_lateral_confirm = bool(
+      bool(self._lat_limit_saturated)
+      or abs(float(current_angle_deg)) >= float(self._ARB_STRONG_STEER_CONFIRM_DEG)
+      or abs(float(steering_rate_deg)) >= float(self._ARB_STRONG_STEER_CONFIRM_RATE_DEG)
+    )
+    dual_source_agree = bool(
+      raw_map_ms is not None
+      and raw_vision_ms is not None
+      and abs(float(raw_map_ms) - float(raw_vision_ms)) <= float(self._MAPD_DUAL_SOURCE_AGREE_MS)
+    )
+    planner_confirms_target = bool(
+      planner_curve_active
+      and float(planner_near_ms) > 0.1
+      and float(planner_near_ms) <= (float(target_ms) + float(self._MAPD_DISAGREE_PLANNER_CONFIRM_MS))
+    )
+    hard_curve_confirmed = bool(strong_lateral_confirm or dual_source_agree or planner_confirms_target)
+
+    low_speed_vision_clear = bool(
+      float(v_ego_ms) <= float(self._ARB_LOW_SPEED_CURVE_FLOOR_MAX_EGO_MS)
+      and raw_vision_ms is not None
+      and float(raw_vision_ms) >= float(self._ARB_LOW_SPEED_VISION_CLEAR_MS)
+      and not bool(hard_curve_confirmed)
+    )
+    if low_speed_vision_clear and float(target_ms) < float(self._ARB_LOW_SPEED_CURVE_FLOOR_MS):
+      target_ms = min(float(reference_ms), float(self._ARB_LOW_SPEED_CURVE_FLOOR_MS))
+      owner_parts.append("low_speed_floor")
+
+    high_speed_drop_clamp = bool(
+      float(reference_ms) >= float(self._ARB_HIGH_SPEED_CURVE_MIN_REF_MS)
+      and not bool(hard_curve_confirmed)
+      and not bool(map_only_roundabout and strong_lateral_confirm)
+    )
+    if high_speed_drop_clamp:
+      clamped_ms = max(float(target_ms), float(reference_ms) - float(self._ARB_HIGH_SPEED_CURVE_MAX_DROP_MS))
+      if float(clamped_ms) > float(target_ms):
+        target_ms = float(clamped_ms)
+        owner_parts.append("high_speed_drop_clamp")
+
     if float(target_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
       return None, "curve_too_small"
     if float(target_ms) > (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS)) and not steer_busy:
@@ -2823,7 +2870,7 @@ class LongController:
     )
     lead_follow_gap_s = max(float(self._ARBITRATION_LEAD_FOLLOW_TIME_GAP_S), float(desired_follow_s))
     lead_release_gap_s = min(
-      float(self._FOLLOW_GAP_MAX_S) + 0.75,
+      float(self._FOLLOW_GAP_MAX_S) + 0.35,
       float(desired_follow_s) + float(self._FOLLOW_GAP_RELEASE_HYSTERESIS_S),
     )
     lead_opening_clear = bool(
@@ -2890,8 +2937,23 @@ class LongController:
       and float(planner_floor_ms) < (float(reference_ms) - float(self._ARBITRATION_LEAD_PLANNER_DROP_MS))
     )
 
+    planner_src_is_lead_owner = any(
+      token in str(src)
+      for token in (
+        "planner[lead",
+        "lead_hold",
+        "lead_guard",
+        "lead_present_hold",
+        "lead_curve_hold",
+      )
+    )
+    if not bool(live_lead) and bool(planner_src_is_lead_owner):
+      stale_planner_lead = True
+      planner_floor_ms = float(reference_ms)
+      planner_below_reference = False
+
     planner_curve_input_ms = float(planner_near_ms)
-    if stale_planner_lead and not live_lead:
+    if (stale_planner_lead and not live_lead) or (not bool(live_lead) and bool(planner_src_is_lead_owner)):
       planner_curve_input_ms = float(reference_ms)
 
     curve_candidate_ms, curve_source = self._arbitration_curve_candidate(
@@ -3157,9 +3219,11 @@ class LongController:
         out_src = f"{out_src}+lead_gap_release"
       return float(out_ms), f"{out_src}+state[CRUISE_SYNC]+lead_release[g={lead_time_gap_s:.1f}/tf={desired_follow_s:.1f}]"
 
-    self._set_arbitration_state(state="LEAD_FOLLOW", now_ms=int(now_ms))
-    out_ms = min(float(out_ms), max(0.0, float(current_set_ms) if float(current_set_ms) > 0.1 else float(v_ego_ms)))
-    return float(out_ms), f"{out_src}+state[LEAD_FOLLOW_HOLD:g={lead_time_gap_s:.1f}/tf={desired_follow_s:.1f}]"
+    self._reset_lead_hold()
+    self._reset_lead_curve_hold()
+    self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+    out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+    return float(out_ms), f"{out_src}+state[CRUISE_SYNC]+lead_observer[g={lead_time_gap_s:.1f}/tf={desired_follow_s:.1f}]"
 
 
   def _planner_drag_reasons(self, *, now_ms: int, base_target_ms: float, planner_ms: float, current_set_ms: float, v_ego_ms: float) -> list[str]:
