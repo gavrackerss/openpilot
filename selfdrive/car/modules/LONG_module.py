@@ -304,6 +304,15 @@ class LongController:
   _ARB_WEAK_CURVE_MAX_DROP_MS = 2.0 * CV.MPH_TO_MS
   _ARB_WEAK_CURVE_MIN_CONTROL_DROP_MS = 3.5 * CV.MPH_TO_MS
   _ARB_LOW_SPEED_LAT_TRIM_MIN_DROP_MS = 0.8 * CV.MPH_TO_MS
+  _ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
+  _ARBITRATION_PLANNER_RESCUE_MIN_SPEED_MS = 18.0 * CV.MPH_TO_MS
+  _ARBITRATION_PLANNER_RESCUE_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
+  _ARBITRATION_PLANNER_RESCUE_STEER_DEG = 4.0
+  _ARBITRATION_PLANNER_RESCUE_STEER_RATE_DEG = 12.0
+  _ROUNDABOUT_PLANNER_APPROACH_CAP_MS = 24.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_PLANNER_APPROACH_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS = 26.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
   _ARB_STRONG_STEER_CONFIRM_DEG = 7.0
   _ARB_STRONG_STEER_CONFIRM_RATE_DEG = 24.0
 
@@ -2657,11 +2666,18 @@ class LongController:
     steering_rate_deg: float,
     lp_fresh: bool,
     live_lead_context: bool,
+    planner_curve_rescue: bool = False,
+    roundabout_approach_rescue: bool = False,
   ) -> tuple[Optional[float], str]:
+    planner_entry_drop_ms = (
+      float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS)
+      if bool(planner_curve_rescue)
+      else float(self._ARBITRATION_CURVE_MIN_DROP_MS)
+    )
     planner_curve_active = bool(
       bool(lp_fresh)
       and float(planner_near_ms) > 0.1
-      and float(planner_near_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
+      and float(planner_near_ms) < (float(reference_ms) - float(planner_entry_drop_ms))
     )
 
     raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
@@ -2777,7 +2793,7 @@ class LongController:
 
     if planner_curve_active:
       curve_candidates.append(float(planner_near_ms))
-      owner_parts.append("planner")
+      owner_parts.append("planner_rescue" if bool(planner_curve_rescue) else "planner")
 
     curve_specific_ms = None
     if not bool(vision_clear_map_conflict):
@@ -2836,7 +2852,14 @@ class LongController:
       and float(raw_map_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
       and float(v_ego_ms) >= float(self._ROUNDABOUT_EARLY_MIN_EGO_MS)
     )
-    if bool(early_roundabout_cap) and float(target_ms) > float(self._ROUNDABOUT_EARLY_CAP_MS):
+    planner_roundabout_cap = bool(
+      bool(roundabout_approach_rescue)
+      and float(v_ego_ms) >= float(self._ROUNDABOUT_PLANNER_APPROACH_MIN_EGO_MS)
+    )
+    if bool(planner_roundabout_cap) and float(target_ms) > float(self._ROUNDABOUT_PLANNER_APPROACH_CAP_MS):
+      target_ms = float(self._ROUNDABOUT_PLANNER_APPROACH_CAP_MS)
+      owner_parts.append("roundabout_planner_early_cap")
+    elif bool(early_roundabout_cap) and float(target_ms) > float(self._ROUNDABOUT_EARLY_CAP_MS):
       target_ms = float(self._ROUNDABOUT_EARLY_CAP_MS)
       owner_parts.append("roundabout_early_cap")
 
@@ -2858,6 +2881,8 @@ class LongController:
     hard_curve_confirmed = bool(strong_lateral_confirm or dual_source_agree or planner_confirms_target)
     weak_curve_advisory = bool(
       not bool(hard_curve_confirmed)
+      and not bool(planner_curve_rescue)
+      and not bool(roundabout_approach_rescue)
       and not bool(map_only_roundabout)
       and not bool(live_lead_context)
       and (
@@ -3026,13 +3051,56 @@ class LongController:
         "lead_curve_hold",
       )
     )
-    if not bool(live_lead) and bool(planner_src_is_lead_owner):
+
+    raw_map_for_rescue_ms, raw_vision_for_rescue_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    steer_rescue = bool(
+      abs(float(current_angle_deg)) >= float(self._ARBITRATION_PLANNER_RESCUE_STEER_DEG)
+      or abs(float(steering_rate_deg)) >= float(self._ARBITRATION_PLANNER_RESCUE_STEER_RATE_DEG)
+      or bool(self._lat_limit_saturated)
+    )
+    planner_curve_rescue = bool(
+      bool(lp_fresh)
+      and bool(planner_src_is_lead_owner)
+      and float(v_ego_ms) >= float(self._ARBITRATION_PLANNER_RESCUE_MIN_SPEED_MS)
+      and float(planner_near_ms) > 0.1
+      and float(planner_near_ms) <= float(self._ARBITRATION_PLANNER_RESCUE_MAX_TARGET_MS)
+      and float(planner_near_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
+      and (
+        bool(steer_rescue)
+        or (
+          raw_vision_for_rescue_ms is not None
+          and float(raw_vision_for_rescue_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
+        )
+        or (
+          raw_map_for_rescue_ms is not None
+          and float(raw_map_for_rescue_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
+        )
+      )
+    )
+    roundabout_approach_rescue = bool(
+      bool(planner_curve_rescue)
+      and float(v_ego_ms) >= float(self._ROUNDABOUT_PLANNER_APPROACH_MIN_EGO_MS)
+      and float(planner_near_ms) <= float(self._ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS)
+      and float(planner_near_ms) < (float(reference_ms) - float(self._ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS))
+      and (
+        bool(steer_rescue)
+        or (
+          raw_map_for_rescue_ms is not None
+          and float(raw_map_for_rescue_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
+        )
+      )
+    )
+
+    if not bool(live_lead) and bool(planner_src_is_lead_owner) and not bool(planner_curve_rescue):
       stale_planner_lead = True
       planner_floor_ms = float(reference_ms)
       planner_below_reference = False
 
     planner_curve_input_ms = float(planner_near_ms)
-    if (stale_planner_lead and not live_lead) or (not bool(live_lead) and bool(planner_src_is_lead_owner)):
+    if (
+      ((stale_planner_lead and not live_lead) or (not bool(live_lead) and bool(planner_src_is_lead_owner)))
+      and not bool(planner_curve_rescue)
+    ):
       planner_curve_input_ms = float(reference_ms)
 
     curve_candidate_ms, curve_source = self._arbitration_curve_candidate(
@@ -3044,6 +3112,8 @@ class LongController:
       steering_rate_deg=float(steering_rate_deg),
       lp_fresh=bool(lp_fresh),
       live_lead_context=bool((live_lead or planner_lead_valid or int(now_ms) <= int(self._lead_recently_cleared_until_ms)) and not bool(far_lead_release) and not bool(lead_soft_release)),
+      planner_curve_rescue=bool(planner_curve_rescue),
+      roundabout_approach_rescue=bool(roundabout_approach_rescue),
     )
     curve_confirmed = curve_candidate_ms is not None
 
@@ -3129,7 +3199,7 @@ class LongController:
       out_src = f"{out_src}+state[LEAD_FOLLOW]"
       return float(out_ms), out_src
 
-    if lead_clear_for_recovery:
+    if lead_clear_for_recovery and not bool(curve_confirmed):
       self._reset_lead_hold()
       self._reset_lead_curve_hold()
       self._reset_curve_hold()
@@ -3260,7 +3330,8 @@ class LongController:
       return float(out_ms), out_src
 
     previous_curve_state = str(self._arbitration_state).startswith("CURVE")
-    if previous_curve_state and no_live_lead:
+    curve_exit_clear = bool(no_live_lead or (not bool(lead_follow) and not bool(lead_critical)))
+    if previous_curve_state and bool(curve_exit_clear):
       self._reset_curve_hold()
       if (int(now_ms) - int(self._arbitration_state_since_ms)) >= int(self._ARBITRATION_CURVE_EXIT_RELEASE_MS):
         self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
@@ -3342,6 +3413,7 @@ class LongController:
     if lead_clear_for_recovery:
       self._reset_lead_hold()
       self._reset_lead_curve_hold()
+      self._reset_curve_hold()
       self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
       self._arbitration_curve_target_ms = 0.0
       if bool(far_lead_release):
@@ -3360,7 +3432,9 @@ class LongController:
 
     self._reset_lead_hold()
     self._reset_lead_curve_hold()
+    self._reset_curve_hold()
     self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+    self._arbitration_curve_target_ms = 0.0
     out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
     return float(out_ms), f"{out_src}+state[CRUISE_SYNC]+lead_observer[g={lead_time_gap_s:.1f}/tf={desired_follow_s:.1f}]"
 
