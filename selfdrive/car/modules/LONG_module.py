@@ -7,12 +7,12 @@ making lead-follow recovery smoother and less sticky:
 
 v61 adds an explicit final LONG arbitration state machine.
 
-v69 keeps the reverse-safe fix and switches curve/lead behavior toward a release-biased final arbiter.
+v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, and lateral-load bands.
 
-- stale lead/planner ownership is neutralized before curve arbitration
-- mapd is advisory unless vision/steering/planner confirm a real curve
-- curve targets are clamped by speed context to avoid low-speed/high-speed over-slowing
-- curve exit releases immediately when current inputs no longer confirm the hold
+- weak/light curves are advisory and release existing curve ownership
+- confirmed map/vision curves use a slightly less vision-heavy fusion
+- lateral-load trim starts at 22 mph without restoring the old low-speed anchor
+- curve exit still releases immediately when current inputs no longer confirm the hold
 
 XNOR architecture adaptations retained:
 - 5 Hz cruise stalk pacing
@@ -103,10 +103,10 @@ class LongController:
   _MAPD_DISAGREE_COMFORT_BLEND = 0.35
   _MAPD_FUSION_SMALL_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
   _MAPD_FUSION_LARGE_DISAGREE_MS = 16.0 * CV.MPH_TO_MS
-  _MAPD_FUSION_BLEND_SMALL = 0.75
-  _MAPD_FUSION_BLEND_MEDIUM = 0.70
-  _MAPD_FUSION_BLEND_LARGE = 0.65
-  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.60
+  _MAPD_FUSION_BLEND_SMALL = 0.68
+  _MAPD_FUSION_BLEND_MEDIUM = 0.62
+  _MAPD_FUSION_BLEND_LARGE = 0.58
+  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.55
   _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_PLANNER_CONFIRM_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_STEER_CONFIRM_DEG = 5.5
@@ -285,12 +285,19 @@ class LongController:
   _LAT_SAT_HARD_CAP_MS = 46.0 * CV.MPH_TO_MS
   _LAT_SAT_HARD_DROP_MS = 2.0 * CV.MPH_TO_MS
   _LAT_SAT_HARD_MIN_SPEED_MS = 38.0 * CV.MPH_TO_MS
+  _LOW_SPEED_LAT_TRIM_MIN_SPEED_MS = 22.0 * CV.MPH_TO_MS
+  _LOW_SPEED_LAT_TRIM_MAX_SPEED_MS = 38.0 * CV.MPH_TO_MS
+  _LOW_SPEED_LAT_TRIM_DROP_MS = 2.5 * CV.MPH_TO_MS
+  _LOW_SPEED_LAT_TRIM_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
 
   _ARB_LOW_SPEED_VISION_CLEAR_MS = 35.0 * CV.MPH_TO_MS
   _ARB_LOW_SPEED_CURVE_FLOOR_MS = 26.0 * CV.MPH_TO_MS
   _ARB_LOW_SPEED_CURVE_FLOOR_MAX_EGO_MS = 30.0 * CV.MPH_TO_MS
   _ARB_HIGH_SPEED_CURVE_MIN_REF_MS = 45.0 * CV.MPH_TO_MS
   _ARB_HIGH_SPEED_CURVE_MAX_DROP_MS = 11.0 * CV.MPH_TO_MS
+  _ARB_WEAK_CURVE_MAX_DROP_MS = 2.0 * CV.MPH_TO_MS
+  _ARB_WEAK_CURVE_MIN_CONTROL_DROP_MS = 3.5 * CV.MPH_TO_MS
+  _ARB_LOW_SPEED_LAT_TRIM_MIN_DROP_MS = 0.8 * CV.MPH_TO_MS
   _ARB_STRONG_STEER_CONFIRM_DEG = 7.0
   _ARB_STRONG_STEER_CONFIRM_RATE_DEG = 24.0
 
@@ -2675,8 +2682,28 @@ class LongController:
     if bool(vision_clear_map_conflict):
       map_supports = False
 
+    low_speed_lat_load = bool(
+      (bool(self._lat_limit_saturated) or bool(steer_busy))
+      and float(v_ego_ms) >= float(self._LOW_SPEED_LAT_TRIM_MIN_SPEED_MS)
+      and float(v_ego_ms) < float(self._LOW_SPEED_LAT_TRIM_MAX_SPEED_MS)
+    )
+    high_speed_lat_load = bool(
+      (bool(self._lat_limit_saturated) or bool(steer_busy))
+      and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS)
+    )
+
     if not (planner_curve_active or map_supports or vision_supports):
-      if (bool(self._lat_limit_saturated) or bool(steer_busy)) and float(v_ego_ms) > float(self._LAT_SAT_HARD_MIN_SPEED_MS):
+      if bool(low_speed_lat_load):
+        lat_target_ms = max(
+          float(self.MIN_CRUISE_SPEED_MS),
+          min(
+            float(self._LOW_SPEED_LAT_TRIM_MAX_TARGET_MS),
+            float(v_ego_ms) - float(self._LOW_SPEED_LAT_TRIM_DROP_MS),
+          ),
+        )
+        lat_reason = "low_speed_lat_trim[lat_sat]" if bool(self._lat_limit_saturated) else "low_speed_lat_trim[steer_busy]"
+        return float(lat_target_ms), lat_reason
+      if bool(high_speed_lat_load):
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
           min(
@@ -2804,6 +2831,26 @@ class LongController:
       and float(planner_near_ms) <= (float(target_ms) + float(self._MAPD_DISAGREE_PLANNER_CONFIRM_MS))
     )
     hard_curve_confirmed = bool(strong_lateral_confirm or dual_source_agree or planner_confirms_target)
+    weak_curve_advisory = bool(
+      not bool(hard_curve_confirmed)
+      and not bool(map_only_roundabout)
+      and not bool(live_lead_context)
+      and (
+        bool(map_only_low)
+        or bool(map_low_disagrees_with_vision)
+        or (
+          bool(planner_curve_active)
+          and not bool(map_supports)
+          and not bool(vision_supports)
+        )
+      )
+    )
+    if bool(weak_curve_advisory):
+      weak_target_ms = max(float(target_ms), float(reference_ms) - float(self._ARB_WEAK_CURVE_MAX_DROP_MS))
+      if float(weak_target_ms) > (float(reference_ms) - float(self._ARB_WEAK_CURVE_MIN_CONTROL_DROP_MS)):
+        return None, "weak_curve_advisory"
+      target_ms = float(weak_target_ms)
+      owner_parts.append("weak_curve_trim")
 
     low_speed_vision_clear = bool(
       float(v_ego_ms) <= float(self._ARB_LOW_SPEED_CURVE_FLOOR_MAX_EGO_MS)
@@ -2826,12 +2873,19 @@ class LongController:
         target_ms = float(clamped_ms)
         owner_parts.append("high_speed_drop_clamp")
 
-    if float(target_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
+    owner_src = "+".join(owner_parts) if owner_parts else "curve"
+    min_control_drop_ms = float(self._ARBITRATION_CURVE_MIN_DROP_MS)
+    ego_drop_ms = float(self._ARBITRATION_CURVE_EGO_DROP_MS)
+    if "low_speed_lat_trim" in str(owner_src):
+      min_control_drop_ms = float(self._ARB_LOW_SPEED_LAT_TRIM_MIN_DROP_MS)
+      ego_drop_ms = min(float(ego_drop_ms), float(self._ARB_LOW_SPEED_LAT_TRIM_MIN_DROP_MS))
+
+    if float(target_ms) > (float(reference_ms) - float(min_control_drop_ms)):
       return None, "curve_too_small"
-    if float(target_ms) > (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS)) and not steer_busy:
+    if float(target_ms) > (float(v_ego_ms) - float(ego_drop_ms)) and not steer_busy:
       return None, "curve_not_urgent"
 
-    return float(target_ms), "+".join(owner_parts) if owner_parts else "curve"
+    return float(target_ms), str(owner_src)
 
 
   def _arbitrate_target_state_machine(
@@ -3092,7 +3146,11 @@ class LongController:
       out_src = f"{out_src}+state[RECOVERY]+stale_lead_release"
       return float(out_ms), out_src
 
-    if curve_confirmed and float(curve_candidate_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
+    curve_control_min_drop_ms = float(self._ARBITRATION_CURVE_MIN_DROP_MS)
+    if "low_speed_lat_trim" in str(curve_source):
+      curve_control_min_drop_ms = float(self._ARB_LOW_SPEED_LAT_TRIM_MIN_DROP_MS)
+
+    if curve_confirmed and float(curve_candidate_ms) < (float(reference_ms) - float(curve_control_min_drop_ms)):
       state = "CURVE_ACTIVE" if str(self._arbitration_state).startswith("CURVE") else "CURVE_PRE_ENTRY"
       previous_update_ms = int(self._arbitration_last_update_ms)
       previous_curve_ms = float(self._arbitration_curve_target_ms) if float(self._arbitration_curve_target_ms) > 0.1 else float(out_ms)
@@ -3130,6 +3188,22 @@ class LongController:
         if float(capped_target_ms) < float(target_ms):
           target_ms = float(capped_target_ms)
           curve_source = f"{curve_source}+lat_sat_hard_cap"
+      elif (
+        bool(lat_sat_context)
+        and float(v_ego_ms) >= float(self._LOW_SPEED_LAT_TRIM_MIN_SPEED_MS)
+        and float(v_ego_ms) < float(self._LOW_SPEED_LAT_TRIM_MAX_SPEED_MS)
+      ):
+        capped_target_ms = max(
+          float(self.MIN_CRUISE_SPEED_MS),
+          min(
+            float(target_ms),
+            float(self._LOW_SPEED_LAT_TRIM_MAX_TARGET_MS),
+            float(v_ego_ms) - float(self._LOW_SPEED_LAT_TRIM_DROP_MS),
+          ),
+        )
+        if float(capped_target_ms) < float(target_ms):
+          target_ms = float(capped_target_ms)
+          curve_source = f"{curve_source}+low_speed_lat_trim"
 
       dt_s = 0.2
       if previous_update_ms > 0:
@@ -3164,6 +3238,30 @@ class LongController:
     if no_live_lead:
       self._reset_lead_hold()
       self._reset_lead_curve_hold()
+      weak_curve_owner = bool(
+        "weak_curve_advisory" in str(curve_source)
+        and any(
+          token in str(out_src)
+          for token in (
+            "curve_hold",
+            "curve_pre_entry",
+            "lp_near[",
+            "mapd_cap",
+            "force_entry",
+            "curve_accel_block",
+            "roundabout_cap",
+            "lat_sat_hard_cap",
+          )
+        )
+      )
+      if bool(weak_curve_owner) and float(out_ms) < (float(reference_ms) - float(self._CLEAR_NO_LEAD_STALE_OWNER_DROP_MS)):
+        self._reset_curve_hold()
+        self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+        self._arbitration_curve_target_ms = 0.0
+        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+        out_src = f"{out_src}+state[CRUISE_SYNC]+weak_curve_release"
+        return float(out_ms), out_src
+
       stale_clear_owner = bool(
         "planner[lead" in out_src
         or "lead_hold" in out_src
