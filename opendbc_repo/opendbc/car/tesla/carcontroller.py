@@ -28,6 +28,7 @@ from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.lateral import apply_std_steer_angle_limits
 
 from opendbc.car.tesla.teslacan import TeslaCAN
+from opendbc.car.tesla.coopsteering import CoopSteeringController
 try:
   from opendbc.car.tesla.teslacan_legacy import TeslaCANLegacy as TeslaCANLegacy
 except ImportError:
@@ -72,6 +73,7 @@ class CarController(CarControllerBase):
     self._cached_adjust_acc_with_speed_limit = False
     self._cached_speed_limit_offset_uom = 0.0
     self._cached_speed_limit_use_relative = False
+    self._cached_vtb_enabled = False
     self._params_last_read_frame = -100000
 
     self._op659_prev_btn = 0
@@ -99,6 +101,8 @@ class CarController(CarControllerBase):
     self._virtual_turn_last_send_frame = -100000
     self._hud_prev_enabled = False
     self._telemetry_prev_active = False
+    self._vtb_controller = None
+    self._vtb_last_diag_ms = 0
 
     self._roadworks_main_pulls_ms: list[int] = []
     self._roadworks_toggle_latch_until_ms = 0
@@ -123,6 +127,13 @@ class CarController(CarControllerBase):
       self._action_can_by_bus = {int(CANBUS.party): self.tesla_can}
       self._body_controls_can = self.tesla_can
 
+    if CP.carFingerprint not in LEGACY_CARS:
+      try:
+        self._vtb_controller = CoopSteeringController(getattr(self, "VM", VM))
+      except Exception:
+        cloudlog.exception("xnor VTB init failed")
+        self._vtb_controller = None
+
   def _refresh_cached_params(self) -> None:
     if (self.frame - self._params_last_read_frame) < 50:
       return
@@ -135,6 +146,7 @@ class CarController(CarControllerBase):
     )
     self._cached_adjust_acc_with_speed_limit = bool(self.params.get_bool("TinklaAdjustAccWithSpeedLimit"))
     self._cached_speed_limit_use_relative = bool(self.params.get_bool("TinklaSpeedLimitUseRelative"))
+    self._cached_vtb_enabled = bool(self.params.get_bool("XnorTeslaVirtualTorqueBlending"))
     try:
       self._cached_speed_limit_offset_uom = float(self.params.get("TinklaSpeedLimitOffset", encoding="utf-8") or "0")
     except Exception:
@@ -580,6 +592,16 @@ class CarController(CarControllerBase):
     cs_out = getattr(CS, "out", None)
     out_steer_pressed = bool(getattr(cs_out, "steeringPressed", False)) if cs_out is not None else False
     human_control = bool(getattr(CS, "human_control", False) or out_steer_pressed)
+    hard_human_control = bool(
+      (float(getattr(CS, "hands_on_level", 0.0) or 0.0) >= 3.0) or
+      (bool(getattr(cs_out, "steeringDisengage", False)) if cs_out is not None else False)
+    )
+    vtb_enabled = bool(
+      self._cached_vtb_enabled and
+      self._vtb_controller is not None and
+      self.CP.carFingerprint not in LEGACY_CARS
+    )
+    human_lateral_block = bool(hard_human_control if vtb_enabled else human_control)
     steer_inhibit = bool(
       (bool(getattr(cs_out, "steerFaultTemporary", False)) if cs_out is not None else False) or
       (bool(getattr(cs_out, "steerFaultPermanent", False)) if cs_out is not None else False) or
@@ -605,7 +627,7 @@ class CarController(CarControllerBase):
       bool(CC.latActive) and
       autopilot_disabled and
       (not CS.out.cruiseState.standstill) and
-      (not human_control) and
+      (not human_lateral_block) and
       (not steer_inhibit)
     )
 
@@ -619,7 +641,7 @@ class CarController(CarControllerBase):
 
     # Steering (50Hz)
     if self.frame % 2 == 0:
-      if (not lat_active) or human_control or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
+      if (not lat_active) or human_lateral_block or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
         apply_angle = float(CS.out.steeringAngleDeg)
       else:
         desired_angle = self._lane_positioned_target_angle(
@@ -649,6 +671,21 @@ class CarController(CarControllerBase):
         ))
 
       self.apply_angle_last = float(apply_angle)
+      send_angle = float(self.apply_angle_last)
+      send_lat_active = bool(lat_active)
+      control_type = 1
+
+      if vtb_enabled:
+        try:
+          vtb_data = self._vtb_controller.update(send_angle, send_lat_active, CS)
+          send_angle = float(vtb_data.steeringAngleDeg)
+          send_lat_active = bool(vtb_data.lat_active)
+          control_type = int(vtb_data.control_type)
+        except Exception:
+          cloudlog.exception("xnor VTB update failed")
+          send_angle = float(self.apply_angle_last)
+          send_lat_active = bool(lat_active)
+          control_type = 1
 
       if self.CP.carFingerprint in LEGACY_CARS:
         counter = (self.frame // 2) % 16
@@ -657,7 +694,7 @@ class CarController(CarControllerBase):
         )
       else:
         can_sends.append(
-          self.tesla_can.create_steering_control(self.apply_angle_last, lat_active)
+          self.tesla_can.create_steering_control(send_angle, send_lat_active, control_type)
         )
 
     # EPS allow (legacy)

@@ -106,8 +106,8 @@ class LongController:
   _MAPD_FUSION_BLEND_SMALL = 0.68
   _MAPD_FUSION_BLEND_MEDIUM = 0.62
   _MAPD_FUSION_BLEND_LARGE = 0.58
-  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.55
-  _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
+  _MAPD_FUSION_BLEND_ROUNDABOUT = 0.40
+  _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 32.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_PLANNER_CONFIRM_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_STEER_CONFIRM_DEG = 5.5
   _MAPD_ONLY_HIGHWAY_SPEED_MS = 55.0 * CV.MPH_TO_MS
@@ -277,8 +277,8 @@ class LongController:
   _FAR_LEAD_SOFT_RELEASE_MAX_DECEL_MS2 = -1.75
   _FAR_LEAD_STRONG_CLOSING_MS = -1.15
   _FAR_LEAD_STRONG_DECEL_MS2 = -1.10
-  _ROUNDABOUT_HARD_ENTRY_CAP_MS = 31.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS = 24.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_HARD_ENTRY_CAP_MS = 28.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MAX_EGO_MS = 48.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
@@ -287,8 +287,14 @@ class LongController:
   _LAT_SAT_HARD_MIN_SPEED_MS = 38.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_MIN_SPEED_MS = 22.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_MAX_SPEED_MS = 38.0 * CV.MPH_TO_MS
-  _LOW_SPEED_LAT_TRIM_DROP_MS = 2.5 * CV.MPH_TO_MS
+  _LOW_SPEED_LAT_TRIM_DROP_MS = 2.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
+  _LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS = 4.0 * CV.MPH_TO_MS
+  _LOW_SPEED_LAT_TRIM_RELEASE_STEER_DEG = 6.0
+  _LOW_SPEED_LAT_TRIM_RELEASE_STEER_RATE_DEG = 18.0
+  _ROUNDABOUT_EARLY_CAP_MS = 28.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EARLY_MIN_EGO_MS = 18.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EARLY_MAX_MAP_MS = 18.0 * CV.MPH_TO_MS
 
   _ARB_LOW_SPEED_VISION_CLEAR_MS = 35.0 * CV.MPH_TO_MS
   _ARB_LOW_SPEED_CURVE_FLOOR_MS = 26.0 * CV.MPH_TO_MS
@@ -2687,13 +2693,20 @@ class LongController:
       and float(v_ego_ms) >= float(self._LOW_SPEED_LAT_TRIM_MIN_SPEED_MS)
       and float(v_ego_ms) < float(self._LOW_SPEED_LAT_TRIM_MAX_SPEED_MS)
     )
+    low_speed_lat_release_clear = bool(
+      raw_vision_ms is not None
+      and float(raw_vision_ms) >= (float(reference_ms) - float(self._LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS))
+      and not bool(self._lat_limit_saturated)
+      and abs(float(current_angle_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_DEG)
+      and abs(float(steering_rate_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_RATE_DEG)
+    )
     high_speed_lat_load = bool(
       (bool(self._lat_limit_saturated) or bool(steer_busy))
       and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS)
     )
 
     if not (planner_curve_active or map_supports or vision_supports):
-      if bool(low_speed_lat_load):
+      if bool(low_speed_lat_load) and not bool(low_speed_lat_release_clear):
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
           min(
@@ -2703,6 +2716,8 @@ class LongController:
         )
         lat_reason = "low_speed_lat_trim[lat_sat]" if bool(self._lat_limit_saturated) else "low_speed_lat_trim[steer_busy]"
         return float(lat_target_ms), lat_reason
+      if bool(low_speed_lat_load) and bool(low_speed_lat_release_clear):
+        return None, "low_speed_lat_release"
       if bool(high_speed_lat_load):
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -2814,6 +2829,16 @@ class LongController:
       comfort_bias_ms += float(self._CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS)
 
     target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
+
+    early_roundabout_cap = bool(
+      bool(map_roundabout_hint)
+      and raw_map_ms is not None
+      and float(raw_map_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
+      and float(v_ego_ms) >= float(self._ROUNDABOUT_EARLY_MIN_EGO_MS)
+    )
+    if bool(early_roundabout_cap) and float(target_ms) > float(self._ROUNDABOUT_EARLY_CAP_MS):
+      target_ms = float(self._ROUNDABOUT_EARLY_CAP_MS)
+      owner_parts.append("roundabout_early_cap")
 
     strong_lateral_confirm = bool(
       bool(self._lat_limit_saturated)
@@ -3176,6 +3201,14 @@ class LongController:
         or "curve_steer_limit_hold" in out_src
         or "lat_sat" in str(curve_source)
       )
+      raw_map_for_trim_ms, raw_vision_for_trim_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+      low_speed_lat_release_clear = bool(
+        raw_vision_for_trim_ms is not None
+        and float(raw_vision_for_trim_ms) >= (float(reference_ms) - float(self._LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS))
+        and not bool(self._lat_limit_saturated)
+        and abs(float(current_angle_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_DEG)
+        and abs(float(steering_rate_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_RATE_DEG)
+      )
       if bool(lat_sat_context) and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS):
         capped_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -3192,6 +3225,7 @@ class LongController:
         bool(lat_sat_context)
         and float(v_ego_ms) >= float(self._LOW_SPEED_LAT_TRIM_MIN_SPEED_MS)
         and float(v_ego_ms) < float(self._LOW_SPEED_LAT_TRIM_MAX_SPEED_MS)
+        and not bool(low_speed_lat_release_clear)
       ):
         capped_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -3204,6 +3238,13 @@ class LongController:
         if float(capped_target_ms) < float(target_ms):
           target_ms = float(capped_target_ms)
           curve_source = f"{curve_source}+low_speed_lat_trim"
+      elif (
+        bool(lat_sat_context)
+        and float(v_ego_ms) >= float(self._LOW_SPEED_LAT_TRIM_MIN_SPEED_MS)
+        and float(v_ego_ms) < float(self._LOW_SPEED_LAT_TRIM_MAX_SPEED_MS)
+        and bool(low_speed_lat_release_clear)
+      ):
+        curve_source = f"{curve_source}+low_speed_lat_release"
 
       dt_s = 0.2
       if previous_update_ms > 0:

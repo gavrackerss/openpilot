@@ -52,11 +52,12 @@ class TeslaCAN:
     return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
                                stalk_main=stalk_main, stalk_cancel=stalk_cancel)
 
-  def create_steering_control(self, angle, enabled):
+  def create_steering_control(self, angle, enabled, control_type=1):
+    steer_type = int(control_type) if enabled else 0
     values = {
       "DAS_steeringAngleRequest": -angle,
       "DAS_steeringHapticRequest": 0,
-      "DAS_steeringControlType": get_steer_ctrl_type(getattr(self.CP, "flags", 0), 1 if enabled else 0),
+      "DAS_steeringControlType": get_steer_ctrl_type(getattr(self.CP, "flags", 0), steer_type),
     }
     return self.packer.make_can_msg("DAS_steeringControl", CANBUS.party, values)
 
