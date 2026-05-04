@@ -57,6 +57,7 @@ class TeslaLayout(Widget):
       param_toggle_item("Ignore Radar SGU Error", "Ignore SGU hardware fail on Tesla radar.", self._params, "TinklaTeslaRadarIgnoreSGUError"),
       param_toggle_item("Ignore Stock AEB", "Ignore Tesla stock Automatic Emergency Braking events.", self._params, "TinklaIgnoreStockAeb"),
       param_toggle_item("Autopilot Disabled", "Unity mode: steering assist when Tesla Autopilot is disabled.", self._params, "TinklaAutopilotDisabled"),
+      param_toggle_item("Tesla VTB Steering", "Virtual Torque Blending: blends light driver steering input into Tesla angle control for smoother handoff. Default off.", self._params, "XnorTeslaVirtualTorqueBlending"),
       param_toggle_item("Mute Engage/Disengage Sounds", "Disables the start and stop sounds.", self._params, "TinklaDisableStartStopSounds"),
       param_toggle_item("Mute Prompt Sounds", "Disables prompt sounds.", self._params, "TinklaDisablePromptSounds"),
     ]
