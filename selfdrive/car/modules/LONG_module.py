@@ -9,11 +9,12 @@ v61 adds an explicit final LONG arbitration state machine.
 
 v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, and lateral-load bands.
 
-v74 rejects clear/straight-road false positives from stale planner-lead, weak low-speed lat trim, and roundabout fusion.
+v75 adds a candidate/confidence arbiter on top of v74 false-positive guards.
 
 - weak/light curves are advisory and release existing curve ownership
-- confirmed map/vision curves use a slightly less vision-heavy fusion
-- lateral-load trim starts at 22 mph without restoring the old low-speed anchor
+- curve, roundabout, lead/planner, and steering-load candidates are scored before ownership
+- confirmed roundabouts can slow earlier again without reopening weak-straight slowdowns
+- turn-limit / lat-load risk can pre-trim speed before a full curve owner appears
 - curve exit still releases immediately when current inputs no longer confirm the hold
 
 XNOR architecture adaptations retained:
@@ -331,6 +332,24 @@ class LongController:
   _ROUNDABOUT_REJECT_MAP_SOFT_MIN_MS = 22.0 * CV.MPH_TO_MS
   _ARB_STRONG_STEER_CONFIRM_DEG = 7.0
   _ARB_STRONG_STEER_CONFIRM_RATE_DEG = 24.0
+  _CONFIDENCE_CURVE_MIN = 0.62
+  _CONFIDENCE_ROUNDABOUT_MIN = 0.56
+  _CONFIDENCE_TURN_LIMIT_MIN = 0.50
+  _CONFIDENCE_STRAIGHT_REJECT_VISION_MS = 34.0 * CV.MPH_TO_MS
+  _CONFIDENCE_ROUNDABOUT_PERSIST_MS = 260
+  _CONFIDENCE_ROUNDABOUT_STRONG_MAP_MS = 18.0 * CV.MPH_TO_MS
+  _CONFIDENCE_ROUNDABOUT_SOFT_MAP_MS = 24.0 * CV.MPH_TO_MS
+  _CONFIDENCE_ROUNDABOUT_MAX_VISION_CLEAR_MS = 36.0 * CV.MPH_TO_MS
+  _CONFIDENCE_ROUNDABOUT_CAP_MS = 26.0 * CV.MPH_TO_MS
+  _CONFIDENCE_ROUNDABOUT_TARGET_OFFSET_MS = 4.0 * CV.MPH_TO_MS
+  _CONFIDENCE_TURN_LIMIT_MIN_SPEED_MS = 22.0 * CV.MPH_TO_MS
+  _CONFIDENCE_TURN_LIMIT_DROP_MS = 4.0 * CV.MPH_TO_MS
+  _CONFIDENCE_TURN_LIMIT_LAT_DROP_MS = 5.5 * CV.MPH_TO_MS
+  _CONFIDENCE_TURN_LIMIT_CAP_MS = 34.0 * CV.MPH_TO_MS
+  _CONFIDENCE_TURN_LIMIT_STEER_DEG = 5.2
+  _CONFIDENCE_TURN_LIMIT_STEER_RATE_DEG = 16.0
+  _CONFIDENCE_WEAK_STRAIGHT_MAX_SCORE = 0.48
+
 
 
   _LEAD_CLOSE_CANCEL_MIN_SPEED_MS = 5.0 * CV.MPH_TO_MS
@@ -431,6 +450,9 @@ class LongController:
     self._arbitration_last_update_ms: int = 0
     self._arbitration_curve_target_ms: float = 0.0
     self._curve_reentry_block_until_ms: int = 0
+    self._roundabout_confidence_since_ms: int = 0
+    self._roundabout_confidence_last_ms: int = 0
+
 
 
   def _reset_lead_stuck_cancel(self) -> None:
@@ -2758,6 +2780,276 @@ class LongController:
     return not bool(strong_lateral_confirm)
 
 
+  @staticmethod
+  def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+  def _confidence_curve_candidate(
+    self,
+    *,
+    now_ns: int,
+    reference_ms: float,
+    planner_near_ms: float,
+    v_ego_ms: float,
+    current_angle_deg: float,
+    steering_rate_deg: float,
+    lp_fresh: bool,
+    live_lead_context: bool,
+    planner_curve_rescue: bool = False,
+    roundabout_approach_rescue: bool = False,
+    curve_reentry_block: bool = False,
+  ) -> tuple[Optional[float], str]:
+    """Score curve/roundabout/lat candidates before allowing one to own speed.
+
+    This keeps the v74 straight-road false-positive rejection, but avoids the
+    opposite failure where genuine roundabouts and turn-limit events were opened
+    up too much.  Every candidate must carry enough confidence to control.
+    """
+    now_ms = int(now_ns // 1_000_000)
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    steer_busy = self._steer_busy_for_curve(
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+    )
+    strong_lateral = bool(
+      bool(self._lat_limit_saturated)
+      or abs(float(current_angle_deg)) >= float(self._CONFIDENCE_TURN_LIMIT_STEER_DEG)
+      or abs(float(steering_rate_deg)) >= float(self._CONFIDENCE_TURN_LIMIT_STEER_RATE_DEG)
+    )
+
+    planner_curve_active = bool(
+      bool(lp_fresh)
+      and float(planner_near_ms) > 0.1
+      and float(planner_near_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
+    )
+    map_low = bool(
+      raw_map_ms is not None
+      and float(raw_map_ms) > 0.1
+      and float(raw_map_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
+    )
+    vision_low = bool(
+      raw_vision_ms is not None
+      and float(raw_vision_ms) > 0.1
+      and float(raw_vision_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
+    )
+    vision_clear = bool(
+      raw_vision_ms is not None
+      and float(raw_vision_ms) >= min(
+        float(self._CONFIDENCE_STRAIGHT_REJECT_VISION_MS),
+        max(0.0, float(reference_ms) - (3.0 * CV.MPH_TO_MS)),
+      )
+    )
+    map_has_very_low_entry = bool(
+      map_low
+      and raw_map_ms is not None
+      and float(raw_map_ms) <= float(self._CONFIDENCE_ROUNDABOUT_STRONG_MAP_MS)
+      and float(v_ego_ms) >= float(self._ROUNDABOUT_EARLY_MIN_EGO_MS)
+    )
+    map_has_soft_entry = bool(
+      map_low
+      and raw_map_ms is not None
+      and float(raw_map_ms) <= float(self._CONFIDENCE_ROUNDABOUT_SOFT_MAP_MS)
+      and float(raw_map_ms) <= (float(reference_ms) - float(self._ROUNDABOUT_MAP_ONLY_MIN_DROP_MS))
+      and float(raw_map_ms) <= (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS))
+      and float(v_ego_ms) >= float(self._ROUNDABOUT_EARLY_MIN_EGO_MS)
+    )
+
+    if bool(map_has_soft_entry):
+      if int(self._roundabout_confidence_since_ms) <= 0:
+        self._roundabout_confidence_since_ms = int(now_ms)
+      self._roundabout_confidence_last_ms = int(now_ms)
+    elif int(now_ms) - int(self._roundabout_confidence_last_ms) > 500:
+      self._roundabout_confidence_since_ms = 0
+
+    roundabout_persistent = bool(
+      bool(map_has_soft_entry)
+      and int(self._roundabout_confidence_since_ms) > 0
+      and (int(now_ms) - int(self._roundabout_confidence_since_ms)) >= int(self._CONFIDENCE_ROUNDABOUT_PERSIST_MS)
+    )
+    roundabout_entry_confident = bool(
+      bool(map_has_very_low_entry)
+      or bool(roundabout_persistent)
+      or bool(roundabout_approach_rescue)
+    )
+    roundabout_vision_clear_reject = bool(
+      bool(vision_clear)
+      and raw_map_ms is not None
+      and float(raw_map_ms) > float(self._CONFIDENCE_ROUNDABOUT_STRONG_MAP_MS)
+      and not bool(roundabout_persistent)
+      and not bool(strong_lateral)
+    )
+
+    straight_clear = bool(
+      bool(vision_clear)
+      and not bool(map_has_very_low_entry)
+      and not bool(roundabout_entry_confident)
+      and not bool(strong_lateral)
+      and not bool(vision_low)
+    )
+
+    candidates: list[tuple[float, float, str, str]] = []
+
+    def add_candidate(target_ms: float, score: float, kind: str, tag: str) -> None:
+      if not math.isfinite(float(target_ms)) or float(target_ms) <= 0.1:
+        return
+      target = max(float(self.MIN_CRUISE_SPEED_MS), min(float(reference_ms), float(target_ms)))
+      candidates.append((target, self._clamp01(float(score)), str(kind), str(tag)))
+
+    if bool(planner_curve_active):
+      score = 0.42
+      if bool(planner_curve_rescue):
+        score += 0.12
+      if bool(roundabout_approach_rescue):
+        score += 0.12
+      if bool(map_low) or bool(vision_low):
+        score += 0.18
+      if bool(strong_lateral):
+        score += 0.14
+      if bool(live_lead_context):
+        score += 0.06
+      if bool(straight_clear) and not bool(roundabout_entry_confident):
+        score -= 0.30
+      add_candidate(float(planner_near_ms), score, "curve", "planner_rescue" if bool(planner_curve_rescue) else "planner")
+
+    fused_target_ms = None
+    if (bool(map_low) or bool(vision_low)) and not (
+      bool(roundabout_vision_clear_reject) and not bool(map_has_very_low_entry)
+    ):
+      fused_target_ms = self._curve_specific_mapd_target_ms(
+        now_ns=int(now_ns),
+        reference_ms=float(reference_ms),
+        planner_near_ms=float(planner_near_ms) if bool(planner_curve_active) else None,
+        current_angle_deg=float(current_angle_deg),
+        planner_curve_active=bool(planner_curve_active),
+      )
+
+    if fused_target_ms is not None and float(fused_target_ms) > 0.1:
+      score = 0.50
+      if bool(map_low) and bool(vision_low):
+        score += 0.16
+      if raw_map_ms is not None and raw_vision_ms is not None and abs(float(raw_map_ms) - float(raw_vision_ms)) <= float(self._MAPD_DUAL_SOURCE_AGREE_MS):
+        score += 0.12
+      if bool(planner_curve_active):
+        score += 0.10
+      if bool(strong_lateral):
+        score += 0.12
+      if bool(roundabout_entry_confident):
+        score += 0.10
+      if bool(vision_clear) and bool(map_low) and not bool(roundabout_entry_confident) and not bool(strong_lateral):
+        score -= 0.24
+
+      if bool(self._mapd_low_biased_fusion_active):
+        blend_pct = int(round(float(self._mapd_fusion_blend) * 100.0))
+        tag = f"roundabout_fused[b{blend_pct}]" if bool(self._mapd_fusion_roundabout_hint) else f"curve_fused[map+vision:b{blend_pct}]"
+      else:
+        tag = "mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd"
+
+      kind = "roundabout" if bool(roundabout_entry_confident and (bool(map_has_soft_entry) or bool(self._mapd_fusion_roundabout_hint))) else "curve"
+      add_candidate(float(fused_target_ms), score, kind, tag)
+
+    if bool(roundabout_entry_confident) and raw_map_ms is not None and not bool(roundabout_vision_clear_reject):
+      rb_score = 0.62
+      if bool(map_has_very_low_entry):
+        rb_score += 0.12
+      if bool(roundabout_persistent):
+        rb_score += 0.10
+      if bool(vision_low):
+        rb_score += 0.08
+      if bool(strong_lateral):
+        rb_score += 0.08
+      target_ms = min(
+        float(self._CONFIDENCE_ROUNDABOUT_CAP_MS),
+        float(raw_map_ms) + float(self._CONFIDENCE_ROUNDABOUT_TARGET_OFFSET_MS),
+        max(float(self.MIN_CRUISE_SPEED_MS), float(v_ego_ms) - (4.0 * CV.MPH_TO_MS)),
+      )
+      add_candidate(float(target_ms), rb_score, "roundabout", "roundabout_confident")
+
+    if (
+      float(v_ego_ms) >= float(self._CONFIDENCE_TURN_LIMIT_MIN_SPEED_MS)
+      and (bool(self._lat_limit_saturated) or bool(steer_busy))
+    ):
+      turn_score = 0.54
+      if bool(self._lat_limit_saturated):
+        turn_score += 0.20
+      if bool(strong_lateral):
+        turn_score += 0.12
+      if bool(map_low) or bool(vision_low) or bool(planner_curve_active):
+        turn_score += 0.08
+      if bool(vision_clear) and not (bool(map_low) or bool(planner_curve_active) or bool(self._lat_limit_saturated)):
+        turn_score -= 0.14
+
+      turn_drop_ms = float(self._CONFIDENCE_TURN_LIMIT_LAT_DROP_MS if bool(self._lat_limit_saturated) else self._CONFIDENCE_TURN_LIMIT_DROP_MS)
+      turn_target_ms = min(
+        float(self._CONFIDENCE_TURN_LIMIT_CAP_MS),
+        float(v_ego_ms) - float(turn_drop_ms),
+      )
+      add_candidate(float(turn_target_ms), turn_score, "turn", "turn_limit_pretrim" if bool(self._lat_limit_saturated) else "steer_load_pretrim")
+
+    if not candidates:
+      if bool(roundabout_vision_clear_reject):
+        return None, "roundabout_reject_vision_clear"
+      if bool(straight_clear):
+        return None, "candidate_reject[straight_clear]"
+      if bool(curve_reentry_block):
+        return None, "curve_reentry_block"
+      return None, "candidate_reject[none]"
+
+    thresholds = {
+      "roundabout": float(self._CONFIDENCE_ROUNDABOUT_MIN),
+      "turn": float(self._CONFIDENCE_TURN_LIMIT_MIN),
+      "curve": float(self._CONFIDENCE_CURVE_MIN),
+    }
+    accepted: list[tuple[float, float, str, str]] = [
+      c for c in candidates if c[1] >= float(thresholds.get(c[2], self._CONFIDENCE_CURVE_MIN))
+    ]
+
+    if bool(curve_reentry_block) and not bool(self._lat_limit_saturated):
+      accepted = [
+        c for c in accepted
+        if c[2] in ("roundabout", "turn")
+        or (
+          c[1] >= 0.78
+          and float(c[0]) <= (float(reference_ms) - float(self._CURVE_REENTRY_ALLOW_DROP_MS))
+        )
+      ]
+      if not accepted:
+        return None, "curve_reentry_block"
+
+    if bool(straight_clear):
+      accepted = [
+        c for c in accepted
+        if c[2] in ("roundabout", "turn")
+        or c[1] >= 0.76
+      ]
+
+    if not accepted:
+      best = max(candidates, key=lambda x: x[1])
+      if bool(straight_clear) or best[1] <= float(self._CONFIDENCE_WEAK_STRAIGHT_MAX_SCORE):
+        return None, f"candidate_reject[{best[2]}:c{int(round(best[1] * 100.0))}]"
+      return None, f"candidate_low_conf[{best[2]}:c{int(round(best[1] * 100.0))}]"
+
+    # Prefer the lowest accepted target, but surface the confidence/kind that won.
+    winner = min(accepted, key=lambda x: x[0])
+    target_ms, score, kind, tag = winner
+
+    min_control_drop_ms = float(self._ARBITRATION_CURVE_MIN_DROP_MS)
+    ego_drop_ms = float(self._ARBITRATION_CURVE_EGO_DROP_MS)
+    if kind == "turn":
+      min_control_drop_ms = float(self._ARB_LOW_SPEED_LAT_TRIM_MIN_DROP_MS)
+      ego_drop_ms = min(float(ego_drop_ms), float(self._ARB_LOW_SPEED_LAT_TRIM_MIN_DROP_MS))
+    elif kind == "roundabout":
+      min_control_drop_ms = min(float(min_control_drop_ms), 2.5 * CV.MPH_TO_MS)
+      ego_drop_ms = min(float(ego_drop_ms), 1.0 * CV.MPH_TO_MS)
+
+    if float(target_ms) > (float(reference_ms) - float(min_control_drop_ms)):
+      return None, f"candidate_too_small[{kind}:c{int(round(score * 100.0))}]"
+    if float(target_ms) > (float(v_ego_ms) - float(ego_drop_ms)) and not (bool(steer_busy) or kind in ("roundabout", "turn")):
+      return None, f"candidate_not_urgent[{kind}:c{int(round(score * 100.0))}]"
+
+    confidence_src = f"candidate_conf[{kind}:c{int(round(score * 100.0))}]"
+    return float(target_ms), f"{tag}+{confidence_src}"
+
   def _arbitration_curve_candidate(
     self,
     *,
@@ -2773,6 +3065,20 @@ class LongController:
     roundabout_approach_rescue: bool = False,
     curve_reentry_block: bool = False,
   ) -> tuple[Optional[float], str]:
+    return self._confidence_curve_candidate(
+      now_ns=int(now_ns),
+      reference_ms=float(reference_ms),
+      planner_near_ms=float(planner_near_ms),
+      v_ego_ms=float(v_ego_ms),
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+      lp_fresh=bool(lp_fresh),
+      live_lead_context=bool(live_lead_context),
+      planner_curve_rescue=bool(planner_curve_rescue),
+      roundabout_approach_rescue=bool(roundabout_approach_rescue),
+      curve_reentry_block=bool(curve_reentry_block),
+    )
+
     planner_entry_drop_ms = (
       float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS)
       if bool(planner_curve_rescue)
