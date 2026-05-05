@@ -9,6 +9,8 @@ v61 adds an explicit final LONG arbitration state machine.
 
 v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, and lateral-load bands.
 
+v74 rejects clear/straight-road false positives from stale planner-lead, weak low-speed lat trim, and roundabout fusion.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -107,7 +109,7 @@ class LongController:
   _MAPD_FUSION_BLEND_MEDIUM = 0.62
   _MAPD_FUSION_BLEND_LARGE = 0.58
   _MAPD_FUSION_BLEND_ROUNDABOUT = 0.40
-  _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 32.0 * CV.MPH_TO_MS
+  _MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS = 24.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_PLANNER_CONFIRM_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_STEER_CONFIRM_DEG = 5.5
   _MAPD_ONLY_HIGHWAY_SPEED_MS = 55.0 * CV.MPH_TO_MS
@@ -250,6 +252,11 @@ class LongController:
   _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 1.25
   _ARBITRATION_LEAD_CLOSING_MS = -0.15
   _ARBITRATION_LEAD_PLANNER_DROP_MS = 1.5 * CV.MPH_TO_MS
+  _LEAD_STRAIGHT_REJECT_VISION_CLEAR_MS = 34.0 * CV.MPH_TO_MS
+  _LEAD_STRAIGHT_REJECT_MIN_GAP_S = 1.55
+  _LEAD_STRAIGHT_REJECT_MIN_DREL_M = 18.0
+  _LEAD_STRAIGHT_REJECT_MAX_CLOSING_MS = -0.35
+  _LEAD_STRAIGHT_REJECT_MAX_DECEL_MS2 = -0.45
   _ARBITRATION_STALE_LOW_TARGET_DROP_MS = 3.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EGO_DROP_MS = 2.0 * CV.MPH_TO_MS
@@ -292,6 +299,9 @@ class LongController:
   _LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS = 4.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_RELEASE_STEER_DEG = 6.0
   _LOW_SPEED_LAT_TRIM_RELEASE_STEER_RATE_DEG = 18.0
+  _LOW_SPEED_LAT_TRIM_STEER_CONFIRM_DEG = 6.5
+  _LOW_SPEED_LAT_TRIM_STEER_CONFIRM_RATE_DEG = 20.0
+  _LOW_SPEED_LAT_TRIM_VISION_CLEAR_ABS_MS = 34.0 * CV.MPH_TO_MS
   _CURVE_REENTRY_BLOCK_MS = 1800
   _CURVE_REENTRY_BLOCK_VISION_CLEAR_MS = 32.0 * CV.MPH_TO_MS
   _CURVE_REENTRY_BLOCK_MAP_CONFIRM_MS = 22.0 * CV.MPH_TO_MS
@@ -317,6 +327,8 @@ class LongController:
   _ROUNDABOUT_PLANNER_APPROACH_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
   _ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS = 26.0 * CV.MPH_TO_MS
   _ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_REJECT_VISION_CLEAR_MS = 34.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_REJECT_MAP_SOFT_MIN_MS = 22.0 * CV.MPH_TO_MS
   _ARB_STRONG_STEER_CONFIRM_DEG = 7.0
   _ARB_STRONG_STEER_CONFIRM_RATE_DEG = 24.0
 
@@ -2195,6 +2207,13 @@ class LongController:
     if self._lead_is_opening_clear(base_target_ms=max(float(current_set_ms), float(desired_ms)), v_ego_ms=float(v_ego_ms)):
       return float(desired_ms), False
 
+    # v74: do not let a mild/flickery low-speed lead block become a straight-road speed anchor.
+    genuinely_close = float(self._lead_drel) <= float(self._LOW_SPEED_LEAD_BLOCK_MIN_GAP_M)
+    genuinely_closing = float(self._lead_vrel) <= float(self._LEAD_STRAIGHT_REJECT_MAX_CLOSING_MS)
+    strong_planner_decel = float(self._lp_a_target) <= float(self._LEAD_STRAIGHT_REJECT_MAX_DECEL_MS2)
+    if not bool(genuinely_close or genuinely_closing or strong_planner_decel):
+      return float(desired_ms), False
+
     gap_limit_m = min(
       float(self._LOW_SPEED_LEAD_BLOCK_MAX_GAP_M),
       max(float(self._LOW_SPEED_LEAD_BLOCK_MIN_GAP_M), float(v_ego_ms) * float(self._LOW_SPEED_LEAD_BLOCK_TIME_GAP_S)),
@@ -2692,6 +2711,53 @@ class LongController:
     )
 
 
+  def _straight_vision_clear(
+    self,
+    *,
+    raw_map_ms: Optional[float],
+    raw_vision_ms: Optional[float],
+    reference_ms: float,
+  ) -> bool:
+    """True when map has no low curve and vision says the road is open."""
+    if raw_vision_ms is None:
+      return False
+    vision_clear = float(raw_vision_ms) >= min(
+      float(self._LEAD_STRAIGHT_REJECT_VISION_CLEAR_MS),
+      max(0.0, float(reference_ms) - (4.0 * CV.MPH_TO_MS)),
+    )
+    if not bool(vision_clear):
+      return False
+    map_has_low_curve = bool(
+      raw_map_ms is not None
+      and float(raw_map_ms) > 0.1
+      and float(raw_map_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
+    )
+    return not bool(map_has_low_curve)
+
+
+  def _roundabout_reject_vision_clear(
+    self,
+    *,
+    raw_map_ms: Optional[float],
+    raw_vision_ms: Optional[float],
+    current_angle_deg: float,
+    steering_rate_deg: float = 0.0,
+  ) -> bool:
+    """Reject soft roundabout ownership when vision is clear and lateral demand is weak."""
+    if raw_map_ms is None or raw_vision_ms is None:
+      return False
+    if float(raw_vision_ms) < float(self._ROUNDABOUT_REJECT_VISION_CLEAR_MS):
+      return False
+    if float(raw_map_ms) <= float(self._ROUNDABOUT_REJECT_MAP_SOFT_MIN_MS):
+      return False
+    strong_lateral_confirm = bool(
+      bool(self._lat_limit_saturated)
+      or abs(float(current_angle_deg)) >= float(self._ROUNDABOUT_RAW_MAP_STRONG_STEER_DEG)
+      or abs(float(steering_rate_deg)) >= float(self._ROUNDABOUT_RAW_MAP_STRONG_STEER_RATE_DEG)
+    )
+    return not bool(strong_lateral_confirm)
+
+
   def _arbitration_curve_candidate(
     self,
     *,
@@ -2745,17 +2811,41 @@ class LongController:
     if bool(curve_reentry_block) and not bool(self._lat_limit_saturated):
       return None, "curve_reentry_block"
 
+    low_speed_lat_vision_clear = bool(
+      raw_vision_ms is not None
+      and (
+        float(raw_vision_ms) >= (float(reference_ms) - float(self._LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS))
+        or (
+          raw_map_ms is None
+          and float(raw_vision_ms) >= float(self._LOW_SPEED_LAT_TRIM_VISION_CLEAR_ABS_MS)
+        )
+      )
+      and not bool(self._lat_limit_saturated)
+    )
+    low_speed_lat_steer_confirm = bool(
+      bool(steer_busy)
+      and (
+        abs(float(current_angle_deg)) >= float(self._LOW_SPEED_LAT_TRIM_STEER_CONFIRM_DEG)
+        or abs(float(steering_rate_deg)) >= float(self._LOW_SPEED_LAT_TRIM_STEER_CONFIRM_RATE_DEG)
+      )
+    )
     low_speed_lat_load = bool(
-      (bool(self._lat_limit_saturated) or bool(steer_busy))
+      (bool(self._lat_limit_saturated) or bool(low_speed_lat_steer_confirm))
       and float(v_ego_ms) >= float(self._LOW_SPEED_LAT_TRIM_MIN_SPEED_MS)
       and float(v_ego_ms) < float(self._LOW_SPEED_LAT_TRIM_MAX_SPEED_MS)
+      and not (bool(low_speed_lat_vision_clear) and not bool(self._lat_limit_saturated))
     )
     low_speed_lat_release_clear = bool(
-      raw_vision_ms is not None
-      and float(raw_vision_ms) >= (float(reference_ms) - float(self._LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS))
+      bool(low_speed_lat_vision_clear)
       and not bool(self._lat_limit_saturated)
       and abs(float(current_angle_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_DEG)
       and abs(float(steering_rate_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_RATE_DEG)
+    )
+    low_speed_lat_rejected = bool(
+      bool(steer_busy)
+      and not bool(self._lat_limit_saturated)
+      and not bool(low_speed_lat_load)
+      and bool(low_speed_lat_vision_clear)
     )
     high_speed_lat_load = bool(
       (bool(self._lat_limit_saturated) or bool(steer_busy))
@@ -2775,6 +2865,8 @@ class LongController:
         return float(lat_target_ms), lat_reason
       if bool(low_speed_lat_load) and bool(low_speed_lat_release_clear):
         return None, "low_speed_lat_release"
+      if bool(low_speed_lat_rejected):
+        return None, "lat_trim_reject"
       if bool(high_speed_lat_load):
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -2809,9 +2901,16 @@ class LongController:
       and float(raw_map_ms) <= (float(reference_ms) - float(self._ROUNDABOUT_MAP_ONLY_MIN_DROP_MS))
       and float(raw_map_ms) <= (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS))
     )
+    roundabout_vision_clear_reject = self._roundabout_reject_vision_clear(
+      raw_map_ms=raw_map_ms,
+      raw_vision_ms=raw_vision_ms,
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+    )
     map_only_roundabout = bool(
       map_roundabout_hint
       and not bool(vision_clear_map_conflict)
+      and not bool(roundabout_vision_clear_reject)
       and (
         map_only_low
         or map_low_disagrees_with_vision
@@ -2831,6 +2930,8 @@ class LongController:
 
     curve_candidates: list[float] = []
     owner_parts: list[str] = []
+    if bool(roundabout_vision_clear_reject):
+      owner_parts.append("roundabout_reject_vision_clear")
 
     if planner_curve_active:
       curve_candidates.append(float(planner_near_ms))
@@ -2872,6 +2973,8 @@ class LongController:
         owner_parts.append("mapd_roundabout_soft")
 
     if not curve_candidates:
+      if bool(roundabout_vision_clear_reject):
+        return None, "roundabout_reject_vision_clear"
       return None, "no_curve_target"
 
     target_ms = float(min(curve_candidates))
@@ -3094,6 +3197,11 @@ class LongController:
     )
 
     raw_map_for_rescue_ms, raw_vision_for_rescue_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    straight_vision_clear = self._straight_vision_clear(
+      raw_map_ms=raw_map_for_rescue_ms,
+      raw_vision_ms=raw_vision_for_rescue_ms,
+      reference_ms=float(reference_ms),
+    )
     curve_reentry_block = self._curve_reentry_block_active(
       now_ms=int(now_ms),
       raw_map_ms=raw_map_for_rescue_ms,
@@ -3118,8 +3226,13 @@ class LongController:
     )
     planner_rescue_evidence = bool(
       bool(self._lat_limit_saturated)
-      or bool(planner_rescue_map_evidence)
-      or bool(planner_rescue_vision_evidence)
+      or (
+        not bool(straight_vision_clear)
+        and (
+          bool(planner_rescue_map_evidence)
+          or bool(planner_rescue_vision_evidence)
+        )
+      )
     )
     planner_curve_rescue = bool(
       bool(lp_fresh)
@@ -3137,16 +3250,25 @@ class LongController:
         or (bool(steer_rescue) and bool(planner_rescue_evidence))
       )
     )
+    roundabout_rejected_by_vision = self._roundabout_reject_vision_clear(
+      raw_map_ms=raw_map_for_rescue_ms,
+      raw_vision_ms=raw_vision_for_rescue_ms,
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+    )
     roundabout_evidence = bool(
-      (
-        raw_map_for_rescue_ms is not None
-        and float(raw_map_for_rescue_ms) > 0.1
-        and float(raw_map_for_rescue_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
-      )
-      or (
-        raw_vision_for_rescue_ms is not None
-        and float(raw_vision_for_rescue_ms) > 0.1
-        and float(raw_vision_for_rescue_ms) <= float(self._ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS)
+      not bool(roundabout_rejected_by_vision)
+      and (
+        (
+          raw_map_for_rescue_ms is not None
+          and float(raw_map_for_rescue_ms) > 0.1
+          and float(raw_map_for_rescue_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
+        )
+        or (
+          raw_vision_for_rescue_ms is not None
+          and float(raw_vision_for_rescue_ms) > 0.1
+          and float(raw_vision_for_rescue_ms) <= float(self._ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS)
+        )
       )
     )
     roundabout_approach_rescue = bool(
@@ -3157,6 +3279,19 @@ class LongController:
       and float(planner_near_ms) <= float(self._ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS)
       and float(planner_near_ms) < (float(reference_ms) - float(self._ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS))
     )
+
+    lead_straight_reject = bool(
+      bool(live_lead)
+      and bool(straight_vision_clear)
+      and not bool(strong_lead_closing)
+      and float(lead_time_gap_s) >= float(max(float(self._LEAD_STRAIGHT_REJECT_MIN_GAP_S), float(desired_follow_s) + 0.25))
+      and float(self._lead_drel) >= float(self._LEAD_STRAIGHT_REJECT_MIN_DREL_M)
+      and float(self._lead_vrel) > float(self._LEAD_STRAIGHT_REJECT_MAX_CLOSING_MS)
+      and float(self._lp_a_target) > float(self._LEAD_STRAIGHT_REJECT_MAX_DECEL_MS2)
+    )
+    if bool(lead_straight_reject):
+      planner_below_reference = False
+      planner_lead_valid = False
 
     if not bool(live_lead) and bool(planner_src_is_lead_owner) and not bool(planner_curve_rescue):
       stale_planner_lead = True
@@ -3187,6 +3322,7 @@ class LongController:
 
     lead_critical = bool(
       live_lead
+      and not bool(lead_straight_reject)
       and not bool(far_lead_release)
       and not bool(lead_soft_release)
       and not lead_opening_clear
@@ -3202,6 +3338,7 @@ class LongController:
     )
     lead_follow = bool(
       live_lead
+      and not bool(lead_straight_reject)
       and not bool(far_lead_release)
       and not bool(lead_soft_release)
       and not lead_opening_clear
@@ -3238,6 +3375,8 @@ class LongController:
 
     out_ms = float(desired_ms)
     out_src = str(src)
+    if bool(lead_straight_reject):
+      out_src = f"{out_src}+lead_straight_reject"
 
     if lead_critical:
       self._set_arbitration_state(state="LEAD_CRITICAL", now_ms=int(now_ms))
@@ -3341,12 +3480,27 @@ class LongController:
         or "lat_sat" in str(curve_source)
       )
       raw_map_for_trim_ms, raw_vision_for_trim_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
-      low_speed_lat_release_clear = bool(
+      low_speed_lat_trim_vision_clear = bool(
         raw_vision_for_trim_ms is not None
-        and float(raw_vision_for_trim_ms) >= (float(reference_ms) - float(self._LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS))
+        and (
+          float(raw_vision_for_trim_ms) >= (float(reference_ms) - float(self._LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS))
+          or (
+            raw_map_for_trim_ms is None
+            and float(raw_vision_for_trim_ms) >= float(self._LOW_SPEED_LAT_TRIM_VISION_CLEAR_ABS_MS)
+          )
+        )
+        and not bool(self._lat_limit_saturated)
+      )
+      low_speed_lat_release_clear = bool(
+        bool(low_speed_lat_trim_vision_clear)
         and not bool(self._lat_limit_saturated)
         and abs(float(current_angle_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_DEG)
         and abs(float(steering_rate_deg)) <= float(self._LOW_SPEED_LAT_TRIM_RELEASE_STEER_RATE_DEG)
+      )
+      low_speed_lat_confirmed = bool(
+        bool(self._lat_limit_saturated)
+        or abs(float(current_angle_deg)) >= float(self._LOW_SPEED_LAT_TRIM_STEER_CONFIRM_DEG)
+        or abs(float(steering_rate_deg)) >= float(self._LOW_SPEED_LAT_TRIM_STEER_CONFIRM_RATE_DEG)
       )
       if bool(lat_sat_context) and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS):
         capped_target_ms = max(
@@ -3362,9 +3516,11 @@ class LongController:
           curve_source = f"{curve_source}+lat_sat_hard_cap"
       elif (
         bool(lat_sat_context)
+        and bool(low_speed_lat_confirmed)
         and float(v_ego_ms) >= float(self._LOW_SPEED_LAT_TRIM_MIN_SPEED_MS)
         and float(v_ego_ms) < float(self._LOW_SPEED_LAT_TRIM_MAX_SPEED_MS)
         and not bool(low_speed_lat_release_clear)
+        and not (bool(low_speed_lat_trim_vision_clear) and not bool(self._lat_limit_saturated))
       ):
         capped_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -3565,6 +3721,19 @@ class LongController:
         and float(self._lead_vrel) >= float(self._WEAK_LEAD_OWNER_VREL_MS)
         and float(self._lp_a_target) > float(self._WEAK_LEAD_OWNER_ATARGET_MS2)
       )
+
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ms) * 1_000_000)
+    straight_vision_clear = self._straight_vision_clear(
+      raw_map_ms=raw_map_ms,
+      raw_vision_ms=raw_vision_ms,
+      reference_ms=float(base_target_ms),
+    )
+    if bool(straight_vision_clear) and not bool(self._lat_limit_saturated):
+      genuinely_close = bool(self._lead_present and float(self._lead_drel) <= float(self._LEAD_STRAIGHT_REJECT_MIN_DREL_M))
+      hard_closing = bool(self._lead_present and float(self._lead_vrel) <= float(self._LEAD_STRAIGHT_REJECT_MAX_CLOSING_MS))
+      strong_decel = bool(float(self._lp_a_target) <= float(self._LEAD_STRAIGHT_REJECT_MAX_DECEL_MS2))
+      if not bool(genuinely_close or hard_closing or strong_decel):
+        return []
 
     if planner_tracks_set and ((lead_constraining and weak_lead_owner) or queue_fallback_active):
       return []
