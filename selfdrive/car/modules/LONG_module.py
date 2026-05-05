@@ -292,6 +292,10 @@ class LongController:
   _LOW_SPEED_LAT_TRIM_CLEAR_MARGIN_MS = 4.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_RELEASE_STEER_DEG = 6.0
   _LOW_SPEED_LAT_TRIM_RELEASE_STEER_RATE_DEG = 18.0
+  _CURVE_REENTRY_BLOCK_MS = 1800
+  _CURVE_REENTRY_BLOCK_VISION_CLEAR_MS = 32.0 * CV.MPH_TO_MS
+  _CURVE_REENTRY_BLOCK_MAP_CONFIRM_MS = 22.0 * CV.MPH_TO_MS
+  _ARBITRATION_PLANNER_RESCUE_MAX_VISION_MS = 32.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EARLY_CAP_MS = 28.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EARLY_MIN_EGO_MS = 18.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EARLY_MAX_MAP_MS = 18.0 * CV.MPH_TO_MS
@@ -414,6 +418,7 @@ class LongController:
     self._arbitration_state_since_ms: int = 0
     self._arbitration_last_update_ms: int = 0
     self._arbitration_curve_target_ms: float = 0.0
+    self._curve_reentry_block_until_ms: int = 0
 
 
   def _reset_lead_stuck_cancel(self) -> None:
@@ -2655,6 +2660,38 @@ class LongController:
     self._arbitration_curve_target_ms = 0.0
 
 
+  def _arm_curve_reentry_block(self, now_ms: int) -> None:
+    self._curve_reentry_block_until_ms = max(
+      int(self._curve_reentry_block_until_ms),
+      int(now_ms) + int(self._CURVE_REENTRY_BLOCK_MS),
+    )
+
+
+  def _curve_reentry_block_active(
+    self,
+    *,
+    now_ms: int,
+    raw_map_ms: Optional[float],
+    raw_vision_ms: Optional[float],
+    lat_saturated: bool,
+  ) -> bool:
+    if int(now_ms) > int(self._curve_reentry_block_until_ms):
+      return False
+    if bool(lat_saturated):
+      return False
+    map_confirms_curve = bool(
+      raw_map_ms is not None
+      and float(raw_map_ms) > 0.1
+      and float(raw_map_ms) <= float(self._CURVE_REENTRY_BLOCK_MAP_CONFIRM_MS)
+    )
+    if bool(map_confirms_curve):
+      return False
+    return bool(
+      raw_vision_ms is not None
+      and float(raw_vision_ms) >= float(self._CURVE_REENTRY_BLOCK_VISION_CLEAR_MS)
+    )
+
+
   def _arbitration_curve_candidate(
     self,
     *,
@@ -2668,6 +2705,7 @@ class LongController:
     live_lead_context: bool,
     planner_curve_rescue: bool = False,
     roundabout_approach_rescue: bool = False,
+    curve_reentry_block: bool = False,
   ) -> tuple[Optional[float], str]:
     planner_entry_drop_ms = (
       float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS)
@@ -2703,6 +2741,9 @@ class LongController:
     )
     if bool(vision_clear_map_conflict):
       map_supports = False
+
+    if bool(curve_reentry_block) and not bool(self._lat_limit_saturated):
+      return None, "curve_reentry_block"
 
     low_speed_lat_load = bool(
       (bool(self._lat_limit_saturated) or bool(steer_busy))
@@ -3053,42 +3094,68 @@ class LongController:
     )
 
     raw_map_for_rescue_ms, raw_vision_for_rescue_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    curve_reentry_block = self._curve_reentry_block_active(
+      now_ms=int(now_ms),
+      raw_map_ms=raw_map_for_rescue_ms,
+      raw_vision_ms=raw_vision_for_rescue_ms,
+      lat_saturated=bool(self._lat_limit_saturated),
+    )
     steer_rescue = bool(
       abs(float(current_angle_deg)) >= float(self._ARBITRATION_PLANNER_RESCUE_STEER_DEG)
       or abs(float(steering_rate_deg)) >= float(self._ARBITRATION_PLANNER_RESCUE_STEER_RATE_DEG)
       or bool(self._lat_limit_saturated)
     )
+    planner_rescue_map_evidence = bool(
+      raw_map_for_rescue_ms is not None
+      and float(raw_map_for_rescue_ms) > 0.1
+      and float(raw_map_for_rescue_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
+    )
+    planner_rescue_vision_evidence = bool(
+      raw_vision_for_rescue_ms is not None
+      and float(raw_vision_for_rescue_ms) > 0.1
+      and float(raw_vision_for_rescue_ms) <= float(self._ARBITRATION_PLANNER_RESCUE_MAX_VISION_MS)
+      and float(raw_vision_for_rescue_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
+    )
+    planner_rescue_evidence = bool(
+      bool(self._lat_limit_saturated)
+      or bool(planner_rescue_map_evidence)
+      or bool(planner_rescue_vision_evidence)
+    )
     planner_curve_rescue = bool(
       bool(lp_fresh)
       and bool(planner_src_is_lead_owner)
+      and not bool(curve_reentry_block)
       and float(v_ego_ms) >= float(self._ARBITRATION_PLANNER_RESCUE_MIN_SPEED_MS)
       and float(planner_near_ms) > 0.1
       and float(planner_near_ms) <= float(self._ARBITRATION_PLANNER_RESCUE_MAX_TARGET_MS)
       and float(planner_near_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
+      and bool(planner_rescue_evidence)
       and (
-        bool(steer_rescue)
-        or (
-          raw_vision_for_rescue_ms is not None
-          and float(raw_vision_for_rescue_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
-        )
-        or (
-          raw_map_for_rescue_ms is not None
-          and float(raw_map_for_rescue_ms) < (float(reference_ms) - float(self._ARBITRATION_PLANNER_RESCUE_MIN_DROP_MS))
-        )
+        bool(self._lat_limit_saturated)
+        or bool(planner_rescue_map_evidence)
+        or bool(planner_rescue_vision_evidence)
+        or (bool(steer_rescue) and bool(planner_rescue_evidence))
+      )
+    )
+    roundabout_evidence = bool(
+      (
+        raw_map_for_rescue_ms is not None
+        and float(raw_map_for_rescue_ms) > 0.1
+        and float(raw_map_for_rescue_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
+      )
+      or (
+        raw_vision_for_rescue_ms is not None
+        and float(raw_vision_for_rescue_ms) > 0.1
+        and float(raw_vision_for_rescue_ms) <= float(self._ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS)
       )
     )
     roundabout_approach_rescue = bool(
       bool(planner_curve_rescue)
+      and not bool(curve_reentry_block)
+      and bool(roundabout_evidence)
       and float(v_ego_ms) >= float(self._ROUNDABOUT_PLANNER_APPROACH_MIN_EGO_MS)
       and float(planner_near_ms) <= float(self._ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS)
       and float(planner_near_ms) < (float(reference_ms) - float(self._ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS))
-      and (
-        bool(steer_rescue)
-        or (
-          raw_map_for_rescue_ms is not None
-          and float(raw_map_for_rescue_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
-        )
-      )
     )
 
     if not bool(live_lead) and bool(planner_src_is_lead_owner) and not bool(planner_curve_rescue):
@@ -3114,6 +3181,7 @@ class LongController:
       live_lead_context=bool((live_lead or planner_lead_valid or int(now_ms) <= int(self._lead_recently_cleared_until_ms)) and not bool(far_lead_release) and not bool(lead_soft_release)),
       planner_curve_rescue=bool(planner_curve_rescue),
       roundabout_approach_rescue=bool(roundabout_approach_rescue),
+      curve_reentry_block=bool(curve_reentry_block),
     )
     curve_confirmed = curve_candidate_ms is not None
 
@@ -3203,6 +3271,7 @@ class LongController:
       self._reset_lead_hold()
       self._reset_lead_curve_hold()
       self._reset_curve_hold()
+      self._arm_curve_reentry_block(now_ms=int(now_ms))
       self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
       self._arbitration_curve_target_ms = 0.0
       if bool(far_lead_release):
@@ -3334,6 +3403,7 @@ class LongController:
     if previous_curve_state and bool(curve_exit_clear):
       self._reset_curve_hold()
       if (int(now_ms) - int(self._arbitration_state_since_ms)) >= int(self._ARBITRATION_CURVE_EXIT_RELEASE_MS):
+        self._arm_curve_reentry_block(now_ms=int(now_ms))
         self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
         self._arbitration_curve_target_ms = 0.0
         out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
@@ -3368,6 +3438,7 @@ class LongController:
       )
       if bool(weak_curve_owner) and float(out_ms) < (float(reference_ms) - float(self._CLEAR_NO_LEAD_STALE_OWNER_DROP_MS)):
         self._reset_curve_hold()
+        self._arm_curve_reentry_block(now_ms=int(now_ms))
         self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
         self._arbitration_curve_target_ms = 0.0
         out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
@@ -3399,6 +3470,14 @@ class LongController:
           "lat_sat_hard_cap",
         )
       )
+      if "curve_reentry_block" in curve_source and (existing_curve_owner or stale_clear_owner):
+        self._reset_curve_hold()
+        self._arm_curve_reentry_block(now_ms=int(now_ms))
+        self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+        self._arbitration_curve_target_ms = 0.0
+        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+        out_src = f"{out_src}+state[CRUISE_SYNC]+curve_reentry_block"
+        return float(out_ms), out_src
       if "map_only_unconfirmed" in curve_source and not existing_curve_owner:
         self._reset_curve_hold()
         self._mapd_stale_block_until_ms = int(now_ms) + int(self._MAPD_STRAIGHT_STALE_BLOCK_MS)
@@ -3414,6 +3493,7 @@ class LongController:
       self._reset_lead_hold()
       self._reset_lead_curve_hold()
       self._reset_curve_hold()
+      self._arm_curve_reentry_block(now_ms=int(now_ms))
       self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
       self._arbitration_curve_target_ms = 0.0
       if bool(far_lead_release):

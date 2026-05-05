@@ -49,6 +49,21 @@ STEER_DESIRED_LIMITER_OVERRIDE_ACTIVE_COUNTER = 0.7 # second
 # limit model acceleration when engaging
 STEER_RESUME_RATE_LIMIT_RAMP_RATE = 500 # deg/s^2 - controls rate of rise of angle rate limit, not angle directly
 
+# soft human handoff
+# Pre-blends the OP angle command toward the measured wheel angle as soon as
+# light driver torque appears. This reduces the initial "fight" before full VTB
+# torque override or hard manual override takes over.
+SOFT_HANDOFF_MIN_TORQUE = 0.12 # Nm
+SOFT_HANDOFF_MID_TORQUE = 0.80 # Nm
+SOFT_HANDOFF_FULL_TORQUE = 1.80 # Nm
+SOFT_HANDOFF_MAX_BLEND = 0.84
+SOFT_HANDOFF_OPPOSING_BOOST = 0.16
+SOFT_HANDOFF_SAME_DIR_SCALE = 0.72
+SOFT_HANDOFF_YIELD_RATE = 7.5 # blend/s, fast takeover
+SOFT_HANDOFF_RETURN_RATE = 1.15 # blend/s, slow return
+SOFT_HANDOFF_MIN_WINDOW_DEG = 1.5
+SOFT_HANDOFF_MAX_WINDOW_DEG = 8.0
+
 
 CoopSteeringData = namedtuple("CoopSteeringData",
                                 ["steeringAngleDeg", "lat_active", "control_type"])
@@ -195,6 +210,9 @@ class CoopSteeringController:
     self.resume_rate_limiter_delta = SteerRateLimiter()
     self.resume_rate_limiter = SteerRateLimiter()
     self.override_accel_rate_limiter = SteerAccelLimiter()
+    self.soft_handoff_blend = 0.0
+    self.debug_soft_handoff_blend = 0.0
+    self.debug_soft_handoff_active = False
 
   def apply_override_angle(self, lat_active: bool, apply_angle: float, driverTorque: float, vEgo: float, VM: VehicleModel) -> float:
     """
@@ -295,6 +313,62 @@ class CoopSteeringController:
     apply_angle_lim = self.resume_rate_limiter.update(apply_angle, angle_rate_delta_lim)
     return apply_angle_lim
 
+  def _soft_handoff_target_blend(self, lat_active: bool, apply_angle: float,
+                                  steering_angle: float, driver_torque: float) -> float:
+    """Return how much OP should yield to current wheel angle for human handoff."""
+    if not lat_active:
+      return 0.0
+
+    torque_abs = abs(driver_torque)
+    if torque_abs <= SOFT_HANDOFF_MIN_TORQUE:
+      return 0.0
+
+    blend = float(np.interp(
+      torque_abs,
+      [SOFT_HANDOFF_MIN_TORQUE, SOFT_HANDOFF_MID_TORQUE, SOFT_HANDOFF_FULL_TORQUE],
+      [0.0, 0.38, SOFT_HANDOFF_MAX_BLEND],
+    ))
+
+    angle_error = float(apply_angle) - float(steering_angle)
+    opposing_driver = (driver_torque * angle_error) < -0.05
+
+    if opposing_driver:
+      blend = min(SOFT_HANDOFF_MAX_BLEND, blend + SOFT_HANDOFF_OPPOSING_BOOST)
+    else:
+      blend *= SOFT_HANDOFF_SAME_DIR_SCALE
+
+    return float(np.clip(blend, 0.0, SOFT_HANDOFF_MAX_BLEND))
+
+  def apply_soft_handoff(self, lat_active: bool, apply_angle: float,
+                         steering_angle: float, driver_torque: float,
+                         vEgo: float) -> float:
+    """Yield quickly to light human steering input, then return slowly."""
+    target_blend = self._soft_handoff_target_blend(lat_active, apply_angle, steering_angle, driver_torque)
+
+    rise = SOFT_HANDOFF_YIELD_RATE * DT_LAT_CTRL
+    fall = SOFT_HANDOFF_RETURN_RATE * DT_LAT_CTRL
+    self.soft_handoff_blend = rate_limit(target_blend, self.soft_handoff_blend, -fall, rise)
+
+    self.debug_soft_handoff_blend = self.soft_handoff_blend
+    self.debug_soft_handoff_active = self.soft_handoff_blend > 0.01
+
+    if self.soft_handoff_blend <= 0.0:
+      return apply_angle
+
+    handoff_window = float(np.interp(
+      max(0.0, vEgo),
+      [0.0, 10.0, 30.0],
+      [SOFT_HANDOFF_MIN_WINDOW_DEG, 4.5, SOFT_HANDOFF_MAX_WINDOW_DEG],
+    ))
+
+    yielded_angle = float(np.clip(
+      apply_angle,
+      steering_angle - handoff_window,
+      steering_angle + handoff_window,
+    ))
+
+    return float((1.0 - self.soft_handoff_blend) * apply_angle + self.soft_handoff_blend * yielded_angle)
+
   def coop_steering_update(self, apply_angle, lat_active, CS: structs.CarState, VM: VehicleModel) -> CoopSteeringData:
     if VM is None:
       return CoopSteeringData(float(apply_angle), bool(lat_active), 1)
@@ -310,6 +384,15 @@ class CoopSteeringController:
 
     # avoid sudden rotation on engagement
     apply_angle = self.resume_steer_desired_rate_limit(lat_active, apply_angle, steeringAngleDegPhaseLead)
+
+    # Soften the first human steering input before the torque override has fully built.
+    apply_angle = self.apply_soft_handoff(
+      lat_active,
+      apply_angle,
+      steeringAngleDegPhaseLead,
+      CS.out.steeringTorque,
+      CS.out.vEgo,
+    )
 
     if angle_coop_enabled:
       # apply_angle = self.overriding_steer_desired_accel_limit(lat_active, apply_angle, CS.out.vEgo, CS.out.steeringTorque)
