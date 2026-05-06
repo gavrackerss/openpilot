@@ -55,6 +55,10 @@ ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
 ROADWORKS_DEFAULT_KPH = 50.0 * CV.MPH_TO_KPH
 
+LOW_SPEED_CURB_GUARD_MAX_MS = 15.0 * CV.MPH_TO_MS
+LOW_SPEED_CURB_GUARD_CRUISE_MARGIN_MS = 0.7
+
+
 
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP, VM=None):
@@ -500,6 +504,27 @@ class CarController(CarControllerBase):
       desired_angle_deg + max_delta,
     ))
 
+  def _apply_low_speed_curb_guard(self, apply_angle: float, measured_angle: float,
+                                    v_ego: float, cruise_speed: float) -> float:
+    """Clip low-speed inside angle while accelerating below cruise speed."""
+    if v_ego >= LOW_SPEED_CURB_GUARD_MAX_MS:
+      return float(apply_angle)
+
+    if not (0.1 < cruise_speed < 70.0 and cruise_speed > (v_ego + LOW_SPEED_CURB_GUARD_CRUISE_MARGIN_MS)):
+      return float(apply_angle)
+
+    guard_deg = float(np.interp(
+      v_ego,
+      [0.0, 5.0 * CV.MPH_TO_MS, 10.0 * CV.MPH_TO_MS, LOW_SPEED_CURB_GUARD_MAX_MS],
+      [18.0, 22.0, 27.0, 34.0],
+    ))
+
+    return float(np.clip(
+      float(apply_angle),
+      float(measured_angle) - guard_deg,
+      float(measured_angle) + guard_deg,
+    ))
+
   def _body_controls_turn(self, CS) -> int:
     if not bool(getattr(CS, "enableALC", False)):
       return 0
@@ -669,6 +694,15 @@ class CarController(CarControllerBase):
           float(CS.out.steeringAngleDeg) - steer_guard_deg,
           float(CS.out.steeringAngleDeg) + steer_guard_deg,
         ))
+
+        cruise_state = getattr(CS.out, "cruiseState", None)
+        cruise_speed = float(getattr(cruise_state, "speed", 0.0) or 0.0)
+        apply_angle = self._apply_low_speed_curb_guard(
+          apply_angle,
+          float(CS.out.steeringAngleDeg),
+          float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
+          cruise_speed,
+        )
 
       self.apply_angle_last = float(apply_angle)
       send_angle = float(self.apply_angle_last)
