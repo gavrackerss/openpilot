@@ -9,7 +9,7 @@ v61 adds an explicit final LONG arbitration state machine.
 
 v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, and lateral-load bands.
 
-v76 keeps v74 clear/straight-road false-positive rejection and avoids the v75 candidate/confidence experiment.
+v78 keeps the v74/v77 baseline, restores useful post-mapd-zero roundabout approach thresholds, and prevents lead-release/vision-clear logic from masking very-low map roundabout cues.
 
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
@@ -289,9 +289,9 @@ class LongController:
   _ROUNDABOUT_MAP_ONLY_MAX_EGO_MS = 48.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MAX_TARGET_MS = 34.0 * CV.MPH_TO_MS
   _ROUNDABOUT_MAP_ONLY_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_CAP_MS = 36.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_DROP_MS = 5.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_MIN_SPEED_MS = 22.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_CAP_MS = 46.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_DROP_MS = 2.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_MIN_SPEED_MS = 38.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_MIN_SPEED_MS = 22.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_MAX_SPEED_MS = 38.0 * CV.MPH_TO_MS
   _LOW_SPEED_LAT_TRIM_DROP_MS = 2.0 * CV.MPH_TO_MS
@@ -309,6 +309,9 @@ class LongController:
   _ROUNDABOUT_EARLY_CAP_MS = 26.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EARLY_MIN_EGO_MS = 16.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EARLY_MAX_MAP_MS = 21.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EXIT_HOLD_MS = 1600
+  _ROUNDABOUT_EXIT_RAISE_MS = 4.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EXIT_TARGET_MARGIN_MS = 8.0 * CV.MPH_TO_MS
 
   _ARB_LOW_SPEED_VISION_CLEAR_MS = 35.0 * CV.MPH_TO_MS
   _ARB_LOW_SPEED_CURVE_FLOOR_MS = 26.0 * CV.MPH_TO_MS
@@ -430,6 +433,8 @@ class LongController:
     self._arbitration_state_since_ms: int = 0
     self._arbitration_last_update_ms: int = 0
     self._arbitration_curve_target_ms: float = 0.0
+    self._roundabout_exit_hold_until_ms: int = 0
+    self._roundabout_exit_hold_target_ms: float = 0.0
     self._curve_reentry_block_until_ms: int = 0
 
 
@@ -759,6 +764,11 @@ class LongController:
       or abs(float(steering_rate_deg)) >= float(self._ROUNDABOUT_RAW_MAP_STRONG_STEER_RATE_DEG)
     )
     if strong_lateral_confirm:
+      return False
+
+    if raw_map_ms is not None and float(raw_map_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS):
+      # A very-low map target is the roundabout/hard-entry early warning path.
+      # Do not let optimistic vision suppress it before the approach cap can run.
       return False
 
     if raw_map_ms is None:
@@ -2847,28 +2857,21 @@ class LongController:
       and not bool(low_speed_lat_load)
       and bool(low_speed_lat_vision_clear)
     )
-    # v75 showed that steerBusy-only safety trim can become a false owner on map=0/vis=0 roads.
-    # Keep this as an actual lat-saturation / steering-limit recovery only.
     high_speed_lat_load = bool(
-      bool(self._lat_limit_saturated)
+      (bool(self._lat_limit_saturated) or bool(steer_busy))
       and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS)
     )
 
     if not (planner_curve_active or map_supports or vision_supports):
       if bool(low_speed_lat_load) and not bool(low_speed_lat_release_clear):
-        lat_drop_ms = float(self._LOW_SPEED_LAT_TRIM_DROP_MS)
-        lat_cap_ms = float(self._LOW_SPEED_LAT_TRIM_MAX_TARGET_MS)
-        if bool(self._lat_limit_saturated):
-          lat_drop_ms = max(float(lat_drop_ms), 4.0 * CV.MPH_TO_MS)
-          lat_cap_ms = min(float(lat_cap_ms), 30.0 * CV.MPH_TO_MS)
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
           min(
-            float(lat_cap_ms),
-            float(v_ego_ms) - float(lat_drop_ms),
+            float(self._LOW_SPEED_LAT_TRIM_MAX_TARGET_MS),
+            float(v_ego_ms) - float(self._LOW_SPEED_LAT_TRIM_DROP_MS),
           ),
         )
-        lat_reason = "low_speed_lat_trim[lat_sat_strong]" if bool(self._lat_limit_saturated) else "low_speed_lat_trim[steer_busy]"
+        lat_reason = "low_speed_lat_trim[lat_sat]" if bool(self._lat_limit_saturated) else "low_speed_lat_trim[steer_busy]"
         return float(lat_target_ms), lat_reason
       if bool(low_speed_lat_load) and bool(low_speed_lat_release_clear):
         return None, "low_speed_lat_release"
@@ -2882,7 +2885,8 @@ class LongController:
             float(v_ego_ms) - float(self._LAT_SAT_HARD_DROP_MS),
           ),
         )
-        return float(lat_target_ms), "lat_sat_strong_cap"
+        lat_reason = "lat_sat" if bool(self._lat_limit_saturated) else "steer_busy_hard"
+        return float(lat_target_ms), lat_reason
       return None, "no_curve"
 
     map_low_disagrees_with_vision = bool(
@@ -3384,6 +3388,24 @@ class LongController:
     if bool(lead_straight_reject):
       out_src = f"{out_src}+lead_straight_reject"
 
+    blank_planner_reject = bool(
+      not bool(live_lead)
+      and bool(planner_src_is_lead_owner)
+      and raw_map_for_rescue_ms is None
+      and raw_vision_for_rescue_ms is None
+      and not bool(planner_curve_rescue)
+      and not bool(roundabout_approach_rescue)
+      and not bool(self._lat_limit_saturated)
+    )
+    if bool(blank_planner_reject):
+      self._reset_lead_hold()
+      self._reset_lead_curve_hold()
+      self._reset_curve_hold()
+      self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+      out_ms = max(float(out_ms), float(reference_ms))
+      out_src = f"{out_src}+blank_planner_reject+state[CRUISE_SYNC]"
+      return float(out_ms), out_src
+
     if lead_critical:
       self._set_arbitration_state(state="LEAD_CRITICAL", now_ms=int(now_ms))
       self._reset_curve_hold()
@@ -3471,10 +3493,20 @@ class LongController:
         or "mapd_roundabout" in str(curve_source)
         or "roundabout_fused" in str(curve_source)
       )
+      if bool(hard_entry_context):
+        self._roundabout_exit_hold_until_ms = max(
+          int(self._roundabout_exit_hold_until_ms),
+          int(now_ms) + int(self._ROUNDABOUT_EXIT_HOLD_MS),
+        )
+        if float(self._roundabout_exit_hold_target_ms) <= 0.1:
+          self._roundabout_exit_hold_target_ms = float(target_ms)
+        else:
+          self._roundabout_exit_hold_target_ms = min(float(self._roundabout_exit_hold_target_ms), float(target_ms))
       if bool(hard_entry_context) and float(v_ego_ms) >= float(self._ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS):
         capped_target_ms = min(float(target_ms), float(self._ROUNDABOUT_HARD_ENTRY_CAP_MS))
         if float(capped_target_ms) < float(target_ms):
           target_ms = float(capped_target_ms)
+          self._roundabout_exit_hold_target_ms = min(float(self._roundabout_exit_hold_target_ms), float(target_ms))
           curve_source = f"{curve_source}+roundabout_cap"
 
       lat_sat_context = bool(
@@ -3568,12 +3600,34 @@ class LongController:
         self._arm_curve_reentry_block(now_ms=int(now_ms))
         self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
         self._arbitration_curve_target_ms = 0.0
-        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+        release_target_ms = min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms)))
+        if int(now_ms) <= int(self._roundabout_exit_hold_until_ms):
+          hold_base_ms = max(float(self._roundabout_exit_hold_target_ms), float(v_ego_ms))
+          hold_ceiling_ms = min(
+            float(reference_ms),
+            max(
+              float(v_ego_ms) + float(self._ROUNDABOUT_EXIT_RAISE_MS),
+              float(current_set_ms) + float(self._ROUNDABOUT_EXIT_RAISE_MS),
+              hold_base_ms + float(self._ROUNDABOUT_EXIT_TARGET_MARGIN_MS),
+            ),
+          )
+          release_target_ms = min(float(release_target_ms), float(hold_ceiling_ms))
+          out_ms = float(release_target_ms)
+          out_src = f"{out_src}+roundabout_exit_hold"
+        else:
+          self._roundabout_exit_hold_target_ms = 0.0
+          out_ms = max(float(out_ms), float(release_target_ms))
         out_src = f"{out_src}+state[CURVE_EXIT_RELEASE]"
       else:
         self._set_arbitration_state(state="CURVE_EXIT", now_ms=int(now_ms))
         exit_target_ms = float(self._arbitration_curve_target_ms) if float(self._arbitration_curve_target_ms) > 0.1 else float(out_ms)
         exit_target_ms = min(float(reference_ms), exit_target_ms + float(self._ARBITRATION_CURVE_EXIT_STEP_MS) * 0.2)
+        if int(now_ms) <= int(self._roundabout_exit_hold_until_ms):
+          exit_target_ms = min(
+            float(exit_target_ms),
+            max(float(v_ego_ms), float(self._roundabout_exit_hold_target_ms)) + float(self._ROUNDABOUT_EXIT_TARGET_MARGIN_MS),
+          )
+          out_src = f"{out_src}+roundabout_exit_hold"
         self._arbitration_curve_target_ms = float(exit_target_ms)
         out_ms = max(float(out_ms), float(exit_target_ms))
         out_src = f"{out_src}+state[CURVE_EXIT]"
