@@ -9,7 +9,7 @@ v61 adds an explicit final LONG arbitration state machine.
 
 v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, and lateral-load bands.
 
-v78 keeps the v74/v77 baseline, restores useful post-mapd-zero roundabout approach thresholds, and prevents lead-release/vision-clear logic from masking very-low map roundabout cues.
+v77 returns to the v74 false-positive baseline and adds a blank-input stale-planner reject.
 
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
@@ -306,12 +306,9 @@ class LongController:
   _CURVE_REENTRY_BLOCK_VISION_CLEAR_MS = 32.0 * CV.MPH_TO_MS
   _CURVE_REENTRY_BLOCK_MAP_CONFIRM_MS = 22.0 * CV.MPH_TO_MS
   _ARBITRATION_PLANNER_RESCUE_MAX_VISION_MS = 32.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_EARLY_CAP_MS = 26.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_EARLY_MIN_EGO_MS = 16.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_EARLY_MAX_MAP_MS = 21.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_EXIT_HOLD_MS = 1600
-  _ROUNDABOUT_EXIT_RAISE_MS = 4.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_EXIT_TARGET_MARGIN_MS = 8.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EARLY_CAP_MS = 28.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EARLY_MIN_EGO_MS = 18.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EARLY_MAX_MAP_MS = 18.0 * CV.MPH_TO_MS
 
   _ARB_LOW_SPEED_VISION_CLEAR_MS = 35.0 * CV.MPH_TO_MS
   _ARB_LOW_SPEED_CURVE_FLOOR_MS = 26.0 * CV.MPH_TO_MS
@@ -328,8 +325,8 @@ class LongController:
   _ARBITRATION_PLANNER_RESCUE_STEER_RATE_DEG = 12.0
   _ROUNDABOUT_PLANNER_APPROACH_CAP_MS = 24.0 * CV.MPH_TO_MS
   _ROUNDABOUT_PLANNER_APPROACH_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS = 28.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS = 26.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
   _ROUNDABOUT_REJECT_VISION_CLEAR_MS = 34.0 * CV.MPH_TO_MS
   _ROUNDABOUT_REJECT_MAP_SOFT_MIN_MS = 22.0 * CV.MPH_TO_MS
   _ARB_STRONG_STEER_CONFIRM_DEG = 7.0
@@ -433,8 +430,6 @@ class LongController:
     self._arbitration_state_since_ms: int = 0
     self._arbitration_last_update_ms: int = 0
     self._arbitration_curve_target_ms: float = 0.0
-    self._roundabout_exit_hold_until_ms: int = 0
-    self._roundabout_exit_hold_target_ms: float = 0.0
     self._curve_reentry_block_until_ms: int = 0
 
 
@@ -764,11 +759,6 @@ class LongController:
       or abs(float(steering_rate_deg)) >= float(self._ROUNDABOUT_RAW_MAP_STRONG_STEER_RATE_DEG)
     )
     if strong_lateral_confirm:
-      return False
-
-    if raw_map_ms is not None and float(raw_map_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS):
-      # A very-low map target is the roundabout/hard-entry early warning path.
-      # Do not let optimistic vision suppress it before the approach cap can run.
       return False
 
     if raw_map_ms is None:
@@ -3493,20 +3483,10 @@ class LongController:
         or "mapd_roundabout" in str(curve_source)
         or "roundabout_fused" in str(curve_source)
       )
-      if bool(hard_entry_context):
-        self._roundabout_exit_hold_until_ms = max(
-          int(self._roundabout_exit_hold_until_ms),
-          int(now_ms) + int(self._ROUNDABOUT_EXIT_HOLD_MS),
-        )
-        if float(self._roundabout_exit_hold_target_ms) <= 0.1:
-          self._roundabout_exit_hold_target_ms = float(target_ms)
-        else:
-          self._roundabout_exit_hold_target_ms = min(float(self._roundabout_exit_hold_target_ms), float(target_ms))
       if bool(hard_entry_context) and float(v_ego_ms) >= float(self._ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS):
         capped_target_ms = min(float(target_ms), float(self._ROUNDABOUT_HARD_ENTRY_CAP_MS))
         if float(capped_target_ms) < float(target_ms):
           target_ms = float(capped_target_ms)
-          self._roundabout_exit_hold_target_ms = min(float(self._roundabout_exit_hold_target_ms), float(target_ms))
           curve_source = f"{curve_source}+roundabout_cap"
 
       lat_sat_context = bool(
@@ -3600,34 +3580,12 @@ class LongController:
         self._arm_curve_reentry_block(now_ms=int(now_ms))
         self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
         self._arbitration_curve_target_ms = 0.0
-        release_target_ms = min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms)))
-        if int(now_ms) <= int(self._roundabout_exit_hold_until_ms):
-          hold_base_ms = max(float(self._roundabout_exit_hold_target_ms), float(v_ego_ms))
-          hold_ceiling_ms = min(
-            float(reference_ms),
-            max(
-              float(v_ego_ms) + float(self._ROUNDABOUT_EXIT_RAISE_MS),
-              float(current_set_ms) + float(self._ROUNDABOUT_EXIT_RAISE_MS),
-              hold_base_ms + float(self._ROUNDABOUT_EXIT_TARGET_MARGIN_MS),
-            ),
-          )
-          release_target_ms = min(float(release_target_ms), float(hold_ceiling_ms))
-          out_ms = float(release_target_ms)
-          out_src = f"{out_src}+roundabout_exit_hold"
-        else:
-          self._roundabout_exit_hold_target_ms = 0.0
-          out_ms = max(float(out_ms), float(release_target_ms))
+        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
         out_src = f"{out_src}+state[CURVE_EXIT_RELEASE]"
       else:
         self._set_arbitration_state(state="CURVE_EXIT", now_ms=int(now_ms))
         exit_target_ms = float(self._arbitration_curve_target_ms) if float(self._arbitration_curve_target_ms) > 0.1 else float(out_ms)
         exit_target_ms = min(float(reference_ms), exit_target_ms + float(self._ARBITRATION_CURVE_EXIT_STEP_MS) * 0.2)
-        if int(now_ms) <= int(self._roundabout_exit_hold_until_ms):
-          exit_target_ms = min(
-            float(exit_target_ms),
-            max(float(v_ego_ms), float(self._roundabout_exit_hold_target_ms)) + float(self._ROUNDABOUT_EXIT_TARGET_MARGIN_MS),
-          )
-          out_src = f"{out_src}+roundabout_exit_hold"
         self._arbitration_curve_target_ms = float(exit_target_ms)
         out_ms = max(float(out_ms), float(exit_target_ms))
         out_src = f"{out_src}+state[CURVE_EXIT]"
