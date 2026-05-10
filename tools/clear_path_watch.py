@@ -178,6 +178,9 @@ def _car_state_summary(cs: Any) -> dict[str, Any]:
     "standstill": _safe_bool(_maybe_attr(cs, "standstill", False)),
     "gasPressed": _safe_bool(_maybe_attr(cs, "gasPressed", False)),
     "brakePressed": _safe_bool(_maybe_attr(cs, "brakePressed", False)),
+    "pedalOverride": _safe_bool(_maybe_attr(cs, "pedalOverride", False)),
+    "gas": _safe_float(_maybe_attr(cs, "gas", 0.0)),
+    "brake": _safe_float(_maybe_attr(cs, "brake", 0.0)),
     "steeringAngleDeg": _safe_float(_maybe_attr(cs, "steeringAngleDeg", 0.0)),
     "steeringRateDeg": _safe_float(_maybe_attr(cs, "steeringRateDeg", 0.0)),
     "steeringTorque": _safe_float(_maybe_attr(cs, "steeringTorque", 0.0)),
@@ -530,6 +533,11 @@ def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str,
     "followGap": follow_gap,
     "closingLead": bool((lead1.get("status") or lead2.get("status")) and (primary_vrel < -0.5 or a_target < -0.15)),
     "steeringBusy": bool(abs(_safe_float(car.get("steeringAngleDeg"), 0.0)) > 8.0 or abs(_safe_float(car.get("steeringRateDeg"), 0.0)) > 25.0),
+    "gasPressed": _safe_bool(car.get("gasPressed", False)),
+    "brakePressed": _safe_bool(car.get("brakePressed", False)),
+    "pedalOverride": _safe_bool(car.get("pedalOverride", False)) or _safe_bool(car.get("gasPressed", False)) or _safe_bool(car.get("brakePressed", False)),
+    "cruiseEnabled": _safe_bool(cruise.get("enabled", False)) if isinstance(cruise, dict) else False,
+    "cruiseAvailable": _safe_bool(cruise.get("available", False)) if isinstance(cruise, dict) else False,
   }
 
 
@@ -741,6 +749,11 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"plannerDrop={int(flags['plannerDropVsSet'])} "
     f"closing={int(flags['closingLead'])} "
     f"steerBusy={int(flags['steeringBusy'])} "
+    f"gas={int(flags.get('gasPressed', False))} "
+    f"brake={int(flags.get('brakePressed', False))} "
+    f"pedal={int(flags.get('pedalOverride', False))} "
+    f"cruiseEn={int(flags.get('cruiseEnabled', False))} "
+    f"cruiseAvail={int(flags.get('cruiseAvailable', False))} "
     f"lead1={int(record['radarState']['leadOne'].get('status', False))} "
     f"lead2={int(record['radarState']['leadTwo'].get('status', False))} "
     f"leadSel={_safe_str(flap.get('primary', '-'))} "

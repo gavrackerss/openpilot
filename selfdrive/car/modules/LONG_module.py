@@ -9,7 +9,7 @@ v61 adds an explicit final LONG arbitration state machine.
 
 v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, and lateral-load bands.
 
-v80 keeps the v79/v77 baseline and adds stale-cancel rejection, invalid curve recovery, and a narrow low-speed curve rescue.
+v81 keeps the v80 baseline and adds final roadworks-cap enforcement plus a short post-sleep control guard.
 
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
@@ -52,6 +52,8 @@ class LongDecision:
 class LongController:
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
+  _ROADWORKS_FINAL_CAP_MARGIN_MS = 0.05 * CV.MPH_TO_MS
+  _POST_SLEEP_CONTROL_GUARD_MS = 2500
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -445,6 +447,8 @@ class LongController:
     self._roundabout_release_guard_until_ms: int = 0
     self._roundabout_release_guard_target_ms: float = 0.0
     self._curve_reentry_block_until_ms: int = 0
+    self._post_sleep_controls_guard_until_ms: int = 0
+    self._last_stock_cruise_enabled: bool = False
 
 
   def _arm_roundabout_release_guard(self, *, now_ms: int, target_ms: float) -> None:
@@ -1785,6 +1789,24 @@ class LongController:
       return None
 
     return float(kph) * CV.KPH_TO_MS
+
+  def _roadworks_cap_target_ms(self, target_ms: Optional[float], cap_ms: Optional[float]) -> Optional[float]:
+    if target_ms is None:
+      return None
+    if cap_ms is None:
+      return float(target_ms)
+    return min(float(target_ms), float(cap_ms))
+
+  def _apply_roadworks_final_cap(self, *, desired_ms: float, src: str, cap_ms: Optional[float]) -> tuple[float, str]:
+    if cap_ms is None:
+      return float(desired_ms), str(src)
+    if float(desired_ms) <= (float(cap_ms) + float(self._ROADWORKS_FINAL_CAP_MARGIN_MS)):
+      return float(desired_ms), str(src)
+
+    suffix = "roadworks_final_cap"
+    if any(token in str(src) for token in ("lead_release", "lead_far_release", "lead_soft_release", "state[CRUISE_SYNC]")):
+      suffix = f"{suffix}+lead_release_roadworks_block"
+    return float(cap_ms), f"{src}+{suffix}"
 
 
   def _lead_is_constraining(self, *, base_target_ms: float, v_ego_ms: float) -> bool:
@@ -3916,11 +3938,15 @@ class LongController:
       self._curve_limit_guard_active = False
       self._curve_limit_guard_candidate_since_ms = 0
       self._curve_limit_guard_release_candidate_since_ms = 0
+      self._post_sleep_controls_guard_until_ms = 0
+      self._last_stock_cruise_enabled = False
       return LongDecision(None, "gated: not enabled/adaptive")
 
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "")
     if stock_state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
       self._last_active = False
+      self._last_stock_cruise_enabled = False
+      self._post_sleep_controls_guard_until_ms = 0
       self._reset_curve_hold()
       self._reset_lead_hold()
       self._reset_lead_curve_hold()
@@ -3931,6 +3957,14 @@ class LongController:
       self._curve_limit_guard_candidate_since_ms = 0
       self._curve_limit_guard_release_candidate_since_ms = 0
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
+
+    stock_cruise_now_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
+    if stock_cruise_now_enabled and not bool(self._last_stock_cruise_enabled):
+      self._post_sleep_controls_guard_until_ms = max(
+        int(self._post_sleep_controls_guard_until_ms),
+        int(now) + int(self._POST_SLEEP_CONTROL_GUARD_MS),
+      )
+    self._last_stock_cruise_enabled = bool(stock_cruise_now_enabled)
 
     if not self._last_active:
       self._enabled_since_ms = int(now)
@@ -3991,10 +4025,22 @@ class LongController:
 
     speed_limit_target_ms, set_speed_limit_active, ceiling_src = self._resolve_speed_limit_target_ms(CS, speed_units=speed_units)
     roadworks_cap_ms = self._roadworks_cap_ms()
+    if roadworks_cap_ms is not None and speed_limit_target_ms is not None:
+      capped_speed_limit_target_ms = self._roadworks_cap_target_ms(speed_limit_target_ms, roadworks_cap_ms)
+      if capped_speed_limit_target_ms is not None and float(capped_speed_limit_target_ms) < float(speed_limit_target_ms):
+        speed_limit_target_ms = float(capped_speed_limit_target_ms)
+        if "roadworks_cap" not in str(ceiling_src):
+          ceiling_src = f"{ceiling_src}+roadworks_cap"
+
+    if (
+      bool(stock_cruise_now_enabled)
+      and int(now) <= int(self._post_sleep_controls_guard_until_ms)
+    ):
+      return LongDecision(None, f"post_sleep_controls_guard stock={stock_state}")
 
     if set_speed_limit_active and speed_limit_target_ms is not None:
       base_target_ms = float(speed_limit_target_ms)
-      if roadworks_cap_ms is not None:
+      if roadworks_cap_ms is not None and "roadworks_cap" not in str(ceiling_src):
         base_target_ms = min(float(base_target_ms), float(roadworks_cap_ms))
         ceiling_src = f"{ceiling_src}+roadworks_cap"
       desired_ms = float(base_target_ms)
@@ -4522,6 +4568,17 @@ class LongController:
       desired_ms = max(float(desired_ms), float(self.MIN_CRUISE_SPEED_MS))
       if "min_hold" not in src:
         src = f"{src}+min_hold"
+
+    desired_ms, src = self._apply_roadworks_final_cap(
+      desired_ms=float(desired_ms),
+      src=str(src),
+      cap_ms=roadworks_cap_ms,
+    )
+    if roadworks_cap_ms is not None and speed_limit_target_ms is not None:
+      capped_speed_limit_target_ms = self._roadworks_cap_target_ms(speed_limit_target_ms, roadworks_cap_ms)
+      if capped_speed_limit_target_ms is not None:
+        speed_limit_target_ms = float(capped_speed_limit_target_ms)
+        set_speed_limit_active = True
 
     stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
     brake_pressed = bool(getattr(cs_out, "brakePressed", False))

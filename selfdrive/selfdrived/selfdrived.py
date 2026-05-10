@@ -111,6 +111,9 @@ class SelfdriveD:
     self.active = False
     self.mismatch_counter = 0
     self.cruise_mismatch_counter = 0
+    self.controls_allowed_warmup_until_frame = 0
+    self.last_enabled_for_mismatch = False
+    self.last_gear_for_mismatch = None
     self.last_steering_pressed_frame = 0
     self.distance_traveled = 0
     self.last_functional_fan_frame = 0
@@ -458,12 +461,28 @@ class SelfdriveD:
       or CS.gearShifter not in (GearShifter.drive, GearShifter.sport, GearShifter.low, GearShifter.eco)
     )
 
-    if not self.enabled or reverse_or_wrong_gear:
+    drive_gear = bool(CS.gearShifter in (GearShifter.drive, GearShifter.sport, GearShifter.low, GearShifter.eco))
+    first_enable_after_sleep = bool(self.enabled and not bool(self.last_enabled_for_mismatch))
+    first_drive_after_sleep = bool(self.enabled and drive_gear and self.last_gear_for_mismatch not in (GearShifter.drive, GearShifter.sport, GearShifter.low, GearShifter.eco))
+    if first_enable_after_sleep or first_drive_after_sleep:
+      self.controls_allowed_warmup_until_frame = max(
+        int(self.controls_allowed_warmup_until_frame),
+        int(self.sm.frame) + int(4.0 / DT_CTRL),
+      )
+
+    self.last_enabled_for_mismatch = bool(self.enabled)
+    self.last_gear_for_mismatch = CS.gearShifter
+
+    if not self.enabled or reverse_or_wrong_gear or int(self.sm.frame) <= int(self.controls_allowed_warmup_until_frame):
       self.mismatch_counter = 0
 
     # Panda safety drops controlsAllowed immediately on reverse; carState arrives on another socket.
-    if self.enabled and not reverse_or_wrong_gear and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
-           if ps.safetyModel not in IGNORED_SAFETY_MODES):
+    if (
+      self.enabled
+      and not reverse_or_wrong_gear
+      and int(self.sm.frame) > int(self.controls_allowed_warmup_until_frame)
+      and any(not ps.controlsAllowed for ps in self.sm['pandaStates'] if ps.safetyModel not in IGNORED_SAFETY_MODES)
+    ):
       self.mismatch_counter += 1
 
     return CS
