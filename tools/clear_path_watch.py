@@ -334,6 +334,11 @@ def _mapd_summary(mo: Any) -> dict[str, Any]:
     value = _maybe_attr(mo, name, None)
     if value is not None:
       out[name] = _safe_str(value)
+
+  out["rawRoadFields"] = _interesting_named_fields(
+    mo,
+    ("road", "route", "way", "junction", "roundabout", "intersection", "turn", "maneuver", "type", "class"),
+  )
   return out
 
 
@@ -761,6 +766,10 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"gapS={_safe_float(follow.get('actualGapS'), 0.0):.2f} "
     f"desiredTF={_safe_float(follow.get('desiredTF'), 0.0):.2f} "
     f"pNear={_safe_float(flags.get('pNear'), 0.0):.2f} "
+    f"mapAlive={int(_safe_bool(mapd.get('alive', False)))} "
+    f"mapValid={int(_safe_bool(mapd.get('valid', False)))} "
+    f"mapAge={_safe_float(mapd.get('ageMs'), 0.0):.0f} "
+    f"mapHas={int(_safe_bool(mapd.get('hasCurveInputs', False)))} "
     f"map={_safe_float(mapd.get('mapCurveSpeed'), 0.0):.2f} "
     f"vis={_safe_float(mapd.get('visionCurveSpeed'), 0.0):.2f} "
     f"followS={_safe_int(follow.get('followS'), 255)} "
@@ -829,6 +838,16 @@ def main() -> int:
       plan = _plan_summary(sm["longitudinalPlan"]) if sm.seen["longitudinalPlan"] else {}
       model = _model_summary(sm["modelV2"]) if sm.seen["modelV2"] else {}
       mapd = _mapd_summary(sm["mapdOut"]) if sm.seen["mapdOut"] else {}
+      mapd_mono_ns = _safe_int(sm.logMonoTime.get("mapdOut", 0), 0)
+      mapd_age_ms = ((time.monotonic_ns() - mapd_mono_ns) / 1_000_000.0) if mapd_mono_ns > 0 else 0.0
+      mapd["seen"] = _safe_bool(sm.seen["mapdOut"])
+      mapd["alive"] = _safe_bool(sm.alive["mapdOut"])
+      mapd["valid"] = _safe_bool(sm.valid["mapdOut"])
+      mapd["ageMs"] = float(mapd_age_ms)
+      mapd["hasCurveInputs"] = bool(
+        _safe_float(mapd.get("mapCurveSpeed"), 0.0) > 0.1
+        or _safe_float(mapd.get("visionCurveSpeed"), 0.0) > 0.1
+      )
       long_log = tail.latest()
       lead_state = flap_tracker.update(now_ms, radar["leadOne"], radar["leadTwo"])
 
@@ -890,6 +909,9 @@ def main() -> int:
           "planner_lead_ignored",
           "lead_far_release",
           "lead_soft_release",
+          "cruise_inactive_guard",
+          "pedal_override_guard",
+          "mapd_blank_reject",
         )
       ):
         interesting = True

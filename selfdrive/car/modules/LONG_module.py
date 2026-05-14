@@ -9,7 +9,7 @@ v61 adds an explicit final LONG arbitration state machine.
 
 v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, and lateral-load bands.
 
-v81 keeps the v80 baseline and adds final roadworks-cap enforcement plus a short post-sleep control guard.
+v82 keeps the v81 baseline and hard-gates LONG actions while cruise/pedal/mapd state is invalid.
 
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
@@ -54,6 +54,7 @@ class LongController:
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
   _ROADWORKS_FINAL_CAP_MARGIN_MS = 0.05 * CV.MPH_TO_MS
   _POST_SLEEP_CONTROL_GUARD_MS = 2500
+  _CRUISE_INACTIVE_RESET_MS = 350
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -449,6 +450,8 @@ class LongController:
     self._curve_reentry_block_until_ms: int = 0
     self._post_sleep_controls_guard_until_ms: int = 0
     self._last_stock_cruise_enabled: bool = False
+    self._last_cruise_inactive_guard_ms: int = 0
+    self._mapd_blank_guard_until_ms: int = 0
 
 
   def _arm_roundabout_release_guard(self, *, now_ms: int, target_ms: float) -> None:
@@ -481,6 +484,20 @@ class LongController:
 
   def _reset_lead_close_cancel(self) -> None:
     self._lead_close_cancel_candidate_since_ms = 0
+
+
+  def _guard_decision(self, *, now_ms: int, src: str, speed_units: str,
+                      desired_ms: float, current_set_ms: float,
+                      button: int = 0, reason: str = "guard") -> LongDecision:
+    kph_to_u = CV.KPH_TO_MPH if speed_units == "MPH" else 1.0
+    msg = (
+      f"[XNOR_CRUISE_SYNC] src={src} uom={speed_units} "
+      f"tgt={float(desired_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+      f"cur={float(current_set_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+      f"est=0.0 btn={int(button)} reason={reason}"
+    )
+    self._rate_log(msg)
+    return LongDecision(None, msg)
 
 
   def _rate_log(self, msg: str) -> None:
@@ -3981,8 +3998,58 @@ class LongController:
     current_set_ms = float(getattr(CS, "stock_cruise_set_speed_ms", 0.0) or 0.0)
     speed_units = str(getattr(CS, "speed_units", "MPH") or "MPH")
     cruise_buttons = int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0)
+    gas_pressed = bool(getattr(cs_out, "gasPressed", False))
+    brake_pressed = bool(getattr(cs_out, "brakePressed", False))
+    pedal_override = bool(gas_pressed or brake_pressed)
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
+
+    raw_map_ms_pre, raw_vision_ms_pre = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    mapd_blank_pre = raw_map_ms_pre is None and raw_vision_ms_pre is None
+    if bool(mapd_blank_pre):
+      self._reset_curve_hold()
+      self._reset_lead_curve_hold()
+      self._clear_roundabout_release_guard()
+      self._mapd_blank_guard_until_ms = int(now) + int(self._MAPD_FRESH_NS // 1_000_000)
+
+    if not bool(stock_cruise_now_enabled):
+      self._reset_lead_hold()
+      self._reset_lead_curve_hold()
+      self._reset_curve_hold()
+      self._clear_roundabout_release_guard()
+      self._last_cruise_inactive_guard_ms = int(now)
+      return self._guard_decision(
+        now_ms=int(now),
+        src="cruise_inactive_guard",
+        speed_units=speed_units,
+        desired_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms),
+        current_set_ms=float(current_set_ms),
+        reason="guard[cruise_inactive]",
+      )
+
+    if bool(pedal_override):
+      self._reset_lead_approach_cancel()
+      self._reset_lead_stuck_cancel()
+      self._reset_lead_close_cancel()
+      self._last_cruise_inactive_guard_ms = int(now)
+      return self._guard_decision(
+        now_ms=int(now),
+        src=f"pedal_override_guard[{'brake' if brake_pressed else 'gas'}]",
+        speed_units=speed_units,
+        desired_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms),
+        current_set_ms=float(current_set_ms),
+        reason="guard[pedal_override]",
+      )
+
+    if int(now) <= int(self._post_sleep_controls_guard_until_ms):
+      return self._guard_decision(
+        now_ms=int(now),
+        src="post_sleep_controls_guard",
+        speed_units=speed_units,
+        desired_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms),
+        current_set_ms=float(current_set_ms),
+        reason="guard[post_sleep]",
+      )
     lp_fresh = (
       (self._lp_target_last_ms is not None)
       and (int(self._lp_last_ns) > 0)
@@ -4031,12 +4098,6 @@ class LongController:
         speed_limit_target_ms = float(capped_speed_limit_target_ms)
         if "roadworks_cap" not in str(ceiling_src):
           ceiling_src = f"{ceiling_src}+roadworks_cap"
-
-    if (
-      bool(stock_cruise_now_enabled)
-      and int(now) <= int(self._post_sleep_controls_guard_until_ms)
-    ):
-      return LongDecision(None, f"post_sleep_controls_guard stock={stock_state}")
 
     if set_speed_limit_active and speed_limit_target_ms is not None:
       base_target_ms = float(speed_limit_target_ms)
@@ -4546,6 +4607,15 @@ class LongController:
       cs_out=cs_out,
     )
 
+    raw_map_ms_after, raw_vision_ms_after = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    mapd_blank_after = raw_map_ms_after is None and raw_vision_ms_after is None
+    if bool(mapd_blank_after) and any(token in str(src) for token in ("curve_hold[mapd]", "mapd_roundabout", "roundabout_fused", "mapd_cap", "lat_sat_hard_cap")):
+      self._reset_curve_hold()
+      self._reset_lead_curve_hold()
+      self._clear_roundabout_release_guard()
+      desired_ms = max(float(desired_ms), min(float(curve_reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+      src = f"{src}+mapd_blank_reject"
+
     desired_ms, lead_low_speed_blocked = self._low_speed_lead_block_target(
       now_ms=int(now),
       desired_ms=float(desired_ms),
@@ -4581,7 +4651,6 @@ class LongController:
         set_speed_limit_active = True
 
     stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
-    brake_pressed = bool(getattr(cs_out, "brakePressed", False))
 
     cancel_raw_map_ms, cancel_raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
     cancel_live_lead = bool(
@@ -4590,14 +4659,18 @@ class LongController:
       and abs(float(self._lead_yrel)) < float(self._LEAD_OFFLANE_YREL_M)
       and not self._lead_is_opening_clear(base_target_ms=float(current_set_ms if float(current_set_ms) > 0.1 else curve_reference_ms), v_ego_ms=float(v_ego_ms))
     )
+    cancel_mapd_blank = bool(cancel_raw_map_ms is None and cancel_raw_vision_ms is None)
     stale_cancel_reject = bool(
       "planner[lead" in str(src)
       and not bool(cancel_live_lead)
       and not bool(self._lat_limit_saturated)
-      and self._straight_vision_clear(
-        raw_map_ms=cancel_raw_map_ms,
-        raw_vision_ms=cancel_raw_vision_ms,
-        reference_ms=float(curve_reference_ms),
+      and (
+        bool(cancel_mapd_blank)
+        or self._straight_vision_clear(
+          raw_map_ms=cancel_raw_map_ms,
+          raw_vision_ms=cancel_raw_vision_ms,
+          reference_ms=float(curve_reference_ms),
+        )
       )
     )
     if bool(stale_cancel_reject):
