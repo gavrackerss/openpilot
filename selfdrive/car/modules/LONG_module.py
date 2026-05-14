@@ -55,6 +55,18 @@ class LongController:
   _ROADWORKS_FINAL_CAP_MARGIN_MS = 0.05 * CV.MPH_TO_MS
   _POST_SLEEP_CONTROL_GUARD_MS = 2500
   _CRUISE_INACTIVE_RESET_MS = 350
+  _CRUISE_STATE_DISAGREE_GRACE_MS = 3500
+  _AUTO_ENGAGE_MIN_SPEED_MS = 6.0 * CV.MPH_TO_MS
+  _AUTO_ENGAGE_MAX_SPEED_MS = 45.0 * CV.MPH_TO_MS
+  _AUTO_ENGAGE_COOLDOWN_MS = 4000
+  _AUTO_ENGAGE_BUTTON = 16
+  _MAPD_ROUNDABOUT_NAME_CAP_MS = 24.0 * CV.MPH_TO_MS
+  _MAPD_ROUNDABOUT_NAME_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
+  _MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS = 32.0 * CV.MPH_TO_MS
+  _MAPD_TOWN_FALSE_POS_DISAGREE_MS = 10.0 * CV.MPH_TO_MS
+  _MAPD_TOWN_FALSE_POS_VISION_CLEAR_MS = 6.0 * CV.MPH_TO_MS
+  _MAPD_TOWN_FALSE_POS_STEER_DEG = 4.0
+  _MAPD_TOWN_FALSE_POS_STEER_RATE_DEG = 18.0
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -387,6 +399,13 @@ class LongController:
     self._mapd_low_biased_fusion_active: bool = False
     self._mapd_fusion_roundabout_hint: bool = False
     self._mapd_fusion_blend: float = 0.0
+    self._mapd_road_name: str = ""
+    self._mapd_way_name: str = ""
+    self._mapd_way_ref: str = ""
+    self._mapd_road_context: str = ""
+    self._mapd_way_selection_type: str = ""
+    self._mapd_one_way: bool = False
+    self._last_auto_engage_ms: int = 0
 
     self._last_info_log_ms: int = 0
     self._enabled_since_ms: int = 0
@@ -470,6 +489,89 @@ class LongController:
       int(now_ms) <= int(self._roundabout_release_guard_until_ms)
       and float(self._roundabout_release_guard_target_ms) > 0.1
     )
+
+  def _mapd_road_text(self) -> str:
+    return " ".join(
+      part.lower()
+      for part in (self._mapd_road_name, self._mapd_way_name, self._mapd_way_ref)
+      if str(part or "").strip()
+    )
+
+  def _mapd_roundabout_name_hint_active(self, *, now_ns: int) -> bool:
+    if int(self._mapd_last_ns) <= 0:
+      return False
+    if (int(now_ns) - int(self._mapd_last_ns)) >= int(self._MAPD_FRESH_NS):
+      return False
+    if str(self._mapd_way_selection_type).lower() == "fail":
+      return False
+    return "roundabout" in self._mapd_road_text()
+
+  def _mapd_freeway_context(self) -> bool:
+    return str(self._mapd_road_context).lower() == "freeway"
+
+  def _mapd_town_false_positive(
+    self,
+    *,
+    now_ns: int,
+    reference_ms: Optional[float],
+    low_ms: float,
+    high_ms: float,
+    map_is_low: bool,
+    planner_confirms_low: bool,
+    steering_confirms_low: bool,
+    current_angle_deg: float,
+    steering_rate_deg: float = 0.0,
+  ) -> bool:
+    if self._mapd_roundabout_name_hint_active(now_ns=int(now_ns)):
+      return False
+    if self._mapd_freeway_context():
+      return False
+    if str(self._mapd_road_context).lower() not in ("city", "unknown"):
+      return False
+    if not bool(map_is_low):
+      return False
+    if bool(planner_confirms_low) or bool(steering_confirms_low) or bool(self._lat_limit_saturated):
+      return False
+    if reference_ms is None or float(reference_ms) <= 0.1:
+      return False
+    if (float(high_ms) - float(low_ms)) < float(self._MAPD_TOWN_FALSE_POS_DISAGREE_MS):
+      return False
+    if float(high_ms) < (float(reference_ms) - float(self._MAPD_TOWN_FALSE_POS_VISION_CLEAR_MS)):
+      return False
+    if abs(float(current_angle_deg)) >= float(self._MAPD_TOWN_FALSE_POS_STEER_DEG):
+      return False
+    if abs(float(steering_rate_deg)) >= float(self._MAPD_TOWN_FALSE_POS_STEER_RATE_DEG):
+      return False
+    return True
+
+  def _mapd_roundabout_name_target_ms(self, *, now_ns: int, reference_ms: Optional[float]) -> Optional[float]:
+    if not self._mapd_roundabout_name_hint_active(now_ns=int(now_ns)):
+      return None
+    if reference_ms is None or float(reference_ms) <= 0.1:
+      return None
+
+    candidates: list[float] = []
+    for raw in (self._mapd_map_curve_ms, self._mapd_vision_curve_ms, self._mapd_suggested_ms):
+      if raw is None:
+        continue
+      val = float(raw)
+      if math.isfinite(val) and val > 0.1:
+        candidates.append(val)
+
+    if not candidates:
+      return None
+
+    target_ms = min(float(min(candidates)), float(self._MAPD_ROUNDABOUT_NAME_CAP_MS))
+    if target_ms > float(self._MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS):
+      return None
+    if target_ms > (float(reference_ms) - float(self._MAPD_ROUNDABOUT_NAME_MIN_DROP_MS)):
+      return None
+
+    self._mapd_comfort_bias_active = True
+    self._mapd_low_biased_fusion_active = True
+    self._mapd_fusion_roundabout_hint = True
+    self._mapd_fusion_blend = float(self._MAPD_FUSION_BLEND_ROUNDABOUT)
+    return max(float(self.MIN_CRUISE_SPEED_MS), float(target_ms))
 
   def _reset_lead_stuck_cancel(self) -> None:
     self._lead_stuck_candidate_since_ms = 0
@@ -652,8 +754,11 @@ class LongController:
         candidates.append(val)
 
     if not candidates:
-      return None
+      return self._mapd_roundabout_name_target_ms(now_ns=int(now_ns), reference_ms=reference_ms)
     if len(candidates) == 1:
+      name_target = self._mapd_roundabout_name_target_ms(now_ns=int(now_ns), reference_ms=reference_ms)
+      if name_target is not None:
+        return min(float(candidates[0]), float(name_target))
       return float(candidates[0])
 
     low_ms = float(min(candidates))
@@ -676,6 +781,22 @@ class LongController:
       map_is_low
       and disagreement_ms >= float(self._MAPD_MAP_ONLY_STRONG_DISAGREE_MS)
     )
+    if self._mapd_town_false_positive(
+      now_ns=int(now_ns),
+      reference_ms=reference_ms,
+      low_ms=float(low_ms),
+      high_ms=float(high_ms),
+      map_is_low=bool(map_is_low),
+      planner_confirms_low=bool(planner_confirms_low),
+      steering_confirms_low=bool(steering_confirms_low),
+      current_angle_deg=float(current_angle_deg),
+    ):
+      self._mapd_comfort_bias_active = False
+      self._mapd_low_biased_fusion_active = False
+      self._mapd_fusion_roundabout_hint = False
+      self._mapd_fusion_blend = 0.0
+      return None
+
     if not strong_map_only_disagreement:
       if bool(planner_curve_active) and (planner_confirms_low or steering_confirms_low):
         return low_ms
@@ -685,11 +806,20 @@ class LongController:
       return low_ms
 
     reference_ok = bool(reference_ms is not None and float(reference_ms) > 0.1)
-    roundabout_hint = bool(
-      map_is_low
+    name_roundabout_hint = bool(
+      self._mapd_roundabout_name_hint_active(now_ns=int(now_ns))
       and reference_ok
-      and low_ms <= float(self._MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS)
-      and low_ms <= (float(reference_ms) - float(self._ROUNDABOUT_MAP_ONLY_MIN_DROP_MS))
+      and low_ms <= float(self._MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS)
+      and low_ms <= (float(reference_ms) - float(self._MAPD_ROUNDABOUT_NAME_MIN_DROP_MS))
+    )
+    roundabout_hint = bool(
+      (
+        map_is_low
+        and reference_ok
+        and low_ms <= float(self._MAPD_FUSION_ROUNDABOUT_MAX_TARGET_MS)
+        and low_ms <= (float(reference_ms) - float(self._ROUNDABOUT_MAP_ONLY_MIN_DROP_MS))
+      )
+      or bool(name_roundabout_hint)
     )
     if roundabout_hint:
       blend = float(self._MAPD_FUSION_BLEND_ROUNDABOUT)
@@ -1755,6 +1885,12 @@ class LongController:
           self._mapd_suggested_ms = suggested_ms if (math.isfinite(suggested_ms) and suggested_ms > 0.1) else None
           self._mapd_map_curve_ms = map_curve_ms if (math.isfinite(map_curve_ms) and map_curve_ms > 0.1) else None
           self._mapd_vision_curve_ms = vision_curve_ms if (math.isfinite(vision_curve_ms) and vision_curve_ms > 0.1) else None
+          self._mapd_road_name = str(getattr(mo, "roadName", "") or "")
+          self._mapd_way_name = str(getattr(mo, "wayName", "") or "")
+          self._mapd_way_ref = str(getattr(mo, "wayRef", "") or "")
+          self._mapd_road_context = str(getattr(mo, "roadContext", "") or "")
+          self._mapd_way_selection_type = str(getattr(mo, "waySelectionType", "") or "")
+          self._mapd_one_way = bool(getattr(mo, "oneWay", False))
           self._mapd_last_ns = mono_ns
     except Exception:
       pass
@@ -2972,21 +3108,45 @@ class LongController:
       and float(raw_map_ms) <= (float(reference_ms) - float(self._ROUNDABOUT_MAP_ONLY_MIN_DROP_MS))
       and float(raw_map_ms) <= (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS))
     )
+    mapd_name_roundabout_hint = bool(self._mapd_roundabout_name_hint_active(now_ns=int(now_ns)))
     roundabout_vision_clear_reject = self._roundabout_reject_vision_clear(
       raw_map_ms=raw_map_ms,
       raw_vision_ms=raw_vision_ms,
       current_angle_deg=float(current_angle_deg),
       steering_rate_deg=float(steering_rate_deg),
     )
+    if bool(mapd_name_roundabout_hint):
+      roundabout_vision_clear_reject = False
+    town_mapd_false_positive = self._mapd_town_false_positive(
+      now_ns=int(now_ns),
+      reference_ms=float(reference_ms),
+      low_ms=float(raw_map_ms) if raw_map_ms is not None else float(reference_ms),
+      high_ms=float(raw_vision_ms) if raw_vision_ms is not None else float(reference_ms),
+      map_is_low=bool(map_supports and raw_map_ms is not None),
+      planner_confirms_low=bool(planner_curve_active),
+      steering_confirms_low=bool(steer_busy),
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+    )
+    if bool(town_mapd_false_positive):
+      return None, "mapd_town_false_positive"
     map_only_roundabout = bool(
-      map_roundabout_hint
-      and not bool(vision_clear_map_conflict)
+      (
+        bool(map_roundabout_hint)
+        or (
+          bool(mapd_name_roundabout_hint)
+          and raw_map_ms is not None
+          and float(raw_map_ms) <= float(self._MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS)
+        )
+      )
+      and not bool(vision_clear_map_conflict and not bool(mapd_name_roundabout_hint))
       and not bool(roundabout_vision_clear_reject)
       and (
         map_only_low
         or map_low_disagrees_with_vision
         or bool(steer_busy)
         or bool(self._lat_limit_saturated)
+        or bool(mapd_name_roundabout_hint)
       )
     )
 
@@ -3025,7 +3185,10 @@ class LongController:
       if bool(self._mapd_low_biased_fusion_active):
         blend_pct = int(round(float(self._mapd_fusion_blend) * 100.0))
         if bool(self._mapd_fusion_roundabout_hint):
-          owner_parts.append(f"roundabout_fused[b{blend_pct}]")
+          if bool(self._mapd_roundabout_name_hint_active(now_ns=int(now_ns))):
+            owner_parts.append(f"roundabout_fused[name:b{blend_pct}]")
+          else:
+            owner_parts.append(f"roundabout_fused[b{blend_pct}]")
         else:
           owner_parts.append(f"curve_fused[map+vision:b{blend_pct}]")
       else:
@@ -3065,9 +3228,17 @@ class LongController:
     target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
 
     early_roundabout_cap = bool(
-      bool(map_roundabout_hint)
-      and raw_map_ms is not None
-      and float(raw_map_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
+      (
+        bool(map_roundabout_hint)
+        or bool(mapd_name_roundabout_hint)
+      )
+      and (
+        (
+          raw_map_ms is not None
+          and float(raw_map_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
+        )
+        or bool(mapd_name_roundabout_hint)
+      )
       and float(v_ego_ms) >= float(self._ROUNDABOUT_EARLY_MIN_EGO_MS)
     )
     planner_roundabout_cap = bool(
@@ -3351,10 +3522,31 @@ class LongController:
       current_angle_deg=float(current_angle_deg),
       steering_rate_deg=float(steering_rate_deg),
     )
-    roundabout_evidence = bool(
-      not bool(roundabout_rejected_by_vision)
+    mapd_name_roundabout_rescue = bool(
+      self._mapd_roundabout_name_hint_active(now_ns=int(now_ns))
+      and not self._mapd_freeway_context()
       and (
         (
+          raw_map_for_rescue_ms is not None
+          and float(raw_map_for_rescue_ms) > 0.1
+          and float(raw_map_for_rescue_ms) <= float(self._MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS)
+        )
+        or (
+          raw_vision_for_rescue_ms is not None
+          and float(raw_vision_for_rescue_ms) > 0.1
+          and float(raw_vision_for_rescue_ms) <= float(self._MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS)
+        )
+        or (
+          float(planner_near_ms) > 0.1
+          and float(planner_near_ms) <= float(self._MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS)
+        )
+      )
+    )
+    roundabout_evidence = bool(
+      (not bool(roundabout_rejected_by_vision) or bool(mapd_name_roundabout_rescue))
+      and (
+        bool(mapd_name_roundabout_rescue)
+        or (
           raw_map_for_rescue_ms is not None
           and float(raw_map_for_rescue_ms) > 0.1
           and float(raw_map_for_rescue_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS)
@@ -3959,8 +4151,13 @@ class LongController:
       self._last_stock_cruise_enabled = False
       return LongDecision(None, "gated: not enabled/adaptive")
 
+    cs_out = getattr(CS, "out", None)
+    cruise_state = getattr(cs_out, "cruiseState", None)
+    carstate_cruise_enabled = bool(getattr(cruise_state, "enabled", False))
+    carstate_cruise_available = bool(getattr(cruise_state, "available", False))
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "")
-    if stock_state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
+    stock_state_known = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY")
+    if not bool(stock_state_known or carstate_cruise_enabled):
       self._last_active = False
       self._last_stock_cruise_enabled = False
       self._post_sleep_controls_guard_until_ms = 0
@@ -3975,7 +4172,8 @@ class LongController:
       self._curve_limit_guard_release_candidate_since_ms = 0
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
 
-    stock_cruise_now_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
+    stock_cruise_now_enabled = bool(stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL") or (carstate_cruise_enabled and carstate_cruise_available))
+    cruise_state_disagree = bool(carstate_cruise_enabled and carstate_cruise_available and stock_state == "STANDBY")
     if stock_cruise_now_enabled and not bool(self._last_stock_cruise_enabled):
       self._post_sleep_controls_guard_until_ms = max(
         int(self._post_sleep_controls_guard_until_ms),
@@ -3993,14 +4191,13 @@ class LongController:
       self._reset_arbitration_state()
     self._last_active = True
 
-    cs_out = getattr(CS, "out", None)
     v_ego_ms = float(getattr(cs_out, "vEgo", 0.0) or 0.0)
     current_set_ms = float(getattr(CS, "stock_cruise_set_speed_ms", 0.0) or 0.0)
     speed_units = str(getattr(CS, "speed_units", "MPH") or "MPH")
     cruise_buttons = int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0)
-    gas_pressed = bool(getattr(cs_out, "gasPressed", False))
-    brake_pressed = bool(getattr(cs_out, "brakePressed", False))
-    pedal_override = bool(gas_pressed or brake_pressed)
+    gas_pressed = bool(getattr(cs_out, "gasPressed", False) or getattr(CS, "gasPressed", False) or getattr(cs_out, "gas", 0.0))
+    brake_pressed = bool(getattr(cs_out, "brakePressed", False) or getattr(CS, "brakePressed", False) or getattr(cs_out, "brake", 0.0))
+    pedal_override = bool(gas_pressed or brake_pressed or getattr(cs_out, "pedalOverride", False) or getattr(CS, "pedalOverride", False))
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
 
@@ -4018,6 +4215,27 @@ class LongController:
       self._reset_curve_hold()
       self._clear_roundabout_release_guard()
       self._last_cruise_inactive_guard_ms = int(now)
+
+      safe_auto_engage = bool(
+        bool(carstate_cruise_available)
+        and not bool(pedal_override)
+        and float(v_ego_ms) >= float(self._AUTO_ENGAGE_MIN_SPEED_MS)
+        and float(v_ego_ms) <= float(self._AUTO_ENGAGE_MAX_SPEED_MS)
+        and (int(now) - int(self._last_auto_engage_ms)) >= int(self._AUTO_ENGAGE_COOLDOWN_MS)
+      )
+      if bool(safe_auto_engage):
+        self._last_auto_engage_ms = int(now)
+        desired_for_log = max(float(current_set_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))
+        kph_to_u = CV.KPH_TO_MPH if speed_units == "MPH" else 1.0
+        msg = (
+          f"[XNOR_CRUISE_SYNC] src=cruise_inactive_auto_engage uom={speed_units} "
+          f"tgt={desired_for_log * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"cur={float(current_set_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"est=0.0 btn={int(self._AUTO_ENGAGE_BUTTON)} reason=press[autoengage]"
+        )
+        self._rate_log(msg)
+        return LongDecision(int(self._AUTO_ENGAGE_BUTTON), msg)
+
       return self._guard_decision(
         now_ms=int(now),
         src="cruise_inactive_guard",
@@ -4042,14 +4260,17 @@ class LongController:
       )
 
     if int(now) <= int(self._post_sleep_controls_guard_until_ms):
-      return self._guard_decision(
-        now_ms=int(now),
-        src="post_sleep_controls_guard",
-        speed_units=speed_units,
-        desired_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms),
-        current_set_ms=float(current_set_ms),
-        reason="guard[post_sleep]",
-      )
+      if bool(cruise_state_disagree) and self._enabled_since_ms > 0 and (int(now) - int(self._enabled_since_ms)) > int(self._CRUISE_STATE_DISAGREE_GRACE_MS):
+        self._post_sleep_controls_guard_until_ms = 0
+      else:
+        return self._guard_decision(
+          now_ms=int(now),
+          src="post_sleep_controls_guard",
+          speed_units=speed_units,
+          desired_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms),
+          current_set_ms=float(current_set_ms),
+          reason="guard[post_sleep]",
+        )
     lp_fresh = (
       (self._lp_target_last_ms is not None)
       and (int(self._lp_last_ns) > 0)
@@ -4074,6 +4295,8 @@ class LongController:
     planner_near_ms = float(self._lp_target_near_ms) if (lp_fresh and self._lp_target_near_ms is not None) else float(planner_last_ms)
     desired_ms = float(planner_last_ms)
     src = "lp_last" if lp_fresh else "hold"
+    if bool(cruise_state_disagree):
+      src = f"{src}+cruise_state_disagree"
 
     startup_warmup = bool(self._enabled_since_ms and ((int(now) - int(self._enabled_since_ms)) < 1800))
     startup_invalid_clear = (
@@ -4650,7 +4873,7 @@ class LongController:
         speed_limit_target_ms = float(capped_speed_limit_target_ms)
         set_speed_limit_active = True
 
-    stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
+    stock_cruise_enabled = bool(stock_cruise_now_enabled)
 
     cancel_raw_map_ms, cancel_raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
     cancel_live_lead = bool(

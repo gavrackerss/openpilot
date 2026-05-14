@@ -193,6 +193,9 @@ def _car_state_summary(cs: Any) -> dict[str, Any]:
     "speedLimitOffset": _safe_float(_maybe_attr(cs, "speedLimitOffset", 0.0)),
     "cruiseButtons": _safe_int(_maybe_attr(cs, "cruiseButtons", 0), 0),
     "cruiseButtonsCounter": _safe_int(_maybe_attr(cs, "cruiseButtonsCounter", 0), 0),
+    "stockCruiseState": _safe_str(_maybe_attr(cs, "stockCruiseState", _maybe_attr(cs, "stock_cruise_state", ""))),
+    "stockCruiseEnabled": _safe_bool(_maybe_attr(cs, "stockCruiseEnabled", False)),
+    "stockCruiseAvailable": _safe_bool(_maybe_attr(cs, "stockCruiseAvailable", False)),
     "followDistanceS": _safe_int(_maybe_attr(cs, "followDistanceS", 255), 255),
     "followDistance": _safe_float(_maybe_attr(cs, "followDistance", 0.0)),
     "cruiseGap": _safe_float(_maybe_attr(cs, "cruiseGap", 0.0)),
@@ -543,6 +546,9 @@ def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str,
     "pedalOverride": _safe_bool(car.get("pedalOverride", False)) or _safe_bool(car.get("gasPressed", False)) or _safe_bool(car.get("brakePressed", False)),
     "cruiseEnabled": _safe_bool(cruise.get("enabled", False)) if isinstance(cruise, dict) else False,
     "cruiseAvailable": _safe_bool(cruise.get("available", False)) if isinstance(cruise, dict) else False,
+    "stockCruiseState": _safe_str(car.get("stockCruiseState", "")),
+    "stockCruiseEnabled": _safe_bool(car.get("stockCruiseEnabled", False)),
+    "stockCruiseAvailable": _safe_bool(car.get("stockCruiseAvailable", False)),
   }
 
 
@@ -759,6 +765,8 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"pedal={int(flags.get('pedalOverride', False))} "
     f"cruiseEn={int(flags.get('cruiseEnabled', False))} "
     f"cruiseAvail={int(flags.get('cruiseAvailable', False))} "
+    f"stockState={_safe_str(flags.get('stockCruiseState', '-')) or '-'} "
+    f"stockEn={int(flags.get('stockCruiseEnabled', False))} "
     f"lead1={int(record['radarState']['leadOne'].get('status', False))} "
     f"lead2={int(record['radarState']['leadTwo'].get('status', False))} "
     f"leadSel={_safe_str(flap.get('primary', '-'))} "
@@ -772,6 +780,9 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"mapHas={int(_safe_bool(mapd.get('hasCurveInputs', False)))} "
     f"map={_safe_float(mapd.get('mapCurveSpeed'), 0.0):.2f} "
     f"vis={_safe_float(mapd.get('visionCurveSpeed'), 0.0):.2f} "
+    f"road={_safe_str((mapd.get('rawRoadFields') or {}).get('roadName', (mapd.get('rawRoadFields') or {}).get('wayName', '-'))).replace(' ', '_')[:32] or '-'} "
+    f"ctx={_safe_str((mapd.get('rawRoadFields') or {}).get('roadContext', '-')) or '-'} "
+    f"sel={_safe_str((mapd.get('rawRoadFields') or {}).get('waySelectionType', '-')) or '-'} "
     f"followS={_safe_int(follow.get('followS'), 255)} "
     f"stalkGap={_safe_float(follow.get('stalkGap'), 0.0):.1f} "
     f"stalkField={_safe_str(follow.get('stalkGapField'), '-') or '-'} "
@@ -912,6 +923,10 @@ def main() -> int:
           "cruise_inactive_guard",
           "pedal_override_guard",
           "mapd_blank_reject",
+          "cruise_inactive_auto_engage",
+          "cruise_state_disagree",
+          "roundabout_fused[name",
+          "mapd_town_false_positive",
         )
       ):
         interesting = True
