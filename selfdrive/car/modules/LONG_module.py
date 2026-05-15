@@ -60,9 +60,12 @@ class LongController:
   _AUTO_ENGAGE_MAX_SPEED_MS = 45.0 * CV.MPH_TO_MS
   _AUTO_ENGAGE_COOLDOWN_MS = 4000
   _AUTO_ENGAGE_BUTTON = 16
-  _MAPD_ROUNDABOUT_NAME_CAP_MS = 24.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_DYNAMIC_FLOOR_MS = 23.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_DYNAMIC_NAME_FLOOR_MS = 25.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS = 22.0 * CV.MPH_TO_MS
+  _MAPD_ROUNDABOUT_NAME_CAP_MS = 30.0 * CV.MPH_TO_MS
   _MAPD_ROUNDABOUT_NAME_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
-  _MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS = 32.0 * CV.MPH_TO_MS
+  _MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS = 36.0 * CV.MPH_TO_MS
   _MAPD_TOWN_FALSE_POS_DISAGREE_MS = 10.0 * CV.MPH_TO_MS
   _MAPD_TOWN_FALSE_POS_VISION_CLEAR_MS = 6.0 * CV.MPH_TO_MS
   _MAPD_TOWN_FALSE_POS_STEER_DEG = 4.0
@@ -343,7 +346,7 @@ class LongController:
   _ROUNDABOUT_PLANNER_APPROACH_MAX_TARGET_MS = 28.0 * CV.MPH_TO_MS
   _ROUNDABOUT_PLANNER_APPROACH_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
   _ROUNDABOUT_RELEASE_GUARD_HOLD_MS = 1800
-  _ROUNDABOUT_RELEASE_GUARD_CAP_MS = 26.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_RELEASE_GUARD_CAP_MS = 28.0 * CV.MPH_TO_MS
   _ROUNDABOUT_RELEASE_GUARD_MAX_MAP_MS = 21.0 * CV.MPH_TO_MS
   _ROUNDABOUT_RELEASE_GUARD_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
   _ROUNDABOUT_REJECT_VISION_CLEAR_MS = 34.0 * CV.MPH_TO_MS
@@ -475,9 +478,20 @@ class LongController:
 
   def _arm_roundabout_release_guard(self, *, now_ms: int, target_ms: float) -> None:
     self._roundabout_release_guard_until_ms = int(now_ms) + int(self._ROUNDABOUT_RELEASE_GUARD_HOLD_MS)
+
+    dynamic_floor_ms = 0.0
+    road_text = self._mapd_road_text()
+    way_sel = str(self._mapd_way_selection_type).lower()
+    vision_ms = float(self._mapd_vision_curve_ms) if self._mapd_vision_curve_ms is not None else 0.0
+    vision_allows_floor = bool(vision_ms >= float(self._ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS))
+
+    if bool(vision_allows_floor) and way_sel != "fail":
+      dynamic_floor_ms = float(self._ROUNDABOUT_DYNAMIC_NAME_FLOOR_MS) if "roundabout" in road_text else float(self._ROUNDABOUT_DYNAMIC_FLOOR_MS)
+
+    guard_target_ms = max(float(target_ms), float(dynamic_floor_ms))
     self._roundabout_release_guard_target_ms = max(
       float(self.MIN_CRUISE_SPEED_MS),
-      min(float(target_ms), float(self._ROUNDABOUT_RELEASE_GUARD_CAP_MS)),
+      min(float(guard_target_ms), float(self._ROUNDABOUT_RELEASE_GUARD_CAP_MS)),
     )
 
   def _clear_roundabout_release_guard(self) -> None:
@@ -3227,6 +3241,33 @@ class LongController:
 
     target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
 
+    roundabout_owner_now = bool(
+      bool(self._mapd_fusion_roundabout_hint)
+      or bool(map_only_roundabout)
+      or bool(mapd_name_roundabout_hint)
+    )
+    if bool(roundabout_owner_now) and not bool(self._lat_limit_saturated):
+      floor_ms = (
+        float(self._ROUNDABOUT_DYNAMIC_NAME_FLOOR_MS)
+        if bool(mapd_name_roundabout_hint)
+        else float(self._ROUNDABOUT_DYNAMIC_FLOOR_MS)
+      )
+      vision_allows_floor = bool(
+        raw_vision_ms is None
+        or float(raw_vision_ms) >= float(self._ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS)
+        or bool(mapd_name_roundabout_hint)
+      )
+      reference_allows_floor = bool(float(reference_ms) >= (float(floor_ms) + float(self._ARBITRATION_CURVE_MIN_DROP_MS)))
+      steering_allows_floor = bool(
+        abs(float(current_angle_deg)) < float(self._ARB_STRONG_STEER_CONFIRM_DEG)
+        and abs(float(steering_rate_deg)) < float(self._ARB_STRONG_STEER_CONFIRM_RATE_DEG)
+      )
+      if bool(vision_allows_floor) and bool(reference_allows_floor) and bool(steering_allows_floor):
+        raised_ms = min(float(reference_ms), float(floor_ms))
+        if float(raised_ms) > float(target_ms):
+          target_ms = float(raised_ms)
+          owner_parts.append("roundabout_dynamic_floor")
+
     early_roundabout_cap = bool(
       (
         bool(map_roundabout_hint)
@@ -4197,7 +4238,9 @@ class LongController:
     cruise_buttons = int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0)
     gas_pressed = bool(getattr(cs_out, "gasPressed", False) or getattr(CS, "gasPressed", False) or getattr(cs_out, "gas", 0.0))
     brake_pressed = bool(getattr(cs_out, "brakePressed", False) or getattr(CS, "brakePressed", False) or getattr(cs_out, "brake", 0.0))
-    pedal_override = bool(gas_pressed or brake_pressed or getattr(cs_out, "pedalOverride", False) or getattr(CS, "pedalOverride", False))
+    generic_pedal_override = bool(getattr(cs_out, "pedalOverride", False) or getattr(CS, "pedalOverride", False))
+    # Gas is a normal Tesla ACC override; do not freeze XNOR set-speed sync for it.
+    pedal_override = bool(brake_pressed or (generic_pedal_override and not gas_pressed))
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
 
@@ -4218,6 +4261,8 @@ class LongController:
 
       safe_auto_engage = bool(
         bool(carstate_cruise_available)
+        and not bool(gas_pressed)
+        and not bool(brake_pressed)
         and not bool(pedal_override)
         and float(v_ego_ms) >= float(self._AUTO_ENGAGE_MIN_SPEED_MS)
         and float(v_ego_ms) <= float(self._AUTO_ENGAGE_MAX_SPEED_MS)
@@ -4252,7 +4297,7 @@ class LongController:
       self._last_cruise_inactive_guard_ms = int(now)
       return self._guard_decision(
         now_ms=int(now),
-        src=f"pedal_override_guard[{'brake' if brake_pressed else 'gas'}]",
+        src=f"pedal_override_guard[{'brake' if brake_pressed else 'manual'}]",
         speed_units=speed_units,
         desired_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms),
         current_set_ms=float(current_set_ms),
@@ -4867,6 +4912,9 @@ class LongController:
       src=str(src),
       cap_ms=roadworks_cap_ms,
     )
+    if bool(gas_pressed) and not bool(brake_pressed) and "gas_passthrough" not in str(src):
+      src = f"{src}+gas_passthrough"
+
     if roadworks_cap_ms is not None and speed_limit_target_ms is not None:
       capped_speed_limit_target_ms = self._roadworks_cap_target_ms(speed_limit_target_ms, roadworks_cap_ms)
       if capped_speed_limit_target_ms is not None:
