@@ -60,9 +60,11 @@ class LongController:
   _AUTO_ENGAGE_MAX_SPEED_MS = 45.0 * CV.MPH_TO_MS
   _AUTO_ENGAGE_COOLDOWN_MS = 4000
   _AUTO_ENGAGE_BUTTON = 16
-  _ROUNDABOUT_DYNAMIC_FLOOR_MS = 23.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_DYNAMIC_NAME_FLOOR_MS = 25.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS = 22.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_DYNAMIC_FLOOR_MS = 24.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_DYNAMIC_NAME_FLOOR_MS = 27.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS = 21.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_DYNAMIC_MAX_STEER_DEG = 45.0
+  _ROUNDABOUT_DYNAMIC_MAX_STEER_RATE_DEG = 90.0
   _MAPD_ROUNDABOUT_NAME_CAP_MS = 30.0 * CV.MPH_TO_MS
   _MAPD_ROUNDABOUT_NAME_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
   _MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS = 36.0 * CV.MPH_TO_MS
@@ -3259,8 +3261,8 @@ class LongController:
       )
       reference_allows_floor = bool(float(reference_ms) >= (float(floor_ms) + float(self._ARBITRATION_CURVE_MIN_DROP_MS)))
       steering_allows_floor = bool(
-        abs(float(current_angle_deg)) < float(self._ARB_STRONG_STEER_CONFIRM_DEG)
-        and abs(float(steering_rate_deg)) < float(self._ARB_STRONG_STEER_CONFIRM_RATE_DEG)
+        abs(float(current_angle_deg)) < float(self._ROUNDABOUT_DYNAMIC_MAX_STEER_DEG)
+        and abs(float(steering_rate_deg)) < float(self._ROUNDABOUT_DYNAMIC_MAX_STEER_RATE_DEG)
       )
       if bool(vision_allows_floor) and bool(reference_allows_floor) and bool(steering_allows_floor):
         raised_ms = min(float(reference_ms), float(floor_ms))
@@ -3742,6 +3744,24 @@ class LongController:
       out_src = f"{out_src}+blank_planner_reject+state[CRUISE_SYNC]"
       return float(out_ms), out_src
 
+    straight_planner_reject = bool(
+      not bool(live_lead)
+      and bool(planner_src_is_lead_owner)
+      and bool(straight_vision_clear)
+      and not bool(planner_curve_rescue)
+      and not bool(roundabout_approach_rescue)
+      and not bool(self._lat_limit_saturated)
+    )
+    if bool(straight_planner_reject):
+      self._reset_lead_hold()
+      self._reset_lead_curve_hold()
+      self._reset_curve_hold()
+      self._clear_roundabout_release_guard()
+      self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+      out_ms = max(float(out_ms), float(reference_ms))
+      out_src = f"{out_src}+straight_planner_reject+state[CRUISE_SYNC]"
+      return float(out_ms), out_src
+
     invalid_curve_target = bool(
       str(self._arbitration_state).startswith("CURVE")
       and not bool(curve_confirmed)
@@ -4213,8 +4233,11 @@ class LongController:
       self._curve_limit_guard_release_candidate_since_ms = 0
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
 
-    stock_cruise_now_enabled = bool(stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL") or (carstate_cruise_enabled and carstate_cruise_available))
-    cruise_state_disagree = bool(carstate_cruise_enabled and carstate_cruise_available and stock_state == "STANDBY")
+    stock_reports_enabled = bool(stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL"))
+    carstate_reports_enabled = bool(carstate_cruise_enabled and carstate_cruise_available)
+    # carState.cruiseState.enabled is the safest source for actual Tesla ACC authority.
+    stock_cruise_now_enabled = bool(carstate_reports_enabled)
+    cruise_state_disagree = bool(stock_state_known and stock_reports_enabled != carstate_reports_enabled)
     if stock_cruise_now_enabled and not bool(self._last_stock_cruise_enabled):
       self._post_sleep_controls_guard_until_ms = max(
         int(self._post_sleep_controls_guard_until_ms),

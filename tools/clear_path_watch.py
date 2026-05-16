@@ -788,6 +788,7 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"stalkField={_safe_str(follow.get('stalkGapField'), '-') or '-'} "
     f"gapBtn={','.join(_safe_str(e.get('type'), '') for e in (follow.get('gapButtonEvents') or [])[-2:]) or '-'} "
     f"btnEvt={','.join(_safe_str(e.get('type'), '') for e in (follow.get('buttonEvents') or [])[-3:]) or '-'} "
+    f"longAge={_safe_float(record.get('longLogAgeMs'), 0.0):.0f} "
     f"src={flags['longSource'] or '-'} "
     f"tgt={_safe_float(long_log.get('tgt'), 0.0):.2f} "
     f"cur={_safe_float(long_log.get('cur'), 0.0):.2f} "
@@ -860,6 +861,12 @@ def main() -> int:
         or _safe_float(mapd.get("visionCurveSpeed"), 0.0) > 0.1
       )
       long_log = tail.latest()
+      long_log_age_ms = 0.0
+      if isinstance(long_log, dict) and long_log.get("created") is not None:
+        try:
+          long_log_age_ms = max(0.0, (time.time() - float(long_log.get("created"))) * 1000.0)
+        except Exception:
+          long_log_age_ms = 0.0
       lead_state = flap_tracker.update(now_ms, radar["leadOne"], radar["leadTwo"])
 
       record = {
@@ -876,6 +883,7 @@ def main() -> int:
         "leadState": lead_state,
         "followGap": _follow_gap_summary(car, plan, radar["leadOne"], radar["leadTwo"]),
         "long_log": long_log,
+        "longLogAgeMs": long_log_age_ms,
         "recent_long_logs": tail.recent()[-12:],
       }
       record["derived"] = _derive_flags(
