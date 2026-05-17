@@ -11,6 +11,8 @@ v70 keeps the reverse-safe fix and splits curve behavior into weak, confirmed, a
 
 v82 keeps the v81 baseline and hard-gates LONG actions while cruise/pedal/mapd state is invalid.
 
+v86 adds a narrow late-roundabout approach guard for mapd-alive, vision-optimistic junction entries.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -68,6 +70,15 @@ class LongController:
   _MAPD_ROUNDABOUT_NAME_CAP_MS = 30.0 * CV.MPH_TO_MS
   _MAPD_ROUNDABOUT_NAME_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
   _MAPD_ROUNDABOUT_NAME_MAX_TARGET_MS = 36.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MIN_EGO_MS = 30.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MAX_EGO_MS = 52.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MIN_MAP_MS = 21.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MAX_MAP_MS = 29.5 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MIN_DROP_MS = 8.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_VISION_CLEAR_MARGIN_MS = 2.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MIN_CAP_MS = 28.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MAX_CAP_MS = 30.0 * CV.MPH_TO_MS
+  _LATE_ROUNDABOUT_APPROACH_MAP_EXTRA_MS = 3.0 * CV.MPH_TO_MS
   _MAPD_TOWN_FALSE_POS_DISAGREE_MS = 10.0 * CV.MPH_TO_MS
   _MAPD_TOWN_FALSE_POS_VISION_CLEAR_MS = 6.0 * CV.MPH_TO_MS
   _MAPD_TOWN_FALSE_POS_STEER_DEG = 4.0
@@ -404,6 +415,7 @@ class LongController:
     self._mapd_low_biased_fusion_active: bool = False
     self._mapd_fusion_roundabout_hint: bool = False
     self._mapd_fusion_blend: float = 0.0
+    self._mapd_late_roundabout_approach_active: bool = False
     self._mapd_road_name: str = ""
     self._mapd_way_name: str = ""
     self._mapd_way_ref: str = ""
@@ -589,6 +601,82 @@ class LongController:
     self._mapd_fusion_blend = float(self._MAPD_FUSION_BLEND_ROUNDABOUT)
     return max(float(self.MIN_CRUISE_SPEED_MS), float(target_ms))
 
+  def _late_roundabout_approach_guard_target_ms(
+    self,
+    *,
+    now_ns: int,
+    reference_ms: float,
+    v_ego_ms: float,
+    current_angle_deg: float,
+    steering_rate_deg: float,
+  ) -> Optional[float]:
+    self._mapd_late_roundabout_approach_active = False
+    if int(self._mapd_last_ns) <= 0:
+      return None
+    if (int(now_ns) - int(self._mapd_last_ns)) >= int(self._MAPD_FRESH_NS):
+      return None
+    if self._mapd_freeway_context():
+      return None
+    if str(self._mapd_way_selection_type).lower() == "fail":
+      return None
+    if str(self._mapd_road_context).lower() not in ("city", "unknown", ""):
+      return None
+
+    reference_ms = float(reference_ms)
+    v_ego_ms = float(v_ego_ms)
+    current_angle_deg = abs(float(current_angle_deg))
+    steering_rate_deg = abs(float(steering_rate_deg))
+    if reference_ms <= 0.1:
+      return None
+    if v_ego_ms < float(self._LATE_ROUNDABOUT_APPROACH_MIN_EGO_MS):
+      return None
+    if v_ego_ms > float(self._LATE_ROUNDABOUT_APPROACH_MAX_EGO_MS):
+      return None
+
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    if raw_map_ms is None or raw_vision_ms is None:
+      return None
+    raw_map_ms = float(raw_map_ms)
+    raw_vision_ms = float(raw_vision_ms)
+    if not (math.isfinite(raw_map_ms) and math.isfinite(raw_vision_ms)):
+      return None
+
+    map_is_moderate_low = bool(
+      raw_map_ms >= float(self._LATE_ROUNDABOUT_APPROACH_MIN_MAP_MS)
+      and raw_map_ms <= float(self._LATE_ROUNDABOUT_APPROACH_MAX_MAP_MS)
+      and raw_map_ms <= (reference_ms - float(self._LATE_ROUNDABOUT_APPROACH_MIN_DROP_MS))
+    )
+    vision_is_optimistic = bool(
+      raw_vision_ms >= (reference_ms - float(self._LATE_ROUNDABOUT_APPROACH_VISION_CLEAR_MARGIN_MS))
+      and raw_vision_ms >= (raw_map_ms + float(self._MAPD_MAP_ONLY_STRONG_DISAGREE_MS))
+    )
+    if not (map_is_moderate_low and vision_is_optimistic):
+      return None
+
+    # Avoid re-opening old straight-road false positives. This rescue is for a
+    # late arriving moderate map target, before the later low curve/roundabout hold.
+    if current_angle_deg <= float(self._MAPD_TOWN_FALSE_POS_STEER_DEG) and steering_rate_deg <= float(self._MAPD_TOWN_FALSE_POS_STEER_RATE_DEG):
+      road_text = self._mapd_road_text()
+      if not road_text:
+        return None
+
+    cap_ms = min(
+      float(self._LATE_ROUNDABOUT_APPROACH_MAX_CAP_MS),
+      max(
+        float(self._LATE_ROUNDABOUT_APPROACH_MIN_CAP_MS),
+        raw_map_ms + float(self._LATE_ROUNDABOUT_APPROACH_MAP_EXTRA_MS),
+      ),
+    )
+    if cap_ms >= (reference_ms - (0.5 * CV.MPH_TO_MS)):
+      return None
+
+    self._mapd_late_roundabout_approach_active = True
+    self._mapd_comfort_bias_active = True
+    self._mapd_low_biased_fusion_active = True
+    self._mapd_fusion_roundabout_hint = True
+    self._mapd_fusion_blend = float(self._MAPD_FUSION_BLEND_ROUNDABOUT)
+    return float(cap_ms)
+
   def _reset_lead_stuck_cancel(self) -> None:
     self._lead_stuck_candidate_since_ms = 0
     self._lead_stuck_last_drop_ms = 0
@@ -756,6 +844,7 @@ class LongController:
     self._mapd_low_biased_fusion_active = False
     self._mapd_fusion_roundabout_hint = False
     self._mapd_fusion_blend = 0.0
+    self._mapd_late_roundabout_approach_active = False
     if int(self._mapd_last_ns) <= 0:
       return None
     if (int(now_ns) - int(self._mapd_last_ns)) >= int(self._MAPD_FRESH_NS):
@@ -811,6 +900,7 @@ class LongController:
       self._mapd_low_biased_fusion_active = False
       self._mapd_fusion_roundabout_hint = False
       self._mapd_fusion_blend = 0.0
+      self._mapd_late_roundabout_approach_active = False
       return None
 
     if not strong_map_only_disagreement:
@@ -3028,6 +3118,17 @@ class LongController:
       current_angle_deg=float(current_angle_deg),
       steering_rate_deg=float(steering_rate_deg),
     )
+    late_roundabout_approach_ms = self._late_roundabout_approach_guard_target_ms(
+      now_ns=int(now_ns),
+      reference_ms=float(reference_ms),
+      v_ego_ms=float(v_ego_ms),
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+    )
+    late_roundabout_approach = late_roundabout_approach_ms is not None
+    if bool(late_roundabout_approach):
+      vision_clear_map_conflict = False
+      map_supports = True
     if bool(vision_clear_map_conflict):
       map_supports = False
 
@@ -3075,7 +3176,7 @@ class LongController:
       and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS)
     )
 
-    if not (planner_curve_active or map_supports or vision_supports):
+    if not (planner_curve_active or map_supports or vision_supports or late_roundabout_approach):
       if bool(low_speed_lat_load) and not bool(low_speed_lat_release_clear):
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -3144,7 +3245,7 @@ class LongController:
       current_angle_deg=float(current_angle_deg),
       steering_rate_deg=float(steering_rate_deg),
     )
-    if bool(town_mapd_false_positive):
+    if bool(town_mapd_false_positive) and not bool(late_roundabout_approach):
       return None, "mapd_town_false_positive"
     map_only_roundabout = bool(
       (
@@ -3179,6 +3280,9 @@ class LongController:
     owner_parts: list[str] = []
     if bool(roundabout_vision_clear_reject):
       owner_parts.append("roundabout_reject_vision_clear")
+    if bool(late_roundabout_approach) and late_roundabout_approach_ms is not None:
+      curve_candidates.append(float(late_roundabout_approach_ms))
+      owner_parts.append("late_roundabout_approach_guard")
 
     if planner_curve_active:
       curve_candidates.append(float(planner_near_ms))
@@ -3247,6 +3351,7 @@ class LongController:
       bool(self._mapd_fusion_roundabout_hint)
       or bool(map_only_roundabout)
       or bool(mapd_name_roundabout_hint)
+      or bool(late_roundabout_approach)
     )
     if bool(roundabout_owner_now) and not bool(self._lat_limit_saturated):
       floor_ms = (
@@ -3310,13 +3415,14 @@ class LongController:
       and float(planner_near_ms) > 0.1
       and float(planner_near_ms) <= (float(target_ms) + float(self._MAPD_DISAGREE_PLANNER_CONFIRM_MS))
     )
-    hard_curve_confirmed = bool(strong_lateral_confirm or dual_source_agree or planner_confirms_target)
+    hard_curve_confirmed = bool(strong_lateral_confirm or dual_source_agree or planner_confirms_target or late_roundabout_approach)
     weak_curve_advisory = bool(
       not bool(hard_curve_confirmed)
       and not bool(planner_curve_rescue)
       and not bool(low_speed_curve_rescue)
       and not bool(roundabout_approach_rescue)
       and not bool(map_only_roundabout)
+      and not bool(late_roundabout_approach)
       and not bool(live_lead_context)
       and (
         bool(map_only_low)
@@ -4485,17 +4591,38 @@ class LongController:
               current_angle_deg=float(current_angle_deg),
               planner_curve_active=planner_curve_active,
             )
+            late_roundabout_approach_ms = self._late_roundabout_approach_guard_target_ms(
+              now_ns=int(now_ns),
+              reference_ms=float(reference_ms),
+              v_ego_ms=float(v_ego_ms),
+              current_angle_deg=float(current_angle_deg),
+              steering_rate_deg=float(steering_rate_deg),
+            )
+            late_roundabout_approach = late_roundabout_approach_ms is not None
+            if bool(late_roundabout_approach) and (
+              mapd_target_ms is None or float(late_roundabout_approach_ms) < float(mapd_target_ms)
+            ):
+              mapd_target_ms = float(late_roundabout_approach_ms)
             gate_ms = float(self._NO_LEAD_MAPD_CURRENT_GATE_MS)
             if (
               mapd_target_ms is not None
               and float(mapd_target_ms) < (float(reference_ms) - float(self._CURVE_RELEASE_NEAR_TARGET_MARGIN_MS))
               and float(mapd_target_ms) < (float(v_ego_ms) - gate_ms)
             ):
-              curve_target_ms, curve_state = self._stabilize_no_lead_curve_target(
-                now_ms=int(now),
-                raw_target_ms=float(mapd_target_ms),
-                reference_ms=float(reference_ms),
-              )
+              if bool(late_roundabout_approach):
+                curve_target_ms = float(mapd_target_ms)
+                curve_state = "late_roundabout_approach_guard"
+                self._curve_hold_active = True
+                self._curve_hold_target_ms = float(curve_target_ms)
+                self._curve_hold_last_update_ms = int(now)
+                self._curve_entry_candidate_since_ms = 0
+                self._curve_exit_candidate_since_ms = 0
+              else:
+                curve_target_ms, curve_state = self._stabilize_no_lead_curve_target(
+                  now_ms=int(now),
+                  raw_target_ms=float(mapd_target_ms),
+                  reference_ms=float(reference_ms),
+                )
               curve_target_ms, curve_limit_guard, curve_limit_guard_reason = self._apply_curve_limit_guard(
                 now_ms=int(now),
                 current_angle_deg=float(current_angle_deg),
@@ -4511,7 +4638,10 @@ class LongController:
                 curve_state = f"{curve_state}+{guard_suffix}"
               if float(curve_target_ms) < float(base_target_ms):
                 desired_ms = min(float(base_target_ms), float(curve_target_ms))
-                mapd_src = "mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd"
+                if bool(late_roundabout_approach):
+                  mapd_src = "late_roundabout_approach_guard"
+                else:
+                  mapd_src = "mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd"
                 src = f"{src}+{curve_state}[{mapd_src}]"
             else:
               self._reset_curve_hold()
