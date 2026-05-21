@@ -1,0 +1,14 @@
+[Unit]
+Description=xnor AEB boot CAN watcher
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/data/openpilot
+ExecStart=/usr/bin/python3 /data/openpilot/tools/xnor_aeb_boot_watch.py --duration 240 --output-dir /data/openpilot/aeb_boot_watch
+Restart=no
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
