@@ -631,6 +631,10 @@ class SwaglogTail:
     "blank_planner_reject",
     "stale_cancel_reject",
     "invalid_curve_target_recover",
+    "min_hold_invalid_recover",
+    "curve_zero_target_recover",
+    "curve_fused_invalid_recover",
+    "junction_lead_guard_soften",
     "low_speed_curve_rescue",
     "lead_low_speed_reject",
     "lat_trim_reject",
@@ -789,6 +793,7 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"gapBtn={','.join(_safe_str(e.get('type'), '') for e in (follow.get('gapButtonEvents') or [])[-2:]) or '-'} "
     f"btnEvt={','.join(_safe_str(e.get('type'), '') for e in (follow.get('buttonEvents') or [])[-3:]) or '-'} "
     f"longAge={_safe_float(record.get('longLogAgeMs'), 0.0):.0f} "
+    f"longStale={int(_safe_bool(record.get('longLogStale', False)))} "
     f"src={flags['longSource'] or '-'} "
     f"tgt={_safe_float(long_log.get('tgt'), 0.0):.2f} "
     f"cur={_safe_float(long_log.get('cur'), 0.0):.2f} "
@@ -860,13 +865,15 @@ def main() -> int:
         _safe_float(mapd.get("mapCurveSpeed"), 0.0) > 0.1
         or _safe_float(mapd.get("visionCurveSpeed"), 0.0) > 0.1
       )
-      long_log = tail.latest()
+      long_log_raw = tail.latest()
       long_log_age_ms = 0.0
-      if isinstance(long_log, dict) and long_log.get("created") is not None:
+      if isinstance(long_log_raw, dict) and long_log_raw.get("created") is not None:
         try:
-          long_log_age_ms = max(0.0, (time.time() - float(long_log.get("created"))) * 1000.0)
+          long_log_age_ms = max(0.0, (time.time() - float(long_log_raw.get("created"))) * 1000.0)
         except Exception:
           long_log_age_ms = 0.0
+      long_log_stale = bool(long_log_age_ms > 1800.0)
+      long_log = {} if long_log_stale else long_log_raw
       lead_state = flap_tracker.update(now_ms, radar["leadOne"], radar["leadTwo"])
 
       record = {
@@ -883,7 +890,9 @@ def main() -> int:
         "leadState": lead_state,
         "followGap": _follow_gap_summary(car, plan, radar["leadOne"], radar["leadTwo"]),
         "long_log": long_log,
+        "long_log_raw": long_log_raw,
         "longLogAgeMs": long_log_age_ms,
+        "longLogStale": long_log_stale,
         "recent_long_logs": tail.recent()[-12:],
       }
       record["derived"] = _derive_flags(

@@ -13,6 +13,8 @@ v82 keeps the v81 baseline and hard-gates LONG actions while cruise/pedal/mapd s
 
 v86 adds a narrow late-roundabout approach guard for mapd-alive, vision-optimistic junction entries.
 
+v88 adds mapd-dead fail-soft cleanup so planner/steer-only slowdowns cannot masquerade as mapd curve/roundabout control.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -83,6 +85,17 @@ class LongController:
   _MAPD_TOWN_FALSE_POS_VISION_CLEAR_MS = 6.0 * CV.MPH_TO_MS
   _MAPD_TOWN_FALSE_POS_STEER_DEG = 4.0
   _MAPD_TOWN_FALSE_POS_STEER_RATE_DEG = 18.0
+  _JUNCTION_LEAD_GUARD_MAX_GAP_S = 1.20
+  _JUNCTION_LEAD_GUARD_MAX_DREL_M = 10.0
+  _JUNCTION_LEAD_GUARD_MAX_CLOSING_MS = -0.65
+  _JUNCTION_LEAD_GUARD_MAX_DECEL_MS2 = -0.75
+  _JUNCTION_MAPD_CLEAR_MARGIN_MS = 4.0 * CV.MPH_TO_MS
+  _JUNCTION_CURVE_FUSED_RECOVER_MIN_EGO_MS = 12.0 * CV.MPH_TO_MS
+  _JUNCTION_CURVE_FUSED_RECOVER_MIN_TARGET_MS = 20.0 * CV.MPH_TO_MS
+  _JUNCTION_CURVE_FUSED_RECOVER_VISION_CLEAR_MS = 24.0 * CV.MPH_TO_MS
+  _MIN_HOLD_INVALID_RECOVER_MARGIN_MS = 0.5 * CV.MPH_TO_MS
+  _MAPD_DEAD_PLANNER_REJECT_MIN_DROP_MS = 1.0 * CV.MPH_TO_MS
+  _MAPD_DEAD_LAT_SOFTEN_MAX_DROP_MS = 1.25 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -536,6 +549,46 @@ class LongController:
 
   def _mapd_freeway_context(self) -> bool:
     return str(self._mapd_road_context).lower() == "freeway"
+
+  def _mapd_uncertain_junction_context(self) -> bool:
+    if self._mapd_freeway_context():
+      return False
+    ctx = str(self._mapd_road_context).lower()
+    way_sel = str(self._mapd_way_selection_type).lower()
+    return bool(
+      ctx in ("city", "unknown", "")
+      and way_sel in ("possible", "predicted", "extended")
+    )
+
+  def _mapd_not_demanding_slowdown(self, *, reference_ms: float, raw_map_ms: Optional[float], raw_vision_ms: Optional[float]) -> bool:
+    reference_ms = float(reference_ms)
+    if reference_ms <= 0.1:
+      return False
+    map_clear = raw_map_ms is None or float(raw_map_ms) >= (reference_ms - float(self._JUNCTION_MAPD_CLEAR_MARGIN_MS))
+    vision_clear = raw_vision_ms is None or float(raw_vision_ms) >= (reference_ms - float(self._JUNCTION_MAPD_CLEAR_MARGIN_MS))
+    return bool(map_clear and vision_clear)
+
+  def _lead_close_enough_for_junction_guard(self, *, v_ego_ms: float) -> bool:
+    if not bool(self._lead_present) or float(self._lead_drel) <= 0.0:
+      return False
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
+    close_distance = float(self._lead_drel) <= float(self._JUNCTION_LEAD_GUARD_MAX_DREL_M)
+    close_gap = float(gap_s) <= float(self._JUNCTION_LEAD_GUARD_MAX_GAP_S)
+    hard_closing = float(self._lead_vrel) <= float(self._JUNCTION_LEAD_GUARD_MAX_CLOSING_MS)
+    strong_decel = float(self._lp_a_target) <= float(self._JUNCTION_LEAD_GUARD_MAX_DECEL_MS2)
+    return bool(close_distance or close_gap or hard_closing or strong_decel)
+
+  def _min_hold_invalid_recovery_ms(self, *, reference_ms: float, current_set_ms: float, v_ego_ms: float) -> float:
+    return max(
+      float(self.MIN_CRUISE_SPEED_MS),
+      min(
+        float(reference_ms),
+        max(
+          float(current_set_ms),
+          min(float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS) + float(self._MIN_HOLD_INVALID_RECOVER_MARGIN_MS)),
+        ),
+      ),
+    )
 
   def _mapd_town_false_positive(
     self,
@@ -3772,6 +3825,27 @@ class LongController:
       curve_reentry_block=bool(curve_reentry_block),
     )
     curve_confirmed = curve_candidate_ms is not None
+    curve_fused_invalid_recover = bool(
+      bool(curve_confirmed)
+      and "curve_fused" in str(curve_source)
+      and self._mapd_uncertain_junction_context()
+      and not bool(self._lat_limit_saturated)
+      and float(v_ego_ms) >= float(self._JUNCTION_CURVE_FUSED_RECOVER_MIN_EGO_MS)
+      and float(curve_candidate_ms or 0.0) >= float(self._JUNCTION_CURVE_FUSED_RECOVER_MIN_TARGET_MS)
+      and (
+        raw_vision_for_rescue_ms is None
+        or float(raw_vision_for_rescue_ms) >= float(self._JUNCTION_CURVE_FUSED_RECOVER_VISION_CLEAR_MS)
+        or self._mapd_not_demanding_slowdown(
+          reference_ms=float(reference_ms),
+          raw_map_ms=raw_map_for_rescue_ms,
+          raw_vision_ms=raw_vision_for_rescue_ms,
+        )
+      )
+    )
+    if bool(curve_fused_invalid_recover):
+      curve_candidate_ms = None
+      curve_confirmed = False
+      curve_source = "curve_fused_invalid_recover"
 
     lead_critical = bool(
       live_lead
@@ -3866,6 +3940,43 @@ class LongController:
       self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
       out_ms = max(float(out_ms), float(reference_ms))
       out_src = f"{out_src}+straight_planner_reject+state[CRUISE_SYNC]"
+      return float(out_ms), out_src
+
+    min_hold_invalid_target = bool(
+      str(self._arbitration_state).startswith("CURVE")
+      and "min_hold" in str(out_src)
+      and float(out_ms) <= 0.1
+    )
+    if bool(min_hold_invalid_target):
+      out_ms = self._min_hold_invalid_recovery_ms(
+        reference_ms=float(reference_ms),
+        current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms),
+      )
+      out_src = f"{out_src}+min_hold_invalid_recover+state[CURVE_KEEP]"
+      return float(out_ms), out_src
+
+    invalid_zero_curve_owner = bool(
+      str(self._arbitration_state).startswith("CURVE")
+      and float(out_ms) <= 0.1
+      and (
+        "curve_fused_invalid_recover" in str(curve_source)
+        or "curve_fused" in str(out_src)
+        or "curve_hold" in str(out_src)
+        or "roundabout" in str(out_src)
+      )
+    )
+    if bool(invalid_zero_curve_owner):
+      self._reset_curve_hold()
+      self._clear_roundabout_release_guard()
+      self._arm_curve_reentry_block(now_ms=int(now_ms))
+      self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+      self._arbitration_curve_target_ms = 0.0
+      out_ms = max(
+        float(out_ms),
+        min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))),
+      )
+      out_src = f"{out_src}+curve_zero_target_recover+state[CRUISE_SYNC]"
       return float(out_ms), out_src
 
     invalid_curve_target = bool(
@@ -4272,6 +4383,22 @@ class LongController:
       if not bool(genuinely_close or hard_closing or strong_decel):
         return []
 
+    junction_lead_guard_soften = bool(
+      self._mapd_uncertain_junction_context()
+      and bool(lead_planner_guard)
+      and not bool(lead_constraining)
+      and not bool(queue_fallback_active)
+      and not bool(self._lat_limit_saturated)
+      and self._mapd_not_demanding_slowdown(
+        reference_ms=float(base_target_ms),
+        raw_map_ms=raw_map_ms,
+        raw_vision_ms=raw_vision_ms,
+      )
+      and not self._lead_close_enough_for_junction_guard(v_ego_ms=float(v_ego_ms))
+    )
+    if bool(junction_lead_guard_soften):
+      return ["junction_lead_guard_soften"]
+
     if planner_tracks_set and ((lead_constraining and weak_lead_owner) or queue_fallback_active):
       return []
 
@@ -4527,6 +4654,10 @@ class LongController:
           v_ego_ms=float(v_ego_ms),
         )
         lead_owned = ("lead" in drag_reasons) or ("lead_guard" in drag_reasons) or ("lp_hasLead" in drag_reasons)
+        if "junction_lead_guard_soften" in drag_reasons:
+          src = f"{src}+junction_lead_guard_soften"
+          self._reset_lead_hold()
+          self._reset_lead_curve_hold()
         if lead_owned:
           desired_ms = min(float(base_target_ms), float(planner_last_ms))
           src = f"{src}+planner[{'+'.join(drag_reasons)}]"
@@ -4733,6 +4864,10 @@ class LongController:
           v_ego_ms=float(v_ego_ms),
         )
         lead_owned = ("lead" in drag_reasons) or ("lead_guard" in drag_reasons) or ("lp_hasLead" in drag_reasons)
+        if "junction_lead_guard_soften" in drag_reasons:
+          src = f"{src}+junction_lead_guard_soften"
+          self._reset_lead_hold()
+          self._reset_lead_curve_hold()
         if lead_owned:
           desired_ms = float(planner_last_ms)
           src = "lp_last"
@@ -5036,6 +5171,31 @@ class LongController:
       self._clear_roundabout_release_guard()
       desired_ms = max(float(desired_ms), min(float(curve_reference_ms), max(float(current_set_ms), float(v_ego_ms))))
       src = f"{src}+mapd_blank_reject"
+
+    mapd_dead_no_live_lead = bool(
+      bool(mapd_blank_after)
+      and not bool(self._lat_limit_saturated)
+      and not bool(self._lead_present)
+      and not bool(self._lp_has_lead)
+    )
+    mapd_dead_planner_like = bool(
+      bool(mapd_dead_no_live_lead)
+      and any(token in str(src) for token in ("CURVE_ACTIVE:planner", "CURVE_PRE_ENTRY:planner", "planner[lead", "lead_guard"))
+      and float(desired_ms) < (max(float(current_set_ms), float(v_ego_ms)) - float(self._MAPD_DEAD_PLANNER_REJECT_MIN_DROP_MS))
+    )
+    if bool(mapd_dead_planner_like):
+      self._reset_lead_hold()
+      self._reset_lead_curve_hold()
+      self._reset_curve_hold()
+      self._clear_roundabout_release_guard()
+      self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now))
+      desired_ms = max(float(desired_ms), min(float(curve_reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+      src = f"{src}+mapd_dead_planner_reject+state[CRUISE_SYNC]"
+    elif bool(mapd_dead_no_live_lead) and "low_speed_lat_trim[steer_busy]" in str(src):
+      dead_lat_floor_ms = max(float(current_set_ms), float(v_ego_ms)) - float(self._MAPD_DEAD_LAT_SOFTEN_MAX_DROP_MS)
+      if float(desired_ms) < float(dead_lat_floor_ms):
+        desired_ms = max(float(desired_ms), float(dead_lat_floor_ms), float(self.MIN_CRUISE_SPEED_MS))
+        src = f"{src}+mapd_dead_lat_soften"
 
     desired_ms, lead_low_speed_blocked = self._low_speed_lead_block_target(
       now_ms=int(now),
