@@ -19,6 +19,8 @@ v89 makes gas override sync ACC set speed upward to the driver's actual speed an
 
 v90 adds a live confidence/phase speed planner for curves, roundabouts, lateral risk, and fast release.
 
+v91 tightens v90 arbitration: lead safety overrides release, stale lead heartbeat logging, and roundabout confidence blocks false-positive release.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -125,6 +127,10 @@ class LongController:
   _V90_CURVE_CONTROL_CONF = 0.48
   _V90_ROUNDABOUT_CONTROL_CONF = 0.58
   _V90_FALSE_POS_CONF = 0.55
+  _V91_LEAD_RELEASE_LOCK_GAP_S = 1.80
+  _V91_LEAD_RELEASE_LOCK_CLOSING_GAP_S = 2.20
+  _V91_LEAD_RELEASE_LOCK_DREL_M = 18.0
+  _V91_ROUNDABOUT_FP_BLOCK_CONF = 0.50
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -3697,6 +3703,14 @@ class LongController:
       false_pos_conf += 0.30
     if bool(name_roundabout) or bool(lead_conf >= 0.55):
       false_pos_conf -= 0.30
+    if bool(
+      roundabout_conf >= float(self._V91_ROUNDABOUT_FP_BLOCK_CONF)
+      or "late_roundabout_approach_guard" in str(src)
+      or "mapd_roundabout" in str(src)
+      or "roundabout_fused" in str(src)
+      or bool(self._roundabout_release_guard_active(now_ms=int(now_ms)))
+    ):
+      false_pos_conf -= 0.55
     false_pos_conf = self._v90_score(false_pos_conf)
 
     phase = "CLEAR"
@@ -3745,7 +3759,15 @@ class LongController:
       if bool(controlling_roundabout) and raw_map_ms is not None:
         target_ms = min(float(target_ms), float(raw_map_ms) + (4.0 * CV.MPH_TO_MS))
 
-    if bool(false_pos_conf >= float(self._V90_FALSE_POS_CONF)) and not bool(self._lat_limit_saturated):
+    if bool(
+      false_pos_conf >= float(self._V90_FALSE_POS_CONF)
+      and not bool(self._lat_limit_saturated)
+      and not bool(controlling_roundabout)
+      and float(roundabout_conf) < float(self._V91_ROUNDABOUT_FP_BLOCK_CONF)
+      and "late_roundabout_approach_guard" not in str(src)
+      and "mapd_roundabout" not in str(src)
+      and "roundabout_fused" not in str(src)
+    ):
       release_floor_ms = min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms), float(reference_ms) - float(self._V90_FALSE_POS_RELEASE_DROP_MS)))
       if float(release_floor_ms) > float(desired_ms):
         self._v90_set_phase(phase="CLEAR", now_ms=int(now_ms))
@@ -4227,6 +4249,27 @@ class LongController:
       )
     )
 
+    lead_release_safety_lock = bool(
+      live_lead
+      and not bool(lead_straight_reject)
+      and not bool(lead_opening_clear)
+      and (
+        float(lead_time_gap_s) <= float(max(float(self._V91_LEAD_RELEASE_LOCK_GAP_S), float(desired_follow_s) + 0.15))
+        or (
+          bool(lead_closing)
+          and float(lead_time_gap_s) <= float(max(float(self._V91_LEAD_RELEASE_LOCK_CLOSING_GAP_S), float(desired_follow_s) + 0.45))
+        )
+        or (
+          bool(lead_closing or planner_below_reference)
+          and float(self._lead_drel) <= float(self._V91_LEAD_RELEASE_LOCK_DREL_M)
+        )
+      )
+    )
+    if bool(lead_release_safety_lock):
+      lead_clear_for_recovery = False
+      far_lead_release = False
+      lead_soft_release = False
+
     out_ms = float(desired_ms)
     out_src = str(src)
     if bool(lead_straight_reject):
@@ -4357,6 +4400,25 @@ class LongController:
         out_ms = min(float(out_ms), max(0.0, float(current_set_ms) if float(current_set_ms) > 0.1 else float(v_ego_ms)))
         out_src = f"{out_src}+lead_flap_block_resume"
       out_src = f"{out_src}+state[LEAD_FOLLOW]"
+      return float(out_ms), out_src
+
+    if bool(lead_release_safety_lock):
+      self._set_arbitration_state(state="LEAD_FOLLOW", now_ms=int(now_ms))
+      self._reset_curve_hold()
+      self._reset_lead_curve_hold()
+      locked_ms = float(out_ms)
+      if bool(planner_below_reference) and float(planner_floor_ms) > 0.1:
+        locked_ms = min(float(locked_ms), float(planner_floor_ms))
+      if float(current_set_ms) > 0.1:
+        locked_ms = min(float(locked_ms), float(current_set_ms))
+      if bool(lead_closing):
+        lead_speed_cap_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel) + (0.5 * CV.MPH_TO_MS))
+        if float(lead_speed_cap_ms) > 0.1:
+          locked_ms = min(float(locked_ms), float(lead_speed_cap_ms))
+      if float(lead_time_gap_s) <= float(self._V91_LEAD_RELEASE_LOCK_GAP_S) or bool(lead_closing):
+        locked_ms = min(float(locked_ms), max(float(self.MIN_CRUISE_SPEED_MS), float(v_ego_ms)))
+      out_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(locked_ms))
+      out_src = f"{out_src}+lead_release_safety_lock+state[LEAD_FOLLOW:g={lead_time_gap_s:.1f}/tf={desired_follow_s:.1f}]"
       return float(out_ms), out_src
 
     if (
@@ -5729,7 +5791,30 @@ class LongController:
     )
 
     if decision.button is None or int(decision.button) == int(CruiseButtons.IDLE):
-      return LongDecision(None, f"{decision.reason} src={src}")
+      noop_msg = f"{decision.reason} src={src}"
+      lead_heartbeat = bool(
+        stock_cruise_enabled
+        and not bool(brake_pressed)
+        and (
+          bool(self._lead_present)
+          or bool(self._lp_has_lead)
+          or "LEAD_" in str(src)
+          or "lead_" in str(src)
+          or "planner[lead" in str(src)
+        )
+      )
+      if bool(lead_heartbeat):
+        kph_to_u = CV.KPH_TO_MPH if speed_units == "MPH" else 1.0
+        msg = (
+          f"[XNOR_CRUISE_SYNC] src={src}+lead_heartbeat uom={speed_units} "
+          f"tgt={float(desired_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"cur={float(current_set_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"est={float(v_ego_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"btn=0 reason=heartbeat[lead]"
+        )
+        self._rate_log(msg)
+        return LongDecision(None, msg)
+      return LongDecision(None, noop_msg)
 
     if bool(gas_pressed) and not bool(brake_pressed):
       if int(decision.button) == int(CruiseButtons.CANCEL):

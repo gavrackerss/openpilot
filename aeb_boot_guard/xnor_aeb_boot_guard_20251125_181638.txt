@@ -1,0 +1,3 @@
+Writing /data/openpilot/aeb_boot_guard/xnor_aeb_boot_guard_20251125_181638.jsonl
+Writing /data/openpilot/aeb_boot_guard/xnor_aeb_boot_guard_20251125_181638.txt
+2025-11-25T18:16:39.636+00:00 ready=0 blocked=0 reason=no_panda_states safety=
