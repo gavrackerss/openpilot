@@ -15,6 +15,8 @@ v86 adds a narrow late-roundabout approach guard for mapd-alive, vision-optimist
 
 v88 adds mapd-dead fail-soft cleanup so planner/steer-only slowdowns cannot masquerade as mapd curve/roundabout control.
 
+v89 makes gas override sync ACC set speed upward to the driver's actual speed and blocks gas-triggered cancel/decel output.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -96,6 +98,9 @@ class LongController:
   _MIN_HOLD_INVALID_RECOVER_MARGIN_MS = 0.5 * CV.MPH_TO_MS
   _MAPD_DEAD_PLANNER_REJECT_MIN_DROP_MS = 1.0 * CV.MPH_TO_MS
   _MAPD_DEAD_LAT_SOFTEN_MAX_DROP_MS = 1.25 * CV.MPH_TO_MS
+  _GAS_SPEED_SYNC_MIN_RISE_MS = 0.75 * CV.MPH_TO_MS
+  _GAS_SPEED_SYNC_RELEASE_HOLD_MS = 2500
+  _GAS_SPEED_SYNC_MIN_SPEED_MS = 6.0 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -501,6 +506,8 @@ class LongController:
     self._last_stock_cruise_enabled: bool = False
     self._last_cruise_inactive_guard_ms: int = 0
     self._mapd_blank_guard_until_ms: int = 0
+    self._gas_speed_sync_until_ms: int = 0
+    self._gas_speed_sync_peak_ms: float = 0.0
 
 
   def _arm_roundabout_release_guard(self, *, now_ms: int, target_ms: float) -> None:
@@ -4443,6 +4450,8 @@ class LongController:
       self._curve_limit_guard_release_candidate_since_ms = 0
       self._post_sleep_controls_guard_until_ms = 0
       self._last_stock_cruise_enabled = False
+      self._gas_speed_sync_until_ms = 0
+      self._gas_speed_sync_peak_ms = 0.0
       return LongDecision(None, "gated: not enabled/adaptive")
 
     cs_out = getattr(CS, "out", None)
@@ -4464,6 +4473,8 @@ class LongController:
       self._curve_limit_guard_active = False
       self._curve_limit_guard_candidate_since_ms = 0
       self._curve_limit_guard_release_candidate_since_ms = 0
+      self._gas_speed_sync_until_ms = 0
+      self._gas_speed_sync_peak_ms = 0.0
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
 
     stock_reports_enabled = bool(stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL"))
@@ -4495,8 +4506,19 @@ class LongController:
     gas_pressed = bool(getattr(cs_out, "gasPressed", False) or getattr(CS, "gasPressed", False) or getattr(cs_out, "gas", 0.0))
     brake_pressed = bool(getattr(cs_out, "brakePressed", False) or getattr(CS, "brakePressed", False) or getattr(cs_out, "brake", 0.0))
     generic_pedal_override = bool(getattr(cs_out, "pedalOverride", False) or getattr(CS, "pedalOverride", False))
-    # Gas is a normal Tesla ACC override; do not freeze XNOR set-speed sync for it.
+    # Gas is a normal Tesla ACC override; keep ACC set speed synced upward while the driver accelerates.
     pedal_override = bool(brake_pressed or (generic_pedal_override and not gas_pressed))
+    gas_speed_sync_active = bool(
+      bool(gas_pressed)
+      and not bool(brake_pressed)
+      and float(v_ego_ms) >= float(self._GAS_SPEED_SYNC_MIN_SPEED_MS)
+    )
+    if bool(gas_speed_sync_active):
+      self._gas_speed_sync_until_ms = int(now) + int(self._GAS_SPEED_SYNC_RELEASE_HOLD_MS)
+      self._gas_speed_sync_peak_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
+    elif bool(brake_pressed) or int(now) > int(self._gas_speed_sync_until_ms):
+      self._gas_speed_sync_until_ms = 0
+      self._gas_speed_sync_peak_ms = 0.0
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
 
@@ -5225,6 +5247,21 @@ class LongController:
       src=str(src),
       cap_ms=roadworks_cap_ms,
     )
+
+    gas_sync_target_ms = 0.0
+    if bool(gas_speed_sync_active):
+      gas_sync_target_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
+    elif int(now) <= int(self._gas_speed_sync_until_ms):
+      gas_sync_target_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
+    if float(gas_sync_target_ms) > (float(current_set_ms) + float(self._GAS_SPEED_SYNC_MIN_RISE_MS)):
+      desired_ms = max(float(desired_ms), float(gas_sync_target_ms))
+      self._reset_lead_approach_cancel()
+      self._reset_lead_stuck_cancel()
+      self._reset_lead_close_cancel()
+      gas_sync_marker = "gas_speed_sync" if bool(gas_pressed) else "post_gas_speed_sync"
+      if gas_sync_marker not in str(src):
+        src = f"{src}+{gas_sync_marker}"
+
     if bool(gas_pressed) and not bool(brake_pressed) and "gas_passthrough" not in str(src):
       src = f"{src}+gas_passthrough"
 
@@ -5262,7 +5299,7 @@ class LongController:
       self._reset_lead_stuck_cancel()
       self._reset_lead_close_cancel()
 
-    if stock_cruise_enabled and not bool(stale_cancel_reject) and self._lead_approach_force_cancel_needed(
+    if stock_cruise_enabled and not bool(gas_pressed) and not bool(stale_cancel_reject) and self._lead_approach_force_cancel_needed(
       now_ms=int(now),
       desired_ms=float(desired_ms),
       current_set_ms=float(current_set_ms),
@@ -5282,7 +5319,7 @@ class LongController:
       self._rate_log(msg)
       return LongDecision(int(CruiseButtons.CANCEL), msg)
 
-    if stock_cruise_enabled and not bool(stale_cancel_reject) and self._lead_close_cancel_needed(
+    if stock_cruise_enabled and not bool(gas_pressed) and not bool(stale_cancel_reject) and self._lead_close_cancel_needed(
       now_ms=int(now),
       current_set_ms=float(current_set_ms),
       v_ego_ms=float(v_ego_ms),
@@ -5299,7 +5336,7 @@ class LongController:
       self._rate_log(msg)
       return LongDecision(int(CruiseButtons.CANCEL), msg)
 
-    if stock_cruise_enabled and not bool(stale_cancel_reject) and self._lead_approach_cancel_needed(
+    if stock_cruise_enabled and not bool(gas_pressed) and not bool(stale_cancel_reject) and self._lead_approach_cancel_needed(
       now_ms=int(now),
       desired_ms=float(desired_ms),
       current_set_ms=float(current_set_ms),
@@ -5319,7 +5356,7 @@ class LongController:
       self._rate_log(msg)
       return LongDecision(int(CruiseButtons.CANCEL), msg)
 
-    if stock_cruise_enabled and not bool(stale_cancel_reject) and self._lead_stuck_cancel_needed(
+    if stock_cruise_enabled and not bool(gas_pressed) and not bool(stale_cancel_reject) and self._lead_stuck_cancel_needed(
       now_ms=int(now),
       desired_ms=float(desired_ms),
       current_set_ms=float(current_set_ms),
@@ -5356,6 +5393,12 @@ class LongController:
 
     if decision.button is None or int(decision.button) == int(CruiseButtons.IDLE):
       return LongDecision(None, f"{decision.reason} src={src}")
+
+    if bool(gas_pressed) and not bool(brake_pressed):
+      if int(decision.button) == int(CruiseButtons.CANCEL):
+        return LongDecision(None, f"gas_cancel_block src={src}+gas_cancel_block")
+      if float(decision.target_kph) < (float(decision.current_kph) - (float(self._GAS_SPEED_SYNC_MIN_RISE_MS) * CV.MS_TO_KPH)):
+        return LongDecision(None, f"gas_decel_block src={src}+gas_decel_block")
 
     if bool(stale_cancel_reject) and int(decision.button) == int(CruiseButtons.CANCEL):
       return LongDecision(None, f"stale_cancel_reject src={src}+stale_cancel_reject")
