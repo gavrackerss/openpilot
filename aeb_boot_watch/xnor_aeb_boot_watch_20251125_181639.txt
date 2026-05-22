@@ -1,0 +1,91 @@
+Writing /data/openpilot/aeb_boot_watch/xnor_aeb_boot_watch_20251125_181639.jsonl
+Writing /data/openpilot/aeb_boot_watch/xnor_aeb_boot_watch_20251125_181639.txt
+# xnor AEB boot watch
+jsonl: /data/openpilot/aeb_boot_watch/xnor_aeb_boot_watch_20251125_181639.jsonl
+duration_s: 240.0
+total_can_frames: 437545
+unique_src_addr: 424
+
+Top CAN addresses by count:
+  src=6 addr=0x102 count=19414 changes=19002 unique=793 last=b592fcfffdfffc1f
+  src=4 addr=0x102 count=19412 changes=19001 unique=793 last=b592fcfffdfffc1f
+  src=4 addr=0x298 count=9707 changes=1 unique=1 last=0000fc7f00
+  src=6 addr=0x288 count=9707 changes=1 unique=1 last=0000fc7f00
+  src=4 addr=0x288 count=9707 changes=1 unique=1 last=0000fc7f00
+  src=6 addr=0x298 count=9706 changes=1 unique=1 last=0000fc7f00
+  src=6 addr=0x258 count=1943 changes=1 unique=1 last=00000000000005fa
+  src=4 addr=0x258 count=1943 changes=1 unique=1 last=00000000000005fa
+  src=4 addr=0x203 count=1942 changes=1 unique=1 last=bc13
+  src=4 addr=0x77D count=1942 changes=1 unique=1 last=1100400831
+  src=4 addr=0x202 count=1942 changes=9 unique=2 last=63602e9d0000e801
+  src=6 addr=0x202 count=1942 changes=9 unique=2 last=63602e9d0000e801
+  src=6 addr=0x6F2 count=1942 changes=1942 unique=779 last=0f25b2886c227bc8
+  src=4 addr=0x6F2 count=1942 changes=1942 unique=779 last=0f25b2886c227bc8
+  src=6 addr=0x212 count=1942 changes=1 unique=1 last=5808225300
+  src=4 addr=0x212 count=1942 changes=1 unique=1 last=5808225300
+  src=4 addr=0x222 count=1942 changes=1 unique=1 last=000000000010
+  src=6 addr=0x408 count=1942 changes=1942 unique=16 last=80
+  src=4 addr=0x408 count=1942 changes=1942 unique=16 last=80
+  src=6 addr=0x2C8 count=1942 changes=1942 unique=32 last=6d8c037a262e7004
+  src=4 addr=0x2C8 count=1942 changes=1942 unique=32 last=6d8c037a262e7004
+  src=6 addr=0x207 count=1942 changes=960 unique=3 last=0000c0ff68011400
+  src=4 addr=0x207 count=1942 changes=960 unique=3 last=0000c0ff68011400
+  src=6 addr=0x227 count=1942 changes=1941 unique=1719 last=6405dc880300ecd1
+  src=4 addr=0x227 count=1942 changes=1941 unique=1719 last=6405dc880300ecd1
+  src=6 addr=0x467 count=1942 changes=1 unique=1 last=7e09000000000000
+  src=4 addr=0x467 count=1942 changes=1 unique=1 last=7e09000000000000
+  src=4 addr=0x358 count=1942 changes=1 unique=1 last=180a100140503c13
+  src=6 addr=0x358 count=1942 changes=1 unique=1 last=180a100140503c13
+  src=4 addr=0x20B count=1942 changes=884 unique=3 last=0000c0ff68011400
+  src=6 addr=0x20B count=1942 changes=884 unique=3 last=0000c0ff68011400
+  src=4 addr=0x22B count=1942 changes=1940 unique=1467 last=3405258a0b00ecd1
+  src=6 addr=0x22B count=1942 changes=1940 unique=1467 last=3405258a0b00ecd1
+  src=4 addr=0x23B count=1942 changes=1 unique=1 last=3d41001700000000
+  src=6 addr=0x23B count=1942 changes=1 unique=1 last=3d41001700000000
+  src=4 addr=0x24B count=1942 changes=566 unique=3 last=667d510200302900
+  src=6 addr=0x24B count=1942 changes=566 unique=3 last=667d510200302900
+  src=4 addr=0x46B count=1942 changes=1 unique=1 last=7e09000000000000
+  src=6 addr=0x46B count=1942 changes=1 unique=1 last=7e09000000000000
+  src=6 addr=0x217 count=1942 changes=1 unique=1 last=00c0000081020000
+
+Top CAN addresses by payload changes:
+  src=6 addr=0x102 count=19414 changes=19002 unique=793 last=b592fcfffdfffc1f
+  src=4 addr=0x102 count=19412 changes=19001 unique=793 last=b592fcfffdfffc1f
+  src=6 addr=0x6F2 count=1942 changes=1942 unique=779 last=0f25b2886c227bc8
+  src=4 addr=0x6F2 count=1942 changes=1942 unique=779 last=0f25b2886c227bc8
+  src=6 addr=0x408 count=1942 changes=1942 unique=16 last=80
+  src=4 addr=0x408 count=1942 changes=1942 unique=16 last=80
+  src=6 addr=0x2C8 count=1942 changes=1942 unique=32 last=6d8c037a262e7004
+  src=4 addr=0x2C8 count=1942 changes=1942 unique=32 last=6d8c037a262e7004
+  src=4 addr=0x229 count=1942 changes=1942 unique=1380 last=65056c8a0900ecd1
+  src=6 addr=0x229 count=1942 changes=1942 unique=1380 last=65056c8a0900ecd1
+  src=6 addr=0x76C count=1942 changes=1942 unique=180 last=0502f0ff02f0ff00
+  src=4 addr=0x76C count=1942 changes=1942 unique=180 last=0502f0ff02f0ff00
+  src=4 addr=0x71E count=1942 changes=1942 unique=36 last=0400000000000000
+  src=6 addr=0x71E count=1942 changes=1942 unique=36 last=0400000000000000
+  src=6 addr=0x51E count=1942 changes=1942 unique=487 last=0900000000000000
+  src=4 addr=0x51E count=1942 changes=1942 unique=487 last=0900000000000000
+  src=6 addr=0x227 count=1942 changes=1941 unique=1719 last=6405dc880300ecd1
+  src=4 addr=0x227 count=1942 changes=1941 unique=1719 last=6405dc880300ecd1
+  src=4 addr=0x20A count=1941 changes=1941 unique=16 last=0000000090280000
+  src=6 addr=0x20A count=1941 changes=1941 unique=16 last=0000000090280000
+  src=6 addr=0x51F count=1941 changes=1941 unique=173 last=8c1ee900000000
+  src=4 addr=0x51F count=1941 changes=1941 unique=173 last=8c1ee900000000
+  src=4 addr=0x22B count=1942 changes=1940 unique=1467 last=3405258a0b00ecd1
+  src=6 addr=0x22B count=1942 changes=1940 unique=1467 last=3405258a0b00ecd1
+  src=6 addr=0x45C count=1942 changes=1846 unique=74 last=0000158e1000b492
+  src=4 addr=0x45C count=1942 changes=1846 unique=74 last=0000158e1000b492
+  src=4 addr=0x272 count=1941 changes=1641 unique=24 last=0814f1ff02000000
+  src=6 addr=0x272 count=1940 changes=1640 unique=24 last=0814f1ff02000000
+  src=6 addr=0x210 count=1928 changes=1135 unique=12 last=0000e806058d00
+  src=4 addr=0x210 count=1928 changes=1135 unique=12 last=0000e806058d00
+  src=4 addr=0x547 count=971 changes=971 unique=255 last=a3ff
+  src=6 addr=0x547 count=971 changes=971 unique=255 last=a3ff
+  src=6 addr=0x549 count=971 changes=971 unique=255 last=a3ff
+  src=4 addr=0x549 count=971 changes=971 unique=255 last=a3ff
+  src=6 addr=0x54B count=971 changes=971 unique=255 last=a3ff
+  src=4 addr=0x54B count=971 changes=971 unique=255 last=a3ff
+  src=4 addr=0x3DA count=1941 changes=971 unique=8 last=01047be1464e0000
+  src=6 addr=0x3DA count=1941 changes=971 unique=8 last=01047be1464e0000
+  src=6 addr=0x53A count=971 changes=971 unique=6 last=01ff2aff68ff00ff
+  src=4 addr=0x53A count=971 changes=971 unique=6 last=01ff2aff68ff00ff

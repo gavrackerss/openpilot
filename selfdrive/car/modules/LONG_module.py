@@ -17,6 +17,8 @@ v88 adds mapd-dead fail-soft cleanup so planner/steer-only slowdowns cannot masq
 
 v89 makes gas override sync ACC set speed upward to the driver's actual speed and blocks gas-triggered cancel/decel output.
 
+v90 adds a live confidence/phase speed planner for curves, roundabouts, lateral risk, and fast release.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -101,6 +103,28 @@ class LongController:
   _GAS_SPEED_SYNC_MIN_RISE_MS = 0.75 * CV.MPH_TO_MS
   _GAS_SPEED_SYNC_RELEASE_HOLD_MS = 2500
   _GAS_SPEED_SYNC_MIN_SPEED_MS = 6.0 * CV.MPH_TO_MS
+
+  _V90_PLANNER_MIN_REF_MS = 18.0 * CV.MPH_TO_MS
+  _V90_CURVE_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
+  _V90_CURVE_MOD_DROP_MS = 4.0 * CV.MPH_TO_MS
+  _V90_CURVE_STRONG_DROP_MS = 8.0 * CV.MPH_TO_MS
+  _V90_VISION_CLEAR_MS = 34.0 * CV.MPH_TO_MS
+  _V90_FALSE_POS_RELEASE_DROP_MS = 1.5 * CV.MPH_TO_MS
+  _V90_NORMAL_CURVE_MAX_DROP_MS = 7.0 * CV.MPH_TO_MS
+  _V90_WEAK_CURVE_MAX_DROP_MS = 2.5 * CV.MPH_TO_MS
+  _V90_ROUNDABOUT_APPROACH_CAP_MS = 30.0 * CV.MPH_TO_MS
+  _V90_ROUNDABOUT_STRONG_CAP_MS = 28.0 * CV.MPH_TO_MS
+  _V90_ROUNDABOUT_EXIT_RELEASE_MS = 700
+  _V90_LAT_PRETRIM_MIN_SPEED_MS = 22.0 * CV.MPH_TO_MS
+  _V90_LAT_PRETRIM_DROP_MS = 4.5 * CV.MPH_TO_MS
+  _V90_LAT_HARD_DROP_MS = 6.5 * CV.MPH_TO_MS
+  _V90_STEER_CONFIRM_DEG = 8.0
+  _V90_STEER_CONFIRM_RATE_DEG = 35.0
+  _V90_ROUNDABOUT_NAME_CONF = 0.58
+  _V90_ROUNDABOUT_LATE_CONF = 0.42
+  _V90_CURVE_CONTROL_CONF = 0.48
+  _V90_ROUNDABOUT_CONTROL_CONF = 0.58
+  _V90_FALSE_POS_CONF = 0.55
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -508,6 +532,11 @@ class LongController:
     self._mapd_blank_guard_until_ms: int = 0
     self._gas_speed_sync_until_ms: int = 0
     self._gas_speed_sync_peak_ms: float = 0.0
+    self._v90_speed_phase: str = "CLEAR"
+    self._v90_phase_since_ms: int = 0
+    self._v90_last_active_ms: int = 0
+    self._v90_last_target_ms: float = 0.0
+    self._v90_last_roundabout_conf: float = 0.0
 
 
   def _arm_roundabout_release_guard(self, *, now_ms: int, target_ms: float) -> None:
@@ -3537,6 +3566,297 @@ class LongController:
     return float(target_ms), str(owner_src)
 
 
+
+  @staticmethod
+  def _v90_score(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+  def _v90_reset_speed_planner(self) -> None:
+    self._v90_speed_phase = "CLEAR"
+    self._v90_phase_since_ms = 0
+    self._v90_last_active_ms = 0
+    self._v90_last_target_ms = 0.0
+    self._v90_last_roundabout_conf = 0.0
+
+
+  def _v90_set_phase(self, *, phase: str, now_ms: int) -> None:
+    phase = str(phase or "CLEAR")
+    if phase != str(self._v90_speed_phase):
+      self._v90_speed_phase = phase
+      self._v90_phase_since_ms = int(now_ms)
+
+
+  def _v90_speed_planner_target(
+    self,
+    *,
+    now_ms: int,
+    now_ns: int,
+    desired_ms: float,
+    src: str,
+    reference_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+    planner_near_ms: float,
+    current_angle_deg: float,
+    steering_rate_deg: float,
+  ) -> tuple[float, str]:
+    """Live confidence/phase speed planner overlay for curve and roundabout consistency."""
+    reference_ms = max(float(reference_ms), float(current_set_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))
+    desired_ms = float(desired_ms)
+    if float(reference_ms) < float(self._V90_PLANNER_MIN_REF_MS):
+      self._v90_reset_speed_planner()
+      return float(desired_ms), ""
+
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    mapd_healthy = bool(raw_map_ms is not None or raw_vision_ms is not None)
+    if not bool(mapd_healthy):
+      self._v90_reset_speed_planner()
+      return float(desired_ms), "v90_speed_planner[phase=CLEAR,mapd=dead]"
+
+    road_text = self._mapd_road_text()
+    road_ctx = str(self._mapd_road_context or "").lower()
+    way_sel = str(self._mapd_way_selection_type or "").lower()
+    freeway = bool(road_ctx == "freeway")
+    way_fail = bool(way_sel == "fail")
+    name_roundabout = bool("roundabout" in road_text and not way_fail)
+
+    map_drop_ms = float(reference_ms) - float(raw_map_ms) if raw_map_ms is not None else 0.0
+    vision_drop_ms = float(reference_ms) - float(raw_vision_ms) if raw_vision_ms is not None else 0.0
+    map_supports = bool(raw_map_ms is not None and map_drop_ms >= float(self._V90_CURVE_MIN_DROP_MS))
+    vision_supports = bool(raw_vision_ms is not None and vision_drop_ms >= float(self._V90_CURVE_MIN_DROP_MS))
+    vision_clear = bool(raw_vision_ms is not None and float(raw_vision_ms) >= float(self._V90_VISION_CLEAR_MS))
+    map_moderate = bool(raw_map_ms is not None and float(raw_map_ms) >= float(self._LATE_ROUNDABOUT_APPROACH_MIN_MAP_MS) and float(raw_map_ms) <= float(self._LATE_ROUNDABOUT_APPROACH_MAX_MAP_MS))
+    cityish = bool(road_ctx in ("city", "unknown", ""))
+
+    steer_confirm = bool(
+      abs(float(current_angle_deg)) >= float(self._V90_STEER_CONFIRM_DEG)
+      or abs(float(steering_rate_deg)) >= float(self._V90_STEER_CONFIRM_RATE_DEG)
+    )
+    lat_conf = 1.0 if bool(self._lat_limit_saturated) else 0.0
+    if bool(steer_confirm):
+      lat_conf = max(float(lat_conf), 0.35)
+
+    roundabout_conf = 0.0
+    if bool(name_roundabout):
+      roundabout_conf += float(self._V90_ROUNDABOUT_NAME_CONF)
+    if "roundabout" in str(src) or "late_roundabout_approach_guard" in str(src):
+      roundabout_conf += 0.35
+    if bool(map_moderate) and bool(cityish) and float(v_ego_ms) >= float(self._LATE_ROUNDABOUT_APPROACH_MIN_EGO_MS):
+      roundabout_conf += float(self._V90_ROUNDABOUT_LATE_CONF)
+    if raw_map_ms is not None and float(raw_map_ms) <= float(self._ROUNDABOUT_EARLY_MAX_MAP_MS) and bool(cityish):
+      roundabout_conf += 0.25
+    if raw_vision_ms is not None and float(raw_vision_ms) <= float(self._ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS):
+      roundabout_conf += 0.20
+    if bool(freeway) or bool(way_fail):
+      roundabout_conf -= 0.45
+    roundabout_conf = self._v90_score(roundabout_conf)
+
+    curve_conf = 0.0
+    if bool(map_supports):
+      curve_conf += 0.25
+      if float(map_drop_ms) >= float(self._V90_CURVE_MOD_DROP_MS):
+        curve_conf += 0.18
+      if float(map_drop_ms) >= float(self._V90_CURVE_STRONG_DROP_MS):
+        curve_conf += 0.20
+    if bool(vision_supports):
+      curve_conf += 0.24
+      if float(vision_drop_ms) >= float(self._V90_CURVE_MOD_DROP_MS):
+        curve_conf += 0.16
+      if float(vision_drop_ms) >= float(self._V90_CURVE_STRONG_DROP_MS):
+        curve_conf += 0.18
+    if "curve" in str(src) or "mapd" in str(src):
+      curve_conf += 0.12
+    if bool(steer_confirm) or bool(self._lat_limit_saturated):
+      curve_conf += 0.18
+    if bool(freeway) and not bool(self._lat_limit_saturated):
+      curve_conf -= 0.25
+    curve_conf = self._v90_score(curve_conf)
+
+    live_lead = bool(self._lead_present and float(self._lead_drel) > 0.0 and abs(float(self._lead_yrel)) < float(self._LEAD_OFFLANE_YREL_M))
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1) if bool(live_lead) else 99.0
+    lead_conf = 0.0
+    if bool(live_lead):
+      if float(gap_s) <= 1.4 or float(self._lead_drel) <= 15.0:
+        lead_conf += 0.65
+      elif float(gap_s) <= 2.2 or float(self._lead_drel) <= 30.0:
+        lead_conf += 0.35
+      if float(self._lead_vrel) < -0.5 or float(self._lp_a_target) < -0.5:
+        lead_conf += 0.25
+    lead_conf = self._v90_score(lead_conf)
+
+    false_pos_conf = 0.0
+    map_only_clear_vision = bool(map_supports and not vision_supports and vision_clear)
+    if bool(map_only_clear_vision) and not bool(name_roundabout) and not bool(self._lat_limit_saturated):
+      false_pos_conf += 0.45
+      if not bool(steer_confirm):
+        false_pos_conf += 0.30
+      if bool(cityish):
+        false_pos_conf += 0.10
+    if bool(freeway) and not bool(self._lat_limit_saturated):
+      false_pos_conf += 0.30
+    if bool(name_roundabout) or bool(lead_conf >= 0.55):
+      false_pos_conf -= 0.30
+    false_pos_conf = self._v90_score(false_pos_conf)
+
+    phase = "CLEAR"
+    controlling_roundabout = bool(roundabout_conf >= float(self._V90_ROUNDABOUT_CONTROL_CONF))
+    controlling_curve = bool(curve_conf >= float(self._V90_CURVE_CONTROL_CONF) and false_pos_conf < float(self._V90_FALSE_POS_CONF))
+    if bool(controlling_roundabout):
+      if float(v_ego_ms) > float(self._V90_ROUNDABOUT_APPROACH_CAP_MS) + (2.0 * CV.MPH_TO_MS):
+        phase = "APPROACH"
+      elif bool(steer_confirm) or (raw_vision_ms is not None and float(raw_vision_ms) <= float(self._ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS)):
+        phase = "INSIDE"
+      else:
+        phase = "ENTRY"
+    elif bool(controlling_curve):
+      phase = "ENTRY" if (bool(steer_confirm) or bool(self._lat_limit_saturated)) else "APPROACH"
+    elif int(now_ms) - int(self._v90_last_active_ms) <= int(self._V90_ROUNDABOUT_EXIT_RELEASE_MS):
+      phase = "EXIT"
+
+    source_targets: list[float] = []
+    if bool(map_supports) and raw_map_ms is not None:
+      source_targets.append(float(raw_map_ms))
+    if bool(vision_supports) and raw_vision_ms is not None:
+      source_targets.append(float(raw_vision_ms))
+    if not source_targets and not bool(phase == "EXIT"):
+      self._v90_set_phase(phase="CLEAR", now_ms=int(now_ms))
+      return float(desired_ms), self._v90_marker(
+        phase="CLEAR",
+        roundabout_conf=roundabout_conf,
+        curve_conf=curve_conf,
+        lead_conf=lead_conf,
+        lat_conf=lat_conf,
+        false_pos_conf=false_pos_conf,
+      )
+
+    marker_suffix = ""
+    target_ms = min(source_targets) if source_targets else float(reference_ms)
+    if raw_map_ms is not None and raw_vision_ms is not None and bool(map_supports or vision_supports):
+      if bool(controlling_roundabout):
+        map_weight = 0.70 if bool(name_roundabout) else 0.62
+        if bool(vision_clear) and bool(map_moderate):
+          map_weight = 0.72
+      elif bool(map_only_clear_vision):
+        map_weight = 0.25
+      else:
+        map_weight = 0.54
+      target_ms = (float(raw_map_ms) * float(map_weight)) + (float(raw_vision_ms) * (1.0 - float(map_weight)))
+      if bool(controlling_roundabout) and raw_map_ms is not None:
+        target_ms = min(float(target_ms), float(raw_map_ms) + (4.0 * CV.MPH_TO_MS))
+
+    if bool(false_pos_conf >= float(self._V90_FALSE_POS_CONF)) and not bool(self._lat_limit_saturated):
+      release_floor_ms = min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms), float(reference_ms) - float(self._V90_FALSE_POS_RELEASE_DROP_MS)))
+      if float(release_floor_ms) > float(desired_ms):
+        self._v90_set_phase(phase="CLEAR", now_ms=int(now_ms))
+        self._v90_last_active_ms = 0
+        self._v90_last_target_ms = 0.0
+        return float(release_floor_ms), self._v90_marker(
+          phase="CLEAR",
+          roundabout_conf=roundabout_conf,
+          curve_conf=curve_conf,
+          lead_conf=lead_conf,
+          lat_conf=lat_conf,
+          false_pos_conf=false_pos_conf,
+          extra="v90_false_positive_release",
+        )
+      self._v90_set_phase(phase="CLEAR", now_ms=int(now_ms))
+      return float(desired_ms), self._v90_marker(
+        phase="CLEAR",
+        roundabout_conf=roundabout_conf,
+        curve_conf=curve_conf,
+        lead_conf=lead_conf,
+        lat_conf=lat_conf,
+        false_pos_conf=false_pos_conf,
+      )
+
+    if bool(controlling_roundabout):
+      cap_ms = float(self._V90_ROUNDABOUT_STRONG_CAP_MS) if float(roundabout_conf) >= 0.78 else float(self._V90_ROUNDABOUT_APPROACH_CAP_MS)
+      target_ms = min(float(target_ms), float(cap_ms))
+      if str(phase) in ("ENTRY", "INSIDE") and not bool(self._lat_limit_saturated):
+        floor_ms = float(self._ROUNDABOUT_DYNAMIC_NAME_FLOOR_MS) if bool(name_roundabout) else float(self._ROUNDABOUT_DYNAMIC_FLOOR_MS)
+        if raw_vision_ms is None or float(raw_vision_ms) >= float(self._ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS) or bool(name_roundabout):
+          target_ms = max(float(target_ms), min(float(reference_ms), float(floor_ms)))
+      marker_suffix = "v90_roundabout_confidence"
+    elif bool(controlling_curve):
+      max_drop_ms = float(self._V90_NORMAL_CURVE_MAX_DROP_MS)
+      if float(curve_conf) < 0.68 and not bool(self._lat_limit_saturated):
+        max_drop_ms = float(self._V90_WEAK_CURVE_MAX_DROP_MS)
+      target_ms = max(float(target_ms), float(reference_ms) - float(max_drop_ms))
+      marker_suffix = "v90_curve_confidence"
+
+    if bool(float(lat_conf) >= 0.35 and float(v_ego_ms) >= float(self._V90_LAT_PRETRIM_MIN_SPEED_MS) and (bool(controlling_curve) or bool(controlling_roundabout))):
+      lat_drop_ms = float(self._V90_LAT_HARD_DROP_MS) if bool(self._lat_limit_saturated) else float(self._V90_LAT_PRETRIM_DROP_MS)
+      target_ms = min(float(target_ms), max(float(self.MIN_CRUISE_SPEED_MS), float(v_ego_ms) - float(lat_drop_ms)))
+      marker_suffix = f"{marker_suffix}+v90_lat_pretrim" if marker_suffix else "v90_lat_pretrim"
+
+    if str(phase) == "EXIT":
+      release_target_ms = min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms), float(self._v90_last_target_ms)))
+      if float(release_target_ms) > float(desired_ms):
+        self._v90_set_phase(phase="EXIT", now_ms=int(now_ms))
+        return float(release_target_ms), self._v90_marker(
+          phase="EXIT",
+          roundabout_conf=roundabout_conf,
+          curve_conf=curve_conf,
+          lead_conf=lead_conf,
+          lat_conf=lat_conf,
+          false_pos_conf=false_pos_conf,
+          extra="v90_dynamic_release",
+        )
+
+    target_ms = max(float(self.MIN_CRUISE_SPEED_MS), min(float(reference_ms), float(target_ms)))
+    self._v90_set_phase(phase=str(phase), now_ms=int(now_ms))
+    if str(phase) != "CLEAR":
+      self._v90_last_active_ms = int(now_ms)
+      self._v90_last_target_ms = float(target_ms)
+      self._v90_last_roundabout_conf = float(roundabout_conf)
+
+    if float(target_ms) < (float(desired_ms) - (0.20 * CV.MPH_TO_MS)):
+      return float(target_ms), self._v90_marker(
+        phase=str(phase),
+        roundabout_conf=roundabout_conf,
+        curve_conf=curve_conf,
+        lead_conf=lead_conf,
+        lat_conf=lat_conf,
+        false_pos_conf=false_pos_conf,
+        extra=marker_suffix,
+      )
+
+    if str(phase) != "CLEAR":
+      return float(desired_ms), self._v90_marker(
+        phase=str(phase),
+        roundabout_conf=roundabout_conf,
+        curve_conf=curve_conf,
+        lead_conf=lead_conf,
+        lat_conf=lat_conf,
+        false_pos_conf=false_pos_conf,
+      )
+
+    return float(desired_ms), ""
+
+
+  @staticmethod
+  def _v90_marker(
+    *,
+    phase: str,
+    roundabout_conf: float,
+    curve_conf: float,
+    lead_conf: float,
+    lat_conf: float,
+    false_pos_conf: float,
+    extra: str = "",
+  ) -> str:
+    marker = (
+      f"v90_speed_planner[phase={str(phase)},"
+      f"rc={int(roundabout_conf * 100):02d},"
+      f"cc={int(curve_conf * 100):02d},"
+      f"lc={int(lead_conf * 100):02d},"
+      f"lat={int(lat_conf * 100):02d},"
+      f"fp={int(false_pos_conf * 100):02d}]"
+    )
+    return f"{marker}+{extra}" if extra else marker
+
+
   def _arbitrate_target_state_machine(
     self,
     *,
@@ -4452,6 +4772,7 @@ class LongController:
       self._last_stock_cruise_enabled = False
       self._gas_speed_sync_until_ms = 0
       self._gas_speed_sync_peak_ms = 0.0
+      self._v90_reset_speed_planner()
       return LongDecision(None, "gated: not enabled/adaptive")
 
     cs_out = getattr(CS, "out", None)
@@ -4475,6 +4796,7 @@ class LongController:
       self._curve_limit_guard_release_candidate_since_ms = 0
       self._gas_speed_sync_until_ms = 0
       self._gas_speed_sync_peak_ms = 0.0
+      self._v90_reset_speed_planner()
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
 
     stock_reports_enabled = bool(stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL"))
@@ -5184,6 +5506,21 @@ class LongController:
       lp_fresh=bool(lp_fresh),
       cs_out=cs_out,
     )
+
+    desired_ms, v90_marker = self._v90_speed_planner_target(
+      now_ms=int(now),
+      now_ns=int(now_ns),
+      desired_ms=float(desired_ms),
+      src=str(src),
+      reference_ms=float(curve_reference_ms),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+      planner_near_ms=float(planner_near_ms),
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+    )
+    if v90_marker:
+      src = f"{src}+{v90_marker}"
 
     raw_map_ms_after, raw_vision_ms_after = self._curve_specific_mapd_sources(now_ns=int(now_ns))
     mapd_blank_after = raw_map_ms_after is None and raw_vision_ms_after is None

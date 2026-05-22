@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "/data/openpilot/tools/xnor_aeb_boot_guard.py", line 383, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/data/openpilot/tools/xnor_aeb_boot_guard.py", line 377, in main
+    return guard.run()
+           ^^^^^^^^^^^
+  File "/data/openpilot/tools/xnor_aeb_boot_guard.py", line 337, in run
+    self.update_params(ready=ready, blocked=blocked, reason=reason, snapshot=snapshot)
+  File "/data/openpilot/tools/xnor_aeb_boot_guard.py", line 246, in update_params
+    self.put_param("XnorAebBootGuardActive", "1" if active else "0")
+  File "/data/openpilot/tools/xnor_aeb_boot_guard.py", line 114, in put_param
+    self.params.put_nonblocking(key, value)
+  File "common/params_pyx.pyx", line 162, in common.params_pyx.Params.put_nonblocking
+    cdef string k = self.check_key(key)
+  File "common/params_pyx.pyx", line 96, in common.params_pyx.Params.check_key
+    raise UnknownKeyName(key)
+common.params_pyx.UnknownKeyName: b'XnorAebBootGuardActive'
