@@ -21,6 +21,8 @@ v90 adds a live confidence/phase speed planner for curves, roundabouts, lateral 
 
 v91 tightens v90 arbitration: lead safety overrides release, stale lead heartbeat logging, and roundabout confidence blocks false-positive release.
 
+v92 hard-gates lead acceleration, caps gas sync near close leads, softens roundabout lat trim, and releases stale roundabout holds on road change.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -131,6 +133,13 @@ class LongController:
   _V91_LEAD_RELEASE_LOCK_CLOSING_GAP_S = 2.20
   _V91_LEAD_RELEASE_LOCK_DREL_M = 18.0
   _V91_ROUNDABOUT_FP_BLOCK_CONF = 0.50
+  _V92_LEAD_ACCEL_BLOCK_GAP_S = 2.40
+  _V92_LEAD_ACCEL_BLOCK_CLOSING_GAP_S = 3.00
+  _V92_LEAD_ACCEL_BLOCK_DREL_M = 42.0
+  _V92_LEAD_ACCEL_BLOCK_CLOSING_VREL_MS = -0.05
+  _V92_LEAD_SYNC_SAFE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
+  _V92_ROUNDABOUT_SOFT_LAT_CONF = 0.65
+  _V92_ROUNDABOUT_SOFT_LAT_DROP_MS = 2.0 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -543,6 +552,7 @@ class LongController:
     self._v90_last_active_ms: int = 0
     self._v90_last_target_ms: float = 0.0
     self._v90_last_roundabout_conf: float = 0.0
+    self._v92_last_roundabout_road_text: str = ""
 
 
   def _arm_roundabout_release_guard(self, *, now_ms: int, target_ms: float) -> None:
@@ -2180,6 +2190,41 @@ class LongController:
     return bool(lead_slower_than_base and (closing or non_opening_near))
 
 
+  def _v92_live_lead_for_accel_gate(self) -> bool:
+    return bool(
+      bool(self._lead_present)
+      and float(self._lead_drel) > 0.0
+      and abs(float(self._lead_yrel)) < float(self._LEAD_OFFLANE_YREL_M)
+    )
+
+
+  def _v92_lead_accel_block_active(self, *, v_ego_ms: float, base_target_ms: float) -> bool:
+    if not self._v92_live_lead_for_accel_gate():
+      return False
+    if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
+      return False
+
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
+    closing = float(self._lead_vrel) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_VREL_MS)
+    return bool(
+      float(gap_s) <= float(self._V92_LEAD_ACCEL_BLOCK_GAP_S)
+      or (bool(closing) and float(gap_s) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_GAP_S))
+      or (bool(closing) and float(self._lead_drel) <= float(self._V92_LEAD_ACCEL_BLOCK_DREL_M))
+    )
+
+
+  def _v92_lead_safe_sync_cap_ms(self, *, current_set_ms: float, v_ego_ms: float) -> float:
+    if not self._v92_lead_accel_block_active(v_ego_ms=float(v_ego_ms), base_target_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms)):
+      return float("inf")
+    return max(
+      0.0,
+      min(
+        max(float(current_set_ms), float(v_ego_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS)),
+        float(current_set_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS),
+      ),
+    )
+
+
   def _lead_follow_hold_needed(self, *, base_target_ms: float, v_ego_ms: float) -> bool:
     if bool(self._lead_curve_hold_active) and float(self._lead_drel) > 0.0:
       return True
@@ -3713,6 +3758,43 @@ class LongController:
       false_pos_conf -= 0.55
     false_pos_conf = self._v90_score(false_pos_conf)
 
+    roundabout_marker_active = bool(
+      "late_roundabout_approach_guard" in str(src)
+      or "mapd_roundabout" in str(src)
+      or "roundabout_fused" in str(src)
+      or "roundabout_dynamic_floor" in str(src)
+      or "roundabout_early_cap" in str(src)
+    )
+    last_roundabout_road_text = str(self._v92_last_roundabout_road_text or "")
+    road_changed_after_roundabout = bool(
+      bool(last_roundabout_road_text)
+      and bool(road_text)
+      and str(road_text) != str(last_roundabout_road_text)
+      and "roundabout" not in str(road_text)
+      and bool(vision_clear)
+      and not bool(live_lead and gap_s <= float(self._V92_LEAD_ACCEL_BLOCK_GAP_S))
+    )
+    if bool(road_changed_after_roundabout):
+      self._clear_roundabout_release_guard()
+      self._v90_set_phase(phase="CLEAR", now_ms=int(now_ms))
+      self._v90_last_active_ms = 0
+      self._v90_last_target_ms = 0.0
+      self._v90_last_roundabout_conf = 0.0
+      self._v92_last_roundabout_road_text = ""
+      release_ms = min(float(reference_ms), max(float(desired_ms), float(current_set_ms), float(v_ego_ms)))
+      return float(release_ms), self._v90_marker(
+        phase="CLEAR",
+        roundabout_conf=roundabout_conf,
+        curve_conf=curve_conf,
+        lead_conf=lead_conf,
+        lat_conf=lat_conf,
+        false_pos_conf=false_pos_conf,
+        extra="v92_roundabout_exit_road_change_release",
+      )
+
+    if bool(name_roundabout) and bool(road_text):
+      self._v92_last_roundabout_road_text = str(road_text)
+
     phase = "CLEAR"
     controlling_roundabout = bool(roundabout_conf >= float(self._V90_ROUNDABOUT_CONTROL_CONF))
     controlling_curve = bool(curve_conf >= float(self._V90_CURVE_CONTROL_CONF) and false_pos_conf < float(self._V90_FALSE_POS_CONF))
@@ -3808,9 +3890,12 @@ class LongController:
       marker_suffix = "v90_curve_confidence"
 
     if bool(float(lat_conf) >= 0.35 and float(v_ego_ms) >= float(self._V90_LAT_PRETRIM_MIN_SPEED_MS) and (bool(controlling_curve) or bool(controlling_roundabout))):
-      lat_drop_ms = float(self._V90_LAT_HARD_DROP_MS) if bool(self._lat_limit_saturated) else float(self._V90_LAT_PRETRIM_DROP_MS)
-      target_ms = min(float(target_ms), max(float(self.MIN_CRUISE_SPEED_MS), float(v_ego_ms) - float(lat_drop_ms)))
-      marker_suffix = f"{marker_suffix}+v90_lat_pretrim" if marker_suffix else "v90_lat_pretrim"
+      if bool(controlling_roundabout) and not bool(self._lat_limit_saturated) and float(lat_conf) < float(self._V92_ROUNDABOUT_SOFT_LAT_CONF):
+        marker_suffix = f"{marker_suffix}+v92_roundabout_lat_soften" if marker_suffix else "v92_roundabout_lat_soften"
+      else:
+        lat_drop_ms = float(self._V90_LAT_HARD_DROP_MS) if bool(self._lat_limit_saturated) else float(self._V92_ROUNDABOUT_SOFT_LAT_DROP_MS if controlling_roundabout else self._V90_LAT_PRETRIM_DROP_MS)
+        target_ms = min(float(target_ms), max(float(self.MIN_CRUISE_SPEED_MS), float(v_ego_ms) - float(lat_drop_ms)))
+        marker_suffix = f"{marker_suffix}+v90_lat_pretrim" if marker_suffix else "v90_lat_pretrim"
 
     if str(phase) == "EXIT":
       release_target_ms = min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms), float(self._v90_last_target_ms)))
@@ -4945,7 +5030,7 @@ class LongController:
 
       return self._guard_decision(
         now_ms=int(now),
-        src="cruise_inactive_guard",
+        src="cruise_inactive_alive+cruise_inactive_guard",
         speed_units=speed_units,
         desired_ms=float(current_set_ms if current_set_ms > 0.1 else v_ego_ms),
         current_set_ms=float(current_set_ms),
@@ -5653,16 +5738,32 @@ class LongController:
     elif int(now) <= int(self._gas_speed_sync_until_ms):
       gas_sync_target_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
     if float(gas_sync_target_ms) > (float(current_set_ms) + float(self._GAS_SPEED_SYNC_MIN_RISE_MS)):
-      desired_ms = max(float(desired_ms), float(gas_sync_target_ms))
-      self._reset_lead_approach_cancel()
-      self._reset_lead_stuck_cancel()
-      self._reset_lead_close_cancel()
+      lead_safe_sync_cap_ms = self._v92_lead_safe_sync_cap_ms(current_set_ms=float(current_set_ms), v_ego_ms=float(v_ego_ms))
       gas_sync_marker = "gas_speed_sync" if bool(gas_pressed) else "post_gas_speed_sync"
-      if gas_sync_marker not in str(src):
-        src = f"{src}+{gas_sync_marker}"
+      if math.isfinite(float(lead_safe_sync_cap_ms)) and float(gas_sync_target_ms) > float(lead_safe_sync_cap_ms):
+        gas_sync_target_ms = float(lead_safe_sync_cap_ms)
+        gas_sync_marker = f"{gas_sync_marker}+gas_sync_lead_limit"
+      if float(gas_sync_target_ms) > (float(current_set_ms) + float(self._GAS_SPEED_SYNC_MIN_RISE_MS)):
+        desired_ms = max(float(desired_ms), float(gas_sync_target_ms))
+        self._reset_lead_approach_cancel()
+        self._reset_lead_stuck_cancel()
+        self._reset_lead_close_cancel()
+        if gas_sync_marker not in str(src):
+          src = f"{src}+{gas_sync_marker}"
 
     if bool(gas_pressed) and not bool(brake_pressed) and "gas_passthrough" not in str(src):
       src = f"{src}+gas_passthrough"
+
+    lead_accel_block = bool(
+      self._v92_lead_accel_block_active(
+        v_ego_ms=float(v_ego_ms),
+        base_target_ms=float(current_set_ms if current_set_ms > 0.1 else curve_reference_ms),
+      )
+    )
+    if bool(lead_accel_block) and float(desired_ms) > (float(current_set_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS)):
+      desired_ms = min(float(desired_ms), float(current_set_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS))
+      if "lead_accel_hard_gate" not in str(src):
+        src = f"{src}+lead_accel_hard_gate"
 
     if roadworks_cap_ms is not None and speed_limit_target_ms is not None:
       capped_speed_limit_target_ms = self._roadworks_cap_target_ms(speed_limit_target_ms, roadworks_cap_ms)
@@ -5821,6 +5922,9 @@ class LongController:
         return LongDecision(None, f"gas_cancel_block src={src}+gas_cancel_block")
       if float(decision.target_kph) < (float(decision.current_kph) - (float(self._GAS_SPEED_SYNC_MIN_RISE_MS) * CV.MS_TO_KPH)):
         return LongDecision(None, f"gas_decel_block src={src}+gas_decel_block")
+
+    if bool(lead_accel_block) and float(decision.target_kph) > (float(decision.current_kph) + (float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS) * CV.MS_TO_KPH)):
+      return LongDecision(None, f"lead_accel_hard_gate src={src}+lead_accel_hard_gate")
 
     if bool(stale_cancel_reject) and int(decision.button) == int(CruiseButtons.CANCEL):
       return LongDecision(None, f"stale_cancel_reject src={src}+stale_cancel_reject")
