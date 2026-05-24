@@ -23,6 +23,10 @@ v91 tightens v90 arbitration: lead safety overrides release, stale lead heartbea
 
 v92 hard-gates lead acceleration, caps gas sync near close leads, softens roundabout lat trim, and releases stale roundabout holds on road change.
 
+v93 adds strict highway curve lockout, zero-tolerance close-lead accel blocking, and post-gas sync cancellation when decel/lead/curve context is active.
+
+v94 adds a highway-exit exception so slip roads/exits/roundabouts can still slow when mapd provides a credible exit cue.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -140,6 +144,20 @@ class LongController:
   _V92_LEAD_SYNC_SAFE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
   _V92_ROUNDABOUT_SOFT_LAT_CONF = 0.65
   _V92_ROUNDABOUT_SOFT_LAT_DROP_MS = 2.0 * CV.MPH_TO_MS
+  _V93_LEAD_ACCEL_BLOCK_GAP_S = 2.80
+  _V93_LEAD_ACCEL_BLOCK_CLOSING_GAP_S = 4.00
+  _V93_LEAD_ACCEL_BLOCK_DREL_M = 58.0
+  _V93_LEAD_SYNC_SAFE_MARGIN_MS = 0.0 * CV.MPH_TO_MS
+  _V93_POST_GAS_SYNC_CANCEL_LEAD_GAP_S = 4.00
+  _V93_POST_GAS_SYNC_CANCEL_MS = 3500
+  _V93_HIGHWAY_MIN_SPEED_MS = 45.0 * CV.MPH_TO_MS
+  _V93_HIGHWAY_MIN_REFERENCE_MS = 50.0 * CV.MPH_TO_MS
+  _V94_HIGHWAY_EXIT_MAP_MAX_MS = 36.0 * CV.MPH_TO_MS
+  _V94_HIGHWAY_EXIT_MAP_DROP_MS = 10.0 * CV.MPH_TO_MS
+  _V94_HIGHWAY_EXIT_VISION_MAX_MS = 38.0 * CV.MPH_TO_MS
+  _V94_HIGHWAY_EXIT_NEXT_LIMIT_DROP_MS = 8.0 * CV.MPH_TO_MS
+  _V94_HIGHWAY_EXIT_NEXT_LIMIT_MAX_MS = 45.0 * CV.MPH_TO_MS
+  _V94_HIGHWAY_EXIT_NARROW_WIDTH_M = 10.5
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -479,6 +497,11 @@ class LongController:
     self._mapd_road_context: str = ""
     self._mapd_way_selection_type: str = ""
     self._mapd_one_way: bool = False
+    self._mapd_speed_limit_ms: Optional[float] = None
+    self._mapd_next_speed_limit_ms: Optional[float] = None
+    self._mapd_estimated_road_width_m: Optional[float] = None
+    self._mapd_distance_from_way_center_m: Optional[float] = None
+    self._v94_highway_exit_exception_recent_ms: int = 0
     self._last_auto_engage_ms: int = 0
 
     self._last_info_log_ms: int = 0
@@ -553,6 +576,7 @@ class LongController:
     self._v90_last_target_ms: float = 0.0
     self._v90_last_roundabout_conf: float = 0.0
     self._v92_last_roundabout_road_text: str = ""
+    self._v93_last_brake_ms: int = 0
 
 
   def _arm_roundabout_release_guard(self, *, now_ms: int, target_ms: float) -> None:
@@ -601,6 +625,173 @@ class LongController:
 
   def _mapd_freeway_context(self) -> bool:
     return str(self._mapd_road_context).lower() == "freeway"
+
+
+  @staticmethod
+  def _v93_road_text_is_highway(road_text: str) -> bool:
+    text = str(road_text or "").lower().replace("_", " ")
+    if "roundabout" in text:
+      return False
+    highway_tokens = (
+      "motorway",
+      "bypass",
+      "dual carriageway",
+      "a27",
+      "m27",
+      "a3(m)",
+      "m3",
+      "m4",
+      "m5",
+      "m6",
+      "m25",
+      "m40",
+    )
+    return any(token in text for token in highway_tokens)
+
+
+  @staticmethod
+  def _v94_road_text_has_exit_hint(road_text: str) -> bool:
+    text = str(road_text or "").lower().replace("_", " ")
+    exit_tokens = (
+      "roundabout",
+      "slip",
+      "sliproad",
+      "slip road",
+      "ramp",
+      "exit",
+      "junction",
+      "interchange",
+      "turnoff",
+      "turn off",
+      "services",
+      "gore",
+    )
+    return any(token in text for token in exit_tokens)
+
+  def _v94_next_speed_limit_drop_active(self) -> bool:
+    speed_limit_ms = self._mapd_speed_limit_ms
+    next_limit_ms = self._mapd_next_speed_limit_ms
+    if speed_limit_ms is None or next_limit_ms is None:
+      return False
+    if not (math.isfinite(float(speed_limit_ms)) and math.isfinite(float(next_limit_ms))):
+      return False
+    if float(speed_limit_ms) <= 0.1 or float(next_limit_ms) <= 0.1:
+      return False
+    return bool(
+      float(speed_limit_ms) - float(next_limit_ms) >= float(self._V94_HIGHWAY_EXIT_NEXT_LIMIT_DROP_MS)
+      and float(next_limit_ms) <= float(self._V94_HIGHWAY_EXIT_NEXT_LIMIT_MAX_MS)
+    )
+
+  def _v94_highway_exit_exception_active(
+    self,
+    *,
+    road_text: Optional[str] = None,
+    road_context: Optional[str] = None,
+    reference_ms: float = 0.0,
+    v_ego_ms: float = 0.0,
+    raw_map_ms: Optional[float] = None,
+    raw_vision_ms: Optional[float] = None,
+  ) -> bool:
+    text = self._mapd_road_text() if road_text is None else str(road_text or "")
+    if self._v94_road_text_has_exit_hint(text):
+      return True
+
+    way_sel = str(self._mapd_way_selection_type or "").lower()
+    if way_sel == "fail":
+      return False
+
+    raw_map = self._mapd_map_curve_ms if raw_map_ms is None else raw_map_ms
+    raw_vision = self._mapd_vision_curve_ms if raw_vision_ms is None else raw_vision_ms
+    if raw_map is None or not math.isfinite(float(raw_map)) or float(raw_map) <= 0.1:
+      return False
+
+    reference_ms = max(float(reference_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))
+    map_drop_ms = float(reference_ms) - float(raw_map)
+    map_demands_exit = bool(
+      float(raw_map) <= float(self._V94_HIGHWAY_EXIT_MAP_MAX_MS)
+      and float(map_drop_ms) >= float(self._V94_HIGHWAY_EXIT_MAP_DROP_MS)
+    )
+    if not bool(map_demands_exit):
+      return False
+
+    if self._v94_next_speed_limit_drop_active():
+      return True
+
+    road_ctx = str(self._mapd_road_context if road_context is None else road_context or "").lower()
+    way_selected_ok = way_sel in ("current", "predicted", "extended")
+    if road_ctx in ("city", "unknown", "") and bool(way_selected_ok):
+      return True
+
+    width_m = self._mapd_estimated_road_width_m
+    road_narrows = bool(width_m is not None and math.isfinite(float(width_m)) and 0.1 < float(width_m) <= float(self._V94_HIGHWAY_EXIT_NARROW_WIDTH_M))
+    vision_confirms = bool(raw_vision is not None and math.isfinite(float(raw_vision)) and float(raw_vision) <= float(self._V94_HIGHWAY_EXIT_VISION_MAX_MS))
+    strong_selection = way_sel in ("current", "predicted")
+    return bool(strong_selection and (bool(vision_confirms) or bool(road_narrows)))
+
+
+
+  def _v93_highway_mode_active(
+    self,
+    *,
+    road_text: Optional[str] = None,
+    road_context: Optional[str] = None,
+    v_ego_ms: float = 0.0,
+    reference_ms: float = 0.0,
+  ) -> bool:
+    text = self._mapd_road_text() if road_text is None else str(road_text or "")
+    if self._v94_highway_exit_exception_active(
+      road_text=str(text),
+      road_context=road_context,
+      reference_ms=float(reference_ms),
+      v_ego_ms=float(v_ego_ms),
+    ):
+      return False
+
+    ctx = str(self._mapd_road_context if road_context is None else road_context or "").lower()
+    if ctx == "freeway":
+      return True
+    if self._v93_road_text_is_highway(text):
+      return True
+    if ctx in ("unknown", "") and max(float(v_ego_ms), float(reference_ms)) >= float(self._V93_HIGHWAY_MIN_REFERENCE_MS):
+      return True
+    return False
+
+
+  @staticmethod
+  def _v93_src_has_lead_decel_owner(src: str) -> bool:
+    src_text = str(src or "")
+    return any(
+      token in src_text
+      for token in (
+        "state[LEAD_CRITICAL",
+        "state[LEAD_FOLLOW",
+        "planner[lead",
+        "lead_guard",
+        "lead_hold",
+        "lead_low_speed_block",
+      )
+    )
+
+
+  @staticmethod
+  def _v93_src_has_curve_or_roundabout_owner(src: str) -> bool:
+    src_text = str(src or "")
+    return any(
+      token in src_text
+      for token in (
+        "CURVE_ACTIVE",
+        "CURVE_PRE_ENTRY",
+        "curve_hold",
+        "curve_fused",
+        "mapd_roundabout",
+        "roundabout_fused",
+        "late_roundabout_approach_guard",
+        "v90_curve_confidence",
+        "v90_roundabout_confidence",
+        "low_speed_lat_trim",
+      )
+    )
+
 
   def _mapd_uncertain_junction_context(self) -> bool:
     if self._mapd_freeway_context():
@@ -720,7 +911,7 @@ class LongController:
       return None
     if (int(now_ns) - int(self._mapd_last_ns)) >= int(self._MAPD_FRESH_NS):
       return None
-    if self._mapd_freeway_context():
+    if self._mapd_freeway_context() or self._v93_highway_mode_active(v_ego_ms=float(v_ego_ms), reference_ms=float(reference_ms)):
       return None
     if str(self._mapd_way_selection_type).lower() == "fail":
       return None
@@ -2087,6 +2278,10 @@ class LongController:
         suggested_ms = float(getattr(mo, "suggestedSpeed", 0.0) or 0.0)
         map_curve_ms = float(getattr(mo, "mapCurveSpeed", 0.0) or 0.0)
         vision_curve_ms = float(getattr(mo, "visionCurveSpeed", 0.0) or 0.0)
+        speed_limit_ms = float(getattr(mo, "speedLimit", 0.0) or 0.0)
+        next_speed_limit_ms = float(getattr(mo, "nextSpeedLimit", 0.0) or 0.0)
+        estimated_road_width_m = float(getattr(mo, "estimatedRoadWidth", 0.0) or 0.0)
+        distance_from_way_center_m = float(getattr(mo, "distanceFromWayCenter", 0.0) or 0.0)
         mono_ns = int(self._sm.logMonoTime.get("mapdOut", 0) or 0)
         if mono_ns > 0:
           # Fresh mapd packets must overwrite the cached values even when the
@@ -2102,6 +2297,10 @@ class LongController:
           self._mapd_road_context = str(getattr(mo, "roadContext", "") or "")
           self._mapd_way_selection_type = str(getattr(mo, "waySelectionType", "") or "")
           self._mapd_one_way = bool(getattr(mo, "oneWay", False))
+          self._mapd_speed_limit_ms = speed_limit_ms if (math.isfinite(speed_limit_ms) and speed_limit_ms > 0.1) else None
+          self._mapd_next_speed_limit_ms = next_speed_limit_ms if (math.isfinite(next_speed_limit_ms) and next_speed_limit_ms > 0.1) else None
+          self._mapd_estimated_road_width_m = estimated_road_width_m if (math.isfinite(estimated_road_width_m) and estimated_road_width_m > 0.1) else None
+          self._mapd_distance_from_way_center_m = distance_from_way_center_m if math.isfinite(distance_from_way_center_m) else None
           self._mapd_last_ns = mono_ns
     except Exception:
       pass
@@ -2201,11 +2400,23 @@ class LongController:
   def _v92_lead_accel_block_active(self, *, v_ego_ms: float, base_target_ms: float) -> bool:
     if not self._v92_live_lead_for_accel_gate():
       return False
-    if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
-      return False
 
     gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
     closing = float(self._lead_vrel) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_VREL_MS)
+
+    # v93: a close lead is never a safe reason to raise ACC, even when it is
+    # slightly opening. The earlier opening-clear bypass let lead_soft_release
+    # and CRUISE_SYNC raise set speed at ~1.5s gaps.
+    if bool(
+      float(gap_s) <= float(self._V93_LEAD_ACCEL_BLOCK_GAP_S)
+      or (bool(closing) and float(gap_s) <= float(self._V93_LEAD_ACCEL_BLOCK_CLOSING_GAP_S))
+      or float(self._lead_drel) <= float(self._V93_LEAD_ACCEL_BLOCK_DREL_M) and float(gap_s) <= float(self._V93_LEAD_ACCEL_BLOCK_CLOSING_GAP_S)
+    ):
+      return True
+
+    if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
+      return False
+
     return bool(
       float(gap_s) <= float(self._V92_LEAD_ACCEL_BLOCK_GAP_S)
       or (bool(closing) and float(gap_s) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_GAP_S))
@@ -2219,8 +2430,8 @@ class LongController:
     return max(
       0.0,
       min(
-        max(float(current_set_ms), float(v_ego_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS)),
-        float(current_set_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS),
+        max(float(current_set_ms), float(v_ego_ms) + float(self._V93_LEAD_SYNC_SAFE_MARGIN_MS)),
+        float(current_set_ms) + float(self._V93_LEAD_SYNC_SAFE_MARGIN_MS),
       ),
     )
 
@@ -3671,6 +3882,48 @@ class LongController:
     freeway = bool(road_ctx == "freeway")
     way_fail = bool(way_sel == "fail")
     name_roundabout = bool("roundabout" in road_text and not way_fail)
+    highway_exit_exception = bool(self._v94_highway_exit_exception_active(
+      road_text=str(road_text),
+      road_context=str(road_ctx),
+      reference_ms=float(reference_ms),
+      v_ego_ms=float(v_ego_ms),
+      raw_map_ms=raw_map_ms,
+      raw_vision_ms=raw_vision_ms,
+    ))
+    highway_mode = bool(self._v93_highway_mode_active(
+      road_text=str(road_text),
+      road_context=str(road_ctx),
+      v_ego_ms=float(v_ego_ms),
+      reference_ms=float(reference_ms),
+    ))
+
+    live_lead = bool(self._lead_present and float(self._lead_drel) > 0.0 and abs(float(self._lead_yrel)) < float(self._LEAD_OFFLANE_YREL_M))
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1) if bool(live_lead) else 99.0
+    lead_decel_owner = self._v93_src_has_lead_decel_owner(str(src))
+
+    if bool(highway_mode) and not bool(name_roundabout):
+      self._clear_roundabout_release_guard()
+      self._v90_reset_speed_planner()
+      if bool(lead_decel_owner):
+        return float(desired_ms), self._v90_marker(
+          phase="CLEAR",
+          roundabout_conf=0.0,
+          curve_conf=0.0,
+          lead_conf=0.65 if bool(live_lead and gap_s <= 2.2) else 0.35 if bool(live_lead) else 0.0,
+          lat_conf=0.0,
+          false_pos_conf=1.0,
+          extra="v93_highway_mode_lock+lead_priority",
+        )
+      release_ms = min(float(reference_ms), max(float(desired_ms), float(current_set_ms), float(v_ego_ms)))
+      return float(release_ms), self._v90_marker(
+        phase="CLEAR",
+        roundabout_conf=0.0,
+        curve_conf=0.0,
+        lead_conf=0.35 if bool(live_lead) else 0.0,
+        lat_conf=0.0,
+        false_pos_conf=1.0,
+        extra="v93_highway_mode_lock",
+      )
 
     map_drop_ms = float(reference_ms) - float(raw_map_ms) if raw_map_ms is not None else 0.0
     vision_drop_ms = float(reference_ms) - float(raw_vision_ms) if raw_vision_ms is not None else 0.0
@@ -3724,8 +3977,6 @@ class LongController:
       curve_conf -= 0.25
     curve_conf = self._v90_score(curve_conf)
 
-    live_lead = bool(self._lead_present and float(self._lead_drel) > 0.0 and abs(float(self._lead_yrel)) < float(self._LEAD_OFFLANE_YREL_M))
-    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1) if bool(live_lead) else 99.0
     lead_conf = 0.0
     if bool(live_lead):
       if float(gap_s) <= 1.4 or float(self._lead_drel) <= 15.0:
@@ -3826,7 +4077,7 @@ class LongController:
         false_pos_conf=false_pos_conf,
       )
 
-    marker_suffix = ""
+    marker_suffix = "v94_highway_exit_exception" if bool(highway_exit_exception) else ""
     target_ms = min(source_targets) if source_targets else float(reference_ms)
     if raw_map_ms is not None and raw_vision_ms is not None and bool(map_supports or vision_supports):
       if bool(controlling_roundabout):
@@ -3881,13 +4132,13 @@ class LongController:
         floor_ms = float(self._ROUNDABOUT_DYNAMIC_NAME_FLOOR_MS) if bool(name_roundabout) else float(self._ROUNDABOUT_DYNAMIC_FLOOR_MS)
         if raw_vision_ms is None or float(raw_vision_ms) >= float(self._ROUNDABOUT_DYNAMIC_FLOOR_MIN_VISION_MS) or bool(name_roundabout):
           target_ms = max(float(target_ms), min(float(reference_ms), float(floor_ms)))
-      marker_suffix = "v90_roundabout_confidence"
+      marker_suffix = f"{marker_suffix}+v90_roundabout_confidence" if marker_suffix else "v90_roundabout_confidence"
     elif bool(controlling_curve):
       max_drop_ms = float(self._V90_NORMAL_CURVE_MAX_DROP_MS)
       if float(curve_conf) < 0.68 and not bool(self._lat_limit_saturated):
         max_drop_ms = float(self._V90_WEAK_CURVE_MAX_DROP_MS)
       target_ms = max(float(target_ms), float(reference_ms) - float(max_drop_ms))
-      marker_suffix = "v90_curve_confidence"
+      marker_suffix = f"{marker_suffix}+v90_curve_confidence" if marker_suffix else "v90_curve_confidence"
 
     if bool(float(lat_conf) >= 0.35 and float(v_ego_ms) >= float(self._V90_LAT_PRETRIM_MIN_SPEED_MS) and (bool(controlling_curve) or bool(controlling_roundabout))):
       if bool(controlling_roundabout) and not bool(self._lat_limit_saturated) and float(lat_conf) < float(self._V92_ROUNDABOUT_SOFT_LAT_CONF):
@@ -4974,6 +5225,8 @@ class LongController:
     cruise_buttons = int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0)
     gas_pressed = bool(getattr(cs_out, "gasPressed", False) or getattr(CS, "gasPressed", False) or getattr(cs_out, "gas", 0.0))
     brake_pressed = bool(getattr(cs_out, "brakePressed", False) or getattr(CS, "brakePressed", False) or getattr(cs_out, "brake", 0.0))
+    if bool(brake_pressed):
+      self._v93_last_brake_ms = int(now)
     generic_pedal_override = bool(getattr(cs_out, "pedalOverride", False) or getattr(CS, "pedalOverride", False))
     # Gas is a normal Tesla ACC override; keep ACC set speed synced upward while the driver accelerates.
     pedal_override = bool(brake_pressed or (generic_pedal_override and not gas_pressed))
@@ -5733,10 +5986,36 @@ class LongController:
     )
 
     gas_sync_target_ms = 0.0
+    post_gas_sync_active = bool((not bool(gas_speed_sync_active)) and int(now) <= int(self._gas_speed_sync_until_ms))
     if bool(gas_speed_sync_active):
       gas_sync_target_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
-    elif int(now) <= int(self._gas_speed_sync_until_ms):
+    elif bool(post_gas_sync_active):
       gas_sync_target_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
+
+    post_gas_live_lead = bool(
+      self._v92_live_lead_for_accel_gate()
+      and (
+        (float(self._lead_drel) / max(float(v_ego_ms), 0.1)) <= float(self._V93_POST_GAS_SYNC_CANCEL_LEAD_GAP_S)
+        or float(self._lead_vrel) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_VREL_MS)
+      )
+    )
+    post_gas_cancel = bool(
+      bool(post_gas_sync_active)
+      and (
+        bool(post_gas_live_lead)
+        or self._v93_src_has_curve_or_roundabout_owner(str(src))
+        or float(desired_ms) < (float(current_set_ms) - (0.10 * CV.MPH_TO_MS))
+        or (int(now) - int(self._v93_last_brake_ms)) <= int(self._V93_POST_GAS_SYNC_CANCEL_MS)
+        or self._v93_highway_mode_active(v_ego_ms=float(v_ego_ms), reference_ms=float(curve_reference_ms))
+      )
+    )
+    if bool(post_gas_cancel):
+      self._gas_speed_sync_until_ms = 0
+      self._gas_speed_sync_peak_ms = 0.0
+      gas_sync_target_ms = 0.0
+      if "post_gas_sync_cancel" not in str(src):
+        src = f"{src}+post_gas_sync_cancel"
+
     if float(gas_sync_target_ms) > (float(current_set_ms) + float(self._GAS_SPEED_SYNC_MIN_RISE_MS)):
       lead_safe_sync_cap_ms = self._v92_lead_safe_sync_cap_ms(current_set_ms=float(current_set_ms), v_ego_ms=float(v_ego_ms))
       gas_sync_marker = "gas_speed_sync" if bool(gas_pressed) else "post_gas_speed_sync"
@@ -5760,10 +6039,10 @@ class LongController:
         base_target_ms=float(current_set_ms if current_set_ms > 0.1 else curve_reference_ms),
       )
     )
-    if bool(lead_accel_block) and float(desired_ms) > (float(current_set_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS)):
-      desired_ms = min(float(desired_ms), float(current_set_ms) + float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS))
+    if bool(lead_accel_block) and float(desired_ms) > (float(current_set_ms) + float(self._V93_LEAD_SYNC_SAFE_MARGIN_MS)):
+      desired_ms = min(float(desired_ms), float(current_set_ms) + float(self._V93_LEAD_SYNC_SAFE_MARGIN_MS))
       if "lead_accel_hard_gate" not in str(src):
-        src = f"{src}+lead_accel_hard_gate"
+        src = f"{src}+lead_accel_hard_gate+v93_lead_zero_tolerance"
 
     if roadworks_cap_ms is not None and speed_limit_target_ms is not None:
       capped_speed_limit_target_ms = self._roadworks_cap_target_ms(speed_limit_target_ms, roadworks_cap_ms)
@@ -5923,8 +6202,15 @@ class LongController:
       if float(decision.target_kph) < (float(decision.current_kph) - (float(self._GAS_SPEED_SYNC_MIN_RISE_MS) * CV.MS_TO_KPH)):
         return LongDecision(None, f"gas_decel_block src={src}+gas_decel_block")
 
-    if bool(lead_accel_block) and float(decision.target_kph) > (float(decision.current_kph) + (float(self._V92_LEAD_SYNC_SAFE_MARGIN_MS) * CV.MS_TO_KPH)):
-      return LongDecision(None, f"lead_accel_hard_gate src={src}+lead_accel_hard_gate")
+    accel_button = bool(int(decision.button) in (4, 16))
+    if bool(lead_accel_block) and (
+      bool(accel_button)
+      or float(decision.target_kph) > (float(decision.current_kph) + (float(self._V93_LEAD_SYNC_SAFE_MARGIN_MS) * CV.MS_TO_KPH))
+    ):
+      return LongDecision(None, f"lead_accel_hard_gate src={src}+lead_accel_hard_gate+v93_lead_zero_tolerance")
+
+    if "v93_highway_mode_lock" in str(src) and int(decision.button) in (4, 16) and not self._v93_src_has_lead_decel_owner(str(src)):
+      return LongDecision(None, f"v93_highway_mode_lock src={src}+v93_highway_final_accel_block")
 
     if bool(stale_cancel_reject) and int(decision.button) == int(CruiseButtons.CANCEL):
       return LongDecision(None, f"stale_cancel_reject src={src}+stale_cancel_reject")
