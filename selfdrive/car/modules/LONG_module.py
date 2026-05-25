@@ -29,6 +29,8 @@ v94 adds a highway-exit exception so slip roads/exits/roundabouts can still slow
 
 v95 recovers stale LONG startup state, hard-releases roundabout state after road exit, lets very far non-closing leads accelerate, and blocks gas speed-sync inside roundabout confidence.
 
+v96 fixes motorway lead recovery by allowing stalk-gap-based re-accel after a lead opens, stops v93 highway mode from blocking safe resume presses, and logs highway accel blocks instead of looking dead.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -169,6 +171,18 @@ class LongController:
   _V95_ROUNDABOUT_EXIT_VISION_CLEAR_MS = 34.0 * CV.MPH_TO_MS
   _V95_ROUNDABOUT_EXIT_MAP_CLEAR_MS = 32.0 * CV.MPH_TO_MS
   _V95_GAS_SYNC_ROUNDABOUT_BLOCK_CONF = 0.60
+  _V96_LEAD_REACCEL_EXTRA_GAP_S = 0.45
+  _V96_LEAD_REACCEL_MIN_GAP_S = 2.35
+  _V96_LEAD_REACCEL_LARGE_GAP_S = 3.35
+  _V96_LEAD_REACCEL_MIN_DREL_M = 24.0
+  _V96_LEAD_REACCEL_LARGE_DREL_M = 55.0
+  _V96_LEAD_REACCEL_MAX_CLOSING_MS = -0.20
+  _V96_LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS = -0.70
+  _V96_LEAD_REACCEL_MAX_DECEL_MS2 = -0.35
+  _V96_LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2 = -0.70
+  _V96_RESUME_PRESS_MIN_RISE_MS = 0.65 * CV.MPH_TO_MS
+  _V96_RESUME_PRESS_COOLDOWN_MS = 520
+  _V96_ACCEL_BUTTON = 4
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -514,6 +528,7 @@ class LongController:
     self._mapd_distance_from_way_center_m: Optional[float] = None
     self._v94_highway_exit_exception_recent_ms: int = 0
     self._v95_startup_long_recovered: bool = False
+    self._v96_last_resume_press_ms: int = 0
     self._last_auto_engage_ms: int = 0
 
     self._last_info_log_ms: int = 0
@@ -839,6 +854,108 @@ class LongController:
       and float(self._lead_vrel) > float(self._V95_FAR_LEAD_ACCEL_MAX_CLOSING_MS)
       and float(self._lp_a_target) > float(self._V95_FAR_LEAD_ACCEL_MAX_DECEL_MS2)
     )
+
+
+
+  def _v96_src_is_lead_release_context(self, src: str) -> bool:
+    src_text = str(src or "")
+    return any(
+      token in src_text
+      for token in (
+        "lead_far_release",
+        "lead_soft_release",
+        "lead_straight_reject",
+        "lead_gap_release",
+        "lead_release[",
+        "lead_opening",
+        "lead_observer",
+        "stale_lead_release",
+        "stale_clear_release",
+        "straight_planner_reject",
+        "blank_planner_reject",
+      )
+    )
+
+
+  def _v96_lead_reaccel_allow(self, *, v_ego_ms: float, reference_ms: float = 0.0, src: str = "", cs_out=None) -> bool:
+    if not self._v92_live_lead_for_accel_gate():
+      return False
+    if float(v_ego_ms) <= 0.1:
+      return False
+    if self._v93_src_has_curve_or_roundabout_owner(str(src)):
+      return False
+    if bool(self._lat_limit_saturated):
+      return False
+    if self._lead_is_constraining(base_target_ms=float(reference_ms if reference_ms > 0.1 else max(v_ego_ms, self.MIN_CRUISE_SPEED_MS)), v_ego_ms=float(v_ego_ms)):
+      return False
+
+    desired_follow_s = float(self._FOLLOW_GAP_DEFAULT_S)
+    if cs_out is not None:
+      desired_follow_s = float(self._desired_follow_time_s(cs_out))
+    release_gap_s = max(float(self._V96_LEAD_REACCEL_MIN_GAP_S), float(desired_follow_s) + float(self._V96_LEAD_REACCEL_EXTRA_GAP_S))
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
+
+    normal_opening_release = bool(
+      float(gap_s) >= float(release_gap_s)
+      and float(self._lead_drel) >= float(self._V96_LEAD_REACCEL_MIN_DREL_M)
+      and float(self._lead_vrel) >= float(self._V96_LEAD_REACCEL_MAX_CLOSING_MS)
+      and float(self._lp_a_target) >= float(self._V96_LEAD_REACCEL_MAX_DECEL_MS2)
+    )
+    large_gap_release = bool(
+      float(gap_s) >= max(float(self._V96_LEAD_REACCEL_LARGE_GAP_S), float(desired_follow_s) + 1.25)
+      and float(self._lead_drel) >= float(self._V96_LEAD_REACCEL_LARGE_DREL_M)
+      and float(self._lead_vrel) >= float(self._V96_LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS)
+      and float(self._lp_a_target) >= float(self._V96_LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2)
+    )
+    return bool(normal_opening_release or large_gap_release)
+
+
+  def _v96_resume_press_allowed(
+    self,
+    *,
+    src: str,
+    desired_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+    reference_ms: float,
+    lead_accel_block: bool,
+    gas_pressed: bool,
+    brake_pressed: bool,
+    now_ms: int,
+    cs_out=None,
+  ) -> bool:
+    if bool(gas_pressed) or bool(brake_pressed):
+      return False
+    if int(now_ms) - int(self._v96_last_resume_press_ms) < int(self._V96_RESUME_PRESS_COOLDOWN_MS):
+      return False
+    if float(current_set_ms) <= 0.1:
+      return False
+    if float(desired_ms) <= (float(current_set_ms) + float(self._V96_RESUME_PRESS_MIN_RISE_MS)):
+      return False
+    if bool(lead_accel_block):
+      return False
+    if self._v93_src_has_curve_or_roundabout_owner(str(src)):
+      return False
+    if bool(self._roundabout_release_guard_active(now_ms=int(now_ms))):
+      return False
+
+    live_lead = self._v92_live_lead_for_accel_gate()
+    if not bool(live_lead):
+      return True
+
+    if self._lead_is_opening_clear(base_target_ms=float(reference_ms), v_ego_ms=float(v_ego_ms)):
+      return True
+    if self._v95_far_lead_release_allow_accel(v_ego_ms=float(v_ego_ms), src=str(src)):
+      return True
+    if self._v96_lead_reaccel_allow(v_ego_ms=float(v_ego_ms), reference_ms=float(reference_ms), src=str(src), cs_out=cs_out):
+      return True
+    if self._v96_src_is_lead_release_context(str(src)) and not self._v92_lead_accel_block_active(
+      v_ego_ms=float(v_ego_ms),
+      base_target_ms=float(reference_ms if reference_ms > 0.1 else max(current_set_ms, v_ego_ms)),
+    ):
+      return True
+
+    return False
 
 
   def _v95_gas_sync_roundabout_block_active(self, *, src: str, now_ms: int) -> bool:
@@ -2548,8 +2665,10 @@ class LongController:
     gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
     closing = float(self._lead_vrel) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_VREL_MS)
 
-    # v95: a genuinely far, non-closing lead should not freeze acceleration after exits.
+    # v95/v96: a genuinely open lead should not freeze acceleration after exits or clear motorway lead release.
     if self._v95_far_lead_release_allow_accel(v_ego_ms=float(v_ego_ms)):
+      return False
+    if self._v96_lead_reaccel_allow(v_ego_ms=float(v_ego_ms), reference_ms=float(base_target_ms)):
       return False
 
     # v93: a close lead is never a safe reason to raise ACC, even when it is
@@ -2592,6 +2711,8 @@ class LongController:
     if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
       return False
     if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
+      return False
+    if self._v96_lead_reaccel_allow(v_ego_ms=float(v_ego_ms), reference_ms=float(base_target_ms)):
       return False
     if self._lead_is_constraining(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
       return True
@@ -3016,6 +3137,8 @@ class LongController:
     if float(v_ego_ms) > float(self._LOW_SPEED_LEAD_BLOCK_MAX_SPEED_MS):
       return float(desired_ms), False
     if self._lead_is_opening_clear(base_target_ms=max(float(current_set_ms), float(desired_ms)), v_ego_ms=float(v_ego_ms)):
+      return float(desired_ms), False
+    if self._v96_lead_reaccel_allow(v_ego_ms=float(v_ego_ms), reference_ms=max(float(current_set_ms), float(desired_ms))):
       return float(desired_ms), False
 
     # v74: do not let a mild/flickery low-speed lead block become a straight-road speed anchor.
@@ -5274,6 +5397,8 @@ class LongController:
 
     if planner_tracks_set and ((lead_constraining and weak_lead_owner) or queue_fallback_active):
       return []
+    if self._v96_lead_reaccel_allow(v_ego_ms=float(v_ego_ms), reference_ms=float(base_target_ms)):
+      return []
 
     reasons: list[str] = []
     if lead_constraining:
@@ -5319,6 +5444,7 @@ class LongController:
       self._gas_speed_sync_until_ms = 0
       self._gas_speed_sync_peak_ms = 0.0
       self._v95_startup_long_recovered = False
+      self._v96_last_resume_press_ms = 0
       self._v90_reset_speed_planner()
       return LongDecision(None, "gated: not enabled/adaptive")
 
@@ -5344,6 +5470,7 @@ class LongController:
       self._gas_speed_sync_until_ms = 0
       self._gas_speed_sync_peak_ms = 0.0
       self._v95_startup_long_recovered = False
+      self._v96_last_resume_press_ms = 0
       self._v90_reset_speed_planner()
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
 
@@ -5362,6 +5489,7 @@ class LongController:
     if not self._last_active:
       self._enabled_since_ms = int(now)
       self._v95_startup_long_recovered = False
+      self._v96_last_resume_press_ms = 0
       self._stable_plan_samples = 0
       self._last_lp_seen_ns = 0
       self._reset_lead_hold()
@@ -5919,6 +6047,11 @@ class LongController:
             src = "hold+ceiling+v95_far_lead_release_allow_accel"
             self._reset_lead_hold()
             self._reset_lead_curve_hold()
+          elif self._v96_lead_reaccel_allow(v_ego_ms=float(v_ego_ms), reference_ms=float(resume_ceiling_ms), src=str(src), cs_out=cs_out):
+            desired_ms = float(resume_ceiling_ms)
+            src = "hold+ceiling+v96_lead_reaccel_allow"
+            self._reset_lead_hold()
+            self._reset_lead_curve_hold()
           else:
             desired_ms = float(current_set_ms if current_set_ms > 0.1 else resume_ceiling_ms)
             src = "hold+current_set+lead_present"
@@ -6362,6 +6495,33 @@ class LongController:
     )
 
     if decision.button is None or int(decision.button) == int(CruiseButtons.IDLE):
+      if stock_cruise_enabled and self._v96_resume_press_allowed(
+        src=str(src),
+        desired_ms=float(desired_ms),
+        current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms),
+        reference_ms=float(curve_reference_ms),
+        lead_accel_block=bool(lead_accel_block),
+        gas_pressed=bool(gas_pressed),
+        brake_pressed=bool(brake_pressed),
+        now_ms=int(now),
+        cs_out=cs_out,
+      ):
+        self._v96_last_resume_press_ms = int(now)
+        kph_to_u = CV.KPH_TO_MPH if speed_units == "MPH" else 1.0
+        marker = "v96_resume_press"
+        if self._v92_live_lead_for_accel_gate():
+          marker = "v96_resume_press+v96_lead_reaccel_allow"
+        msg = (
+          f"[XNOR_CRUISE_SYNC] src={src}+{marker} uom={speed_units} "
+          f"tgt={float(desired_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"cur={float(current_set_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"est={float(v_ego_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"btn={int(self._V96_ACCEL_BUTTON)} reason=press[v96_resume]"
+        )
+        self._rate_log(msg)
+        return LongDecision(int(self._V96_ACCEL_BUTTON), msg)
+
       noop_msg = f"{decision.reason} src={src}"
       lead_heartbeat = bool(
         stock_cruise_enabled
@@ -6401,7 +6561,30 @@ class LongController:
       return LongDecision(None, f"lead_accel_hard_gate src={src}+lead_accel_hard_gate+v93_lead_zero_tolerance")
 
     if "v93_highway_mode_lock" in str(src) and int(decision.button) in (4, 16) and not self._v93_src_has_lead_decel_owner(str(src)):
-      return LongDecision(None, f"v93_highway_mode_lock src={src}+v93_highway_final_accel_block")
+      if not self._v96_resume_press_allowed(
+        src=str(src),
+        desired_ms=float(desired_ms),
+        current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms),
+        reference_ms=float(curve_reference_ms),
+        lead_accel_block=bool(lead_accel_block),
+        gas_pressed=bool(gas_pressed),
+        brake_pressed=bool(brake_pressed),
+        now_ms=int(now),
+        cs_out=cs_out,
+      ):
+        kph_to_u = CV.KPH_TO_MPH if speed_units == "MPH" else 1.0
+        msg = (
+          f"[XNOR_CRUISE_SYNC] src={src}+v96_highway_final_accel_block uom={speed_units} "
+          f"tgt={float(desired_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"cur={float(current_set_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"est={float(v_ego_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"btn=0 reason=guard[v96_highway_final_accel_block]"
+        )
+        self._rate_log(msg)
+        return LongDecision(None, msg)
+      if "v96_highway_accel_release" not in str(src):
+        src = f"{src}+v96_highway_accel_release"
 
     if bool(stale_cancel_reject) and int(decision.button) == int(CruiseButtons.CANCEL):
       return LongDecision(None, f"stale_cancel_reject src={src}+stale_cancel_reject")
