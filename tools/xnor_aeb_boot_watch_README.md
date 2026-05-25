@@ -1,66 +1,67 @@
-# xnor AEB boot watcher
+# XNOR AEB boot watcher v3
 
-Captures CAN traffic and openpilot state during the boot window where the Tesla HUD briefly shows:
+This captures the early boot window automatically so the Tesla HUD `Automatic Emergency Braking unavailable` flash is not missed.
 
-```text
-Automatic Emergency Braking unavailable
-```
+It does **not** change driving behaviour and raw CAN logging is **off by default**.
 
-It does not modify driving behaviour.
+## Install automatic boot capture
 
-## One-shot manual capture
+From a copied/unzipped bundle on the comma/openpilot device:
 
 ```bash
 cd /data/openpilot
-python3 tools/xnor_aeb_boot_watch.py --duration 180 --stdout
-```
-
-Outputs:
-
-```text
-/data/openpilot/aeb_boot_watch/xnor_aeb_boot_watch_*.txt
-/data/openpilot/aeb_boot_watch/xnor_aeb_boot_watch_*.jsonl
-```
-
-## Automatic capture at boot, read-only `/etc` safe
-
-On comma, `/etc/systemd/system` may be read-only. Use the launch hook instead of the systemd service:
-
-```bash
-cd /data/openpilot
-chmod +x tools/xnor_aeb_boot_watch_launch_hook.sh
+chmod +x tools/xnor_aeb_boot_watch.py tools/xnor_aeb_boot_watch_launch_hook.sh
 tools/xnor_aeb_boot_watch_launch_hook.sh install
 ```
 
-Then reboot or power-cycle. The watcher will start from `/data/openpilot/launch_openpilot.sh`.
+Then reboot / power-cycle the device/car.
 
-Check:
+The watcher is inserted near the top of `/data/openpilot/launch_openpilot.sh`, so it starts before the rest of openpilot has fully come up.
 
-```bash
-tools/xnor_aeb_boot_watch_launch_hook.sh status
-ls -lt /data/openpilot/aeb_boot_watch | head
+Outputs are written here:
+
+```text
+/data/openpilot/aeb_boot_watch/xnor_aeb_boot_watch_v3_*.txt
+/data/openpilot/aeb_boot_watch/xnor_aeb_boot_watch_v3_*.jsonl
+/data/openpilot/aeb_boot_watch/aeb_boot_watch_auto_launcher.log
 ```
 
-Remove when finished:
-
-```bash
-tools/xnor_aeb_boot_watch_launch_hook.sh uninstall
-```
-
-## Manual background capture
+## Check it is installed/running
 
 ```bash
 cd /data/openpilot
-tools/xnor_aeb_boot_watch_launch_hook.sh start-bg
 tools/xnor_aeb_boot_watch_launch_hook.sh status
 ```
 
-## Systemd option
-
-Only use this if your root filesystem is writable:
+## Remove the auto-start hook
 
 ```bash
-tools/xnor_aeb_boot_watch_service.sh install
+cd /data/openpilot
+tools/xnor_aeb_boot_watch_launch_hook.sh uninstall
 ```
 
-Useful clues are CAN gaps, panda `controlsAllowed` / `faultStatus`, controls alerts, manager process startup timing, and CAN addresses that start/change when the HUD warning disappears.
+If you need to restore the original launch script from the automatic backup:
+
+```bash
+tools/xnor_aeb_boot_watch_launch_hook.sh restore-backup
+```
+
+## Duration
+
+Default capture duration is 360 seconds. To change it during install:
+
+```bash
+XNOR_AEB_BOOT_DURATION=600 tools/xnor_aeb_boot_watch_launch_hook.sh install
+```
+
+## Do not commit captures
+
+The capture folder should stay local. Add this to `.gitignore` if it is not already present:
+
+```gitignore
+/aeb_boot_watch/
+*xnor_aeb_boot_watch_*.jsonl
+*xnor_aeb_boot_watch_*.jsonl.gz
+*xnor_aeb_boot_watch_*.txt
+*aeb_boot_watch_*launcher.log
+```

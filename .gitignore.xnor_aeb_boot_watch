@@ -1,0 +1,5 @@
+/aeb_boot_watch/
+*xnor_aeb_boot_watch_*.jsonl
+*xnor_aeb_boot_watch_*.jsonl.gz
+*xnor_aeb_boot_watch_*.txt
+*aeb_boot_watch_*launcher.log

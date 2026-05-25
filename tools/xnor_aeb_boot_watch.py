@@ -1,253 +1,586 @@
 #!/usr/bin/env python3
+"""
+XNOR AEB boot watcher v3.
+
+Captures the boot / panda safety / Tesla AEB handover without dumping every raw CAN
+frame by default. The previous watcher could produce 100MB+ JSONL captures because it
+logged every CAN frame. This version records decoded AEB-related transitions and state
+snapshots by default, and only logs raw CAN if --raw-can is explicitly passed.
+
+Live use on device:
+  cd /data/openpilot
+  tools/xnor_aeb_boot_watch.py --duration 240 --output-dir /data/openpilot/aeb_boot_watch
+
+Offline re-decode of an old raw JSONL:
+  tools/xnor_aeb_boot_watch.py --replay-jsonl /data/openpilot/aeb_boot_watch/old.jsonl --output-dir /data/openpilot/aeb_boot_watch
+"""
 from __future__ import annotations
-import argparse, json, signal, sys, time
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+
+import argparse
+import collections
+import datetime as _dt
+import gzip
+import json
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
-SERVICES = ["carState", "controlsState", "pandaStates", "managerState", "deviceState"]
+# --- Tesla signal decode ----------------------------------------------------
+# Lightweight DBC signal extraction for the handful of signals needed here.
+# All signals below are little-endian (@1) in the Tesla DBCs.
 
-def now() -> str:
-  return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+AEB_STATE = {
+  0: "UNAVAILABLE",
+  1: "STANDBY",
+  2: "ENABLED",
+  3: "STANDSTILL",
+  4: "FAULT",
+  7: "SNA",
+}
 
-def ms() -> int:
-  return int(time.monotonic() * 1000)
+DAS_AEB_EVENT = {
+  0: "AEB_NOT_ACTIVE",
+  1: "AEB_ACTIVE",
+  2: "AEB_FAULT",
+  3: "AEB_SNA",
+}
 
-def get(obj: Any, path: str, default: Any = None) -> Any:
-  cur = obj
-  for p in path.split("."):
+DAS_ACC_STATE = {
+  0: "ACC_CANCEL_GENERIC",
+  1: "ACC_CANCEL_CAMERA_BLIND",
+  2: "ACC_CANCEL_RADAR_BLIND",
+  3: "ACC_HOLD",
+  4: "ACC_ON",
+  5: "APC_BACKWARD",
+  6: "APC_FORWARD",
+  7: "APC_COMPLETE",
+  8: "APC_ABORT",
+  9: "APC_PAUSE",
+  10: "APC_UNPARK_COMPLETE",
+  11: "APC_SELFPARK_START",
+  12: "ACC_CANCEL_PATH_NOT_CLEAR",
+  13: "ACC_CANCEL_GENERIC_SILENT",
+  14: "ACC_CANCEL_OUT_OF_CALIBRATION",
+  15: "FAULT_SNA",
+}
+
+ENABLE_2BIT = {
+  0: "OFF/UNSET",
+  1: "ON/ENABLED",
+  2: "UNAVAILABLE/FAULT?",
+  3: "SNA",
+}
+
+CRUISE_STATE = {
+  0: "STANDBY",
+  1: "ENABLED",
+  2: "STANDSTILL",
+  3: "OVERRIDE",
+  4: "PRE_FAULT",
+  5: "PRE_CANCEL",
+  6: "CANCELLED",
+  7: "FAULT",
+  8: "SNA",
+}
+
+# name, addr, start_bit, length, enum, message_name
+SIGNALS = [
+  # Legacy S/X powertrain DI_state
+  ("DI_driveReady", 0x256, 7, 1, {0: "NOT_READY", 1: "READY"}, "DI_state/tesla_powertrain"),
+  ("DI_cruiseState", 0x256, 12, 4, CRUISE_STATE, "DI_state/tesla_powertrain"),
+  ("DI_aebState", 0x256, 41, 3, AEB_STATE, "DI_state/tesla_powertrain"),
+
+  # Legacy S/X party/chassis DI_state
+  ("DI_driveReady", 0x368, 7, 1, {0: "NOT_READY", 1: "READY"}, "DI_state/tesla_can"),
+  ("DI_cruiseState", 0x368, 12, 4, CRUISE_STATE, "DI_state/tesla_can"),
+  ("DI_aebState", 0x368, 41, 3, AEB_STATE, "DI_state/tesla_can"),
+
+  # Model 3/Y party DI_state
+  ("DI_aebState", 0x286, 37, 3, AEB_STATE, "DI_state/model3_party"),
+
+  # DAS_control on party and powertrain variants
+  ("DAS_accState", 0x2B9, 12, 4, DAS_ACC_STATE, "DAS_control/party"),
+  ("DAS_aebEvent", 0x2B9, 16, 2, DAS_AEB_EVENT, "DAS_control/party"),
+  ("DAS_accState", 0x2BF, 12, 4, DAS_ACC_STATE, "DAS_control/powertrain"),
+  ("DAS_aebEvent", 0x2BF, 16, 2, DAS_AEB_EVENT, "DAS_control/powertrain"),
+
+  # MCU_chassisControl settings; useful to prove whether AEB is enabled at settings level
+  ("MCU_fcwEnable", 0x218, 6, 2, ENABLE_2BIT, "MCU_chassisControl"),
+  ("MCU_latControlEnable", 0x218, 8, 2, ENABLE_2BIT, "MCU_chassisControl"),
+  ("MCU_ldwEnable", 0x218, 12, 2, ENABLE_2BIT, "MCU_chassisControl"),
+  ("MCU_aebEnable", 0x218, 14, 2, ENABLE_2BIT, "MCU_chassisControl"),
+  ("MCU_pedalSafetyEnable", 0x218, 22, 2, ENABLE_2BIT, "MCU_chassisControl"),
+]
+
+SIGNALS_BY_ADDR: dict[int, list[tuple[str, int, int, int, dict[int, str], str]]] = collections.defaultdict(list)
+for spec in SIGNALS:
+  SIGNALS_BY_ADDR[spec[1]].append(spec)
+
+SUSPICIOUS_VALUES = {
+  "DI_aebState": {0, 4, 7},
+  "DAS_aebEvent": {1, 2, 3},
+  "DAS_accState": {1, 2, 12, 13, 14, 15},
+}
+
+
+def iso_now() -> str:
+  return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds")
+
+
+def safe_enum(v: Any) -> Any:
+  if v is None:
+    return None
+  try:
+    s = str(v)
+    # capnp enum values often stringify cleanly already, but trim noisy prefixes if present
+    return s.split(".")[-1]
+  except Exception:
+    return v
+
+
+def safe_float(v: Any, default: float = 0.0) -> float:
+  try:
+    return float(v)
+  except Exception:
+    return default
+
+
+def mph_from_ms(v: Any) -> float:
+  return safe_float(v) * 2.2369362921
+
+
+def get_attr(obj: Any, name: str, default: Any = None) -> Any:
+  try:
+    return getattr(obj, name)
+  except Exception:
+    return default
+
+
+def extract_le(dat: bytes, start: int, length: int) -> int:
+  raw = int.from_bytes(dat, "little", signed=False)
+  return (raw >> start) & ((1 << length) - 1)
+
+
+def decode_can_frame(address: int, dat: bytes, src: int, mono_ms: int, wall_time: str) -> list[dict[str, Any]]:
+  out = []
+  for signal, addr, start, length, enum_map, msg_name in SIGNALS_BY_ADDR.get(address, []):
+    val = extract_le(dat, start, length)
+    out.append({
+      "kind": "decoded_can",
+      "monoMs": mono_ms,
+      "wallTime": wall_time,
+      "src": src,
+      "address": address,
+      "addressHex": f"0x{address:X}",
+      "message": msg_name,
+      "signal": signal,
+      "value": val,
+      "text": enum_map.get(val, f"UNKNOWN_{val}"),
+      "dat": dat.hex(),
+    })
+  return out
+
+
+def summarise_car_state(cs: Any) -> dict[str, Any]:
+  cruise = get_attr(cs, "cruiseState")
+  return {
+    "vEgo": safe_float(get_attr(cs, "vEgo")),
+    "vEgoMph": round(mph_from_ms(get_attr(cs, "vEgo")), 1),
+    "gasPressed": bool(get_attr(cs, "gasPressed", False)),
+    "brakePressed": bool(get_attr(cs, "brakePressed", False)),
+    "steeringPressed": bool(get_attr(cs, "steeringPressed", False)),
+    "gearShifter": safe_enum(get_attr(cs, "gearShifter")),
+    "standstill": bool(get_attr(cs, "standstill", False)),
+    "stockAeb": bool(get_attr(cs, "stockAeb", False)),
+    "accFaulted": bool(get_attr(cs, "accFaulted", False)),
+    "canValid": bool(get_attr(cs, "canValid", False)),
+    "canTimeout": bool(get_attr(cs, "canTimeout", False)),
+    "cruiseState.enabled": bool(get_attr(cruise, "enabled", False)),
+    "cruiseState.available": bool(get_attr(cruise, "available", False)),
+    "cruiseState.speed": safe_float(get_attr(cruise, "speed")),
+    "cruiseState.speedMph": round(mph_from_ms(get_attr(cruise, "speed")), 1),
+  }
+
+
+def summarise_controls_state(ctrl: Any) -> dict[str, Any]:
+  return {
+    "enabled": get_attr(ctrl, "enabled"),
+    "active": get_attr(ctrl, "active"),
+    "state": safe_enum(get_attr(ctrl, "state")),
+    "longControlState": safe_enum(get_attr(ctrl, "longControlState")),
+    "alertText1": get_attr(ctrl, "alertText1"),
+    "alertText2": get_attr(ctrl, "alertText2"),
+    "alertType": get_attr(ctrl, "alertType"),
+    "forceDecel": bool(get_attr(ctrl, "forceDecel", False)),
+  }
+
+
+def summarise_device_state(ds: Any) -> dict[str, Any]:
+  return {
+    "started": bool(get_attr(ds, "started", False)),
+    "startedMonoTime": int(get_attr(ds, "startedMonoTime", 0) or 0),
+    "thermalStatus": safe_enum(get_attr(ds, "thermalStatus")),
+    "freeSpacePercent": safe_float(get_attr(ds, "freeSpacePercent")),
+    "networkType": safe_enum(get_attr(ds, "networkType")),
+    "networkStrength": safe_enum(get_attr(ds, "networkStrength")),
+  }
+
+
+def summarise_panda_states(panda_states: Any) -> list[dict[str, Any]]:
+  out = []
+  try:
+    iterable = list(panda_states)
+  except Exception:
+    iterable = []
+  for idx, ps in enumerate(iterable):
+    faults = []
     try:
-      cur = cur.get(p, default) if isinstance(cur, dict) else getattr(cur, p)
+      faults = [safe_enum(x) for x in list(get_attr(ps, "faults", []))]
     except Exception:
-      return default
-    if cur is None:
-      return default
-  if isinstance(cur, bytes):
-    return cur.hex()
-  if isinstance(cur, (str, int, float, bool)):
-    return cur
-  return str(cur)
+      pass
+    out.append({
+      "idx": idx,
+      "pandaType": safe_enum(get_attr(ps, "pandaType")),
+      "safetyModel": safe_enum(get_attr(ps, "safetyModel")),
+      "safetyParam": int(get_attr(ps, "safetyParam", 0) or 0),
+      "controlsAllowed": bool(get_attr(ps, "controlsAllowed", False)),
+      "faultStatus": safe_enum(get_attr(ps, "faultStatus")),
+      "faults": faults,
+      "ignitionLine": bool(get_attr(ps, "ignitionLine", False)),
+      "ignitionCan": bool(get_attr(ps, "ignitionCan", False)),
+      "heartbeatLost": bool(get_attr(ps, "heartbeatLost", False)),
+      "safetyTxBlocked": int(get_attr(ps, "safetyTxBlocked", 0) or 0),
+      "safetyRxInvalid": int(get_attr(ps, "safetyRxInvalid", 0) or 0),
+      "safetyRxChecksInvalid": bool(get_attr(ps, "safetyRxChecksInvalid", False)),
+    })
+  return out
 
-def pick(obj: Any, fields: list[str]) -> dict[str, Any]:
-  return {f: get(obj, f) for f in fields}
 
-@dataclass
-class Stat:
-  count: int = 0
-  changes: int = 0
-  first_ms: int = 0
-  last_ms: int = 0
-  last: str = ""
-  unique: set[str] = field(default_factory=set)
-  srcs: Counter = field(default_factory=Counter)
+def summarise_manager_state(ms: Any) -> list[dict[str, Any]]:
+  out = []
+  try:
+    processes = list(get_attr(ms, "processes", []))
+  except Exception:
+    processes = []
+  for p in processes:
+    name = get_attr(p, "name")
+    if name in ("controlsd", "card", "boardd", "pandad", "modeld", "plannerd", "radard"):
+      out.append({
+        "name": name,
+        "running": bool(get_attr(p, "running", False)),
+        "shouldBeRunning": bool(get_attr(p, "shouldBeRunning", False)),
+        "exitCode": int(get_attr(p, "exitCode", 0) or 0),
+      })
+  return out
 
-  def update(self, dat: str, src: int, t: int) -> bool:
-    changed = self.count == 0 or dat != self.last
-    if self.count == 0:
-      self.first_ms = t
-    self.count += 1
-    self.last_ms = t
-    self.srcs[src] += 1
-    self.unique.add(dat)
-    if changed:
-      self.changes += 1
-      self.last = dat
-    return changed
 
-class Watch:
-  def __init__(self, args: argparse.Namespace) -> None:
-    self.args = args
-    self.stop = False
-    self.start_mono = time.monotonic()
-    self.stats: dict[tuple[int, int], Stat] = defaultdict(Stat)
-    self.can_count = 0
-    self.last_can = None
-    self.last_state = 0.0
-    self.last_summary = 0.0
-    self.addrs = self.parse_addrs(args.addr)
-    out = Path(args.output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    self.jsonl_path = out / f"xnor_aeb_boot_watch_{stamp}.jsonl"
-    self.txt_path = out / f"xnor_aeb_boot_watch_{stamp}.txt"
-    self.j = self.jsonl_path.open("w", encoding="utf-8")
-    self.t = self.txt_path.open("w", encoding="utf-8")
+def context_line(ctx: dict[str, Any]) -> str:
+  cs = ctx.get("carState", {}) or {}
+  if cs.get("vEgoMph") is None and cs.get("vEgo") is not None:
+    try:
+      cs["vEgoMph"] = round(float(cs.get("vEgo")) * 2.2369362921, 1)
+    except Exception:
+      pass
+  ctr = ctx.get("controlsState", {}) or {}
+  ds = ctx.get("deviceState", {}) or {}
+  pandas = ctx.get("pandaStates", []) or []
+  panda_s = ";".join(
+    f"p{(p.get('idx') if p.get('idx') is not None else i)}:{p.get('safetyModel')}/allowed={int(bool(p.get('controlsAllowed')))}"
+    f"/fault={p.get('faultStatus')}/txBlk={p.get('safetyTxBlocked')}"
+    for i, p in enumerate(pandas)
+  ) or "no-panda"
+  return (
+    f"v={cs.get('vEgoMph')}mph gear={cs.get('gearShifter')} gas={int(bool(cs.get('gasPressed')))} "
+    f"brake={int(bool(cs.get('brakePressed')))} cruiseEn={int(bool(cs.get('cruiseState.enabled')))} "
+    f"cruiseAvail={int(bool(cs.get('cruiseState.available')))} long={ctr.get('longControlState')} "
+    f"op_started={int(bool(ds.get('started')))} {panda_s}"
+  )
 
-  @staticmethod
-  def parse_addrs(values: list[str] | None) -> set[int]:
-    out = set()
-    for value in values or []:
-      for item in value.split(","):
-        item = item.strip()
-        if item:
-          out.add(int(item, 16 if item.lower().startswith("0x") else 10))
-    return out
+
+class WatchWriter:
+  def __init__(self, out_dir: Path, prefix: str, quiet: bool = False, gzip_jsonl: bool = False) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    self.jsonl_path = out_dir / f"{prefix}_{stamp}.jsonl"
+    self.txt_path = out_dir / f"{prefix}_{stamp}.txt"
+    self.quiet = quiet
+    self._txt = self.txt_path.open("w", encoding="utf-8")
+    self._jsonl_raw = self.jsonl_path.open("wb") if gzip_jsonl else self.jsonl_path.open("w", encoding="utf-8")
+    self._gzip = gzip.GzipFile(fileobj=self._jsonl_raw, mode="wb") if gzip_jsonl else None
+
+  def write_json(self, obj: dict[str, Any]) -> None:
+    line = json.dumps(obj, sort_keys=True, separators=(",", ":")) + "\n"
+    if self._gzip is not None:
+      self._gzip.write(line.encode("utf-8"))
+    else:
+      self._jsonl_raw.write(line)
+
+  def write_txt(self, line: str = "") -> None:
+    self._txt.write(line + "\n")
+    self._txt.flush()
+    if not self.quiet:
+      print(line)
 
   def close(self) -> None:
-    self.j.close()
-    self.t.close()
+    if self._gzip is not None:
+      self._gzip.close()
+    self._jsonl_raw.close()
+    self._txt.close()
 
-  def on_stop(self, *_: Any) -> None:
-    self.stop = True
 
-  def emit(self, rec: dict[str, Any]) -> None:
-    rec.setdefault("wallTime", now())
-    rec.setdefault("monoMs", ms())
-    self.j.write(json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n")
-    self.j.flush()
+def open_replay(path: Path):
+  if str(path).endswith(".gz"):
+    return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+  return path.open("r", encoding="utf-8", errors="replace")
 
-  def txt(self, line: str = "") -> None:
-    self.t.write(line + "\n")
-    self.t.flush()
-    if self.args.stdout:
-      print(line, flush=True)
 
-  def log_frame(self, frame: Any) -> None:
-    t = ms()
-    addr = int(getattr(frame, "address", 0))
-    src = int(getattr(frame, "src", 0))
-    dat = bytes(getattr(frame, "dat", b"")).hex()
-    bus_time = int(getattr(frame, "busTime", 0))
-    self.can_count += 1
+def process_stream(args: argparse.Namespace, replay_path: Path | None = None) -> tuple[Path, Path]:
+  prefix = "xnor_aeb_boot_watch_v3"
+  writer = WatchWriter(Path(args.output_dir), prefix, quiet=args.quiet, gzip_jsonl=args.gzip_jsonl)
 
-    mono = time.monotonic()
-    if self.last_can is not None and mono - self.last_can >= self.args.can_gap_seconds:
-      self.emit({"kind": "can_gap", "gapSeconds": round(mono - self.last_can, 3), "canCount": self.can_count})
-    self.last_can = mono
+  decoded_last: dict[tuple[int, int, str], int] = {}
+  state_last: dict[str, Any] | None = None
+  panda_last: list[dict[str, Any]] | None = None
+  counts_by_addr_src: collections.Counter[tuple[int, int]] = collections.Counter()
+  changes_by_addr_src: collections.Counter[tuple[int, int]] = collections.Counter()
+  last_payload_by_addr_src: dict[tuple[int, int], str] = {}
+  decoded_events = 0
+  raw_can_logged = 0
+  stopped = False
+  t0_wall = iso_now()
+  t0_mono = int(time.monotonic() * 1000)
+  rel_base_mono: int | None = None
+  ctx: dict[str, Any] = {}
+  last_state_emit_ms = -10**9
+  last_suspicious_repeat: dict[tuple[int, int, str, int], int] = {}
 
-    stat = self.stats[(src, addr)]
-    changed = stat.update(dat, src, t)
-    if self.addrs and addr not in self.addrs:
-      return
-    if self.args.log_all or changed:
-      self.emit({"kind":"can","src":src,"address":addr,"addressHex":f"0x{addr:X}","busTime":bus_time,
-                 "dat":dat,"dlc":len(dat)//2,"changed":changed,"countForAddr":stat.count,"changesForAddr":stat.changes})
+  def rel_s(mono_ms: int) -> float:
+    base = rel_base_mono if rel_base_mono is not None else t0_mono
+    return (mono_ms - base) / 1000.0
 
-  def log_state(self, sm: Any) -> None:
-    if time.monotonic() - self.last_state < self.args.state_interval:
-      return
-    self.last_state = time.monotonic()
-    rec: dict[str, Any] = {"kind": "state"}
+  def handle_sig(_signum, _frame):
+    nonlocal stopped
+    stopped = True
 
-    if "carState" in sm.updated:
-      rec["carState"] = pick(sm["carState"], [
-        "vEgo","standstill","gasPressed","brakePressed","steeringPressed","steeringAngleDeg",
-        "steeringRateDeg","gearShifter","cruiseState.enabled","cruiseState.available",
-        "cruiseState.speed","cruiseState.standstill","cruiseState.nonAdaptive","cruiseState.speedCluster"])
-    if "controlsState" in sm.updated:
-      rec["controlsState"] = pick(sm["controlsState"], [
-        "enabled","active","state","longControlState","forceDecel","alertText1","alertText2",
-        "alertType","alertStatus","alertSize","experimentalMode"])
-    if "pandaStates" in sm.updated:
-      pandas = []
-      try:
-        for p in sm["pandaStates"]:
-          pandas.append(pick(p, ["ignitionLine","ignitionCan","controlsAllowed","safetyModel","safetyParam",
-                                 "faultStatus","pandaType","heartbeatLost","powerSaveEnabled"]))
-      except Exception:
-        pandas = [str(sm["pandaStates"])]
-      rec["pandaStates"] = pandas
-    if "managerState" in sm.updated:
-      procs = []
-      try:
-        for p in sm["managerState"].processes:
-          name = str(getattr(p, "name", ""))
-          if any(x in name.lower() for x in ("boardd","control","model","location","map","panda")):
-            procs.append({"name":name,"running":get(p,"running"),"shouldBeRunning":get(p,"shouldBeRunning"),
-                          "pid":get(p,"pid"),"exitCode":get(p,"exitCode")})
-      except Exception:
+  signal.signal(signal.SIGINT, handle_sig)
+  signal.signal(signal.SIGTERM, handle_sig)
+
+  meta = {
+    "kind": "meta",
+    "tool": "xnor_aeb_boot_watch_v3",
+    "started": t0_wall,
+    "monoMs": t0_mono,
+    "duration": args.duration,
+    "rawCan": bool(args.raw_can),
+    "bootAuto": bool(getattr(args, "boot_auto", False)),
+    "note": "Decoded AEB/panda boot capture. Raw CAN is off by default to avoid huge git-blocking JSONL files. v3 adds launch-hook auto-start support.",
+    "replayJsonl": str(replay_path) if replay_path else None,
+  }
+  writer.write_json(meta)
+  writer.write_txt("# xnor AEB boot watch v2")
+  writer.write_txt(f"jsonl: {writer.jsonl_path}")
+  writer.write_txt(f"txt:   {writer.txt_path}")
+  writer.write_txt(f"raw_can_logging: {bool(args.raw_can)}")
+  writer.write_txt("")
+
+  def update_state_from_obj(mono_ms: int, wall_time: str, car_state: Any = None, controls_state: Any = None,
+                            device_state: Any = None, panda_states: Any = None, manager_state: Any = None,
+                            replay_state_dict: dict[str, Any] | None = None) -> None:
+    nonlocal state_last, panda_last, last_state_emit_ms, ctx
+    if replay_state_dict is not None:
+      # Old JSONL replay already has flattened state dictionaries.
+      ctx = {
+        "carState": replay_state_dict.get("carState", {}),
+        "controlsState": replay_state_dict.get("controlsState", {}),
+        "deviceState": replay_state_dict.get("deviceState", {}),
+        "pandaStates": replay_state_dict.get("pandaStates", []),
+        "managerState": replay_state_dict.get("managerState", []),
+      }
+    else:
+      if car_state is not None:
+        ctx["carState"] = summarise_car_state(car_state)
+      if controls_state is not None:
+        ctx["controlsState"] = summarise_controls_state(controls_state)
+      if device_state is not None:
+        ctx["deviceState"] = summarise_device_state(device_state)
+      if panda_states is not None:
+        ctx["pandaStates"] = summarise_panda_states(panda_states)
+      if manager_state is not None:
+        ctx["managerState"] = summarise_manager_state(manager_state)
+
+    # Emit state snapshots at a low fixed rate, plus immediately when panda safety/fault state changes.
+    pandas_now = ctx.get("pandaStates", []) or []
+    panda_changed = pandas_now != (panda_last or [])
+    should_emit = (mono_ms - last_state_emit_ms) >= int(args.state_interval * 1000) or panda_changed
+    if should_emit:
+      rec = {
+        "kind": "state",
+        "monoMs": mono_ms,
+        "wallTime": wall_time,
+        **ctx,
+      }
+      writer.write_json(rec)
+      last_state_emit_ms = mono_ms
+      if panda_changed and panda_last is not None:
+        writer.write_txt(f"STATE/PANDA t={rel_s(mono_ms):.3f}s {context_line(ctx)}")
+      state_last = rec
+      panda_last = list(pandas_now)
+
+  def process_can(address: int, src: int, dat_hex: str, mono_ms: int, wall_time: str, bus_time: int = 0) -> None:
+    nonlocal decoded_events, raw_can_logged
+    dat = bytes.fromhex(dat_hex)
+    key = (src, address)
+    counts_by_addr_src[key] += 1
+    if last_payload_by_addr_src.get(key) != dat_hex:
+      changes_by_addr_src[key] += 1
+      last_payload_by_addr_src[key] = dat_hex
+
+    if args.raw_can:
+      raw_can_logged += 1
+      if args.max_raw_can and raw_can_logged > args.max_raw_can:
         pass
-      rec["managerState"] = procs
-    if "deviceState" in sm.updated:
-      rec["deviceState"] = pick(sm["deviceState"], ["started","startedMonoTime","freeSpacePercent","networkType",
-                                                     "networkStrength","thermalStatus"])
-    self.emit(rec)
+      else:
+        writer.write_json({
+          "kind": "can",
+          "monoMs": mono_ms,
+          "wallTime": wall_time,
+          "src": src,
+          "address": address,
+          "addressHex": f"0x{address:X}",
+          "busTime": bus_time,
+          "dat": dat_hex,
+          "dlc": len(dat),
+        })
 
-  def summary(self, force: bool = False) -> None:
-    if not force and time.monotonic() - self.last_summary < self.args.summary_interval:
-      return
-    self.last_summary = time.monotonic()
-    top = sorted(self.stats.items(), key=lambda x: (x[1].changes, x[1].count), reverse=True)[:self.args.summary_top_n]
-    self.emit({"kind":"can_summary","totalFrames":self.can_count,"uniqueAddrSrc":len(self.stats),
-               "topChanging":[{"src":s,"address":a,"addressHex":f"0x{a:X}","count":st.count,
-                               "changes":st.changes,"uniquePayloads":len(st.unique),"lastDat":st.last}
-                              for (s,a), st in top]})
+    for dec in decode_can_frame(address, dat, src, mono_ms, wall_time):
+      sig_key = (src, address, dec["signal"])
+      old_val = decoded_last.get(sig_key)
+      val = int(dec["value"])
+      suspicious = val in SUSPICIOUS_VALUES.get(dec["signal"], set())
+      repeat_key = (src, address, dec["signal"], val)
+      repeat_due = suspicious and ((mono_ms - last_suspicious_repeat.get(repeat_key, -10**9)) >= int(args.repeat_suspicious_sec * 1000))
+      if old_val != val or repeat_due:
+        dec["kind"] = "decoded_event"
+        dec["oldValue"] = old_val
+        dec["oldText"] = None if old_val is None else next((s[4].get(old_val) for s in SIGNALS if s[1] == address and s[0] == dec["signal"]), str(old_val))
+        dec["suspicious"] = suspicious
+        dec["context"] = ctx
+        writer.write_json(dec)
+        decoded_events += 1
+        decoded_last[sig_key] = val
+        if suspicious:
+          last_suspicious_repeat[repeat_key] = mono_ms
+        old_s = "init" if old_val is None else dec["oldText"]
+        marker = "AEB!" if suspicious else "CAN "
+        writer.write_txt(
+          f"{marker} t={rel_s(mono_ms):.3f}s src={src} {dec['addressHex']} "
+          f"{dec['message']}.{dec['signal']} {old_s}->{dec['text']} raw={val} {context_line(ctx)}"
+        )
 
-  def final(self) -> None:
-    by_count = sorted(self.stats.items(), key=lambda x: x[1].count, reverse=True)[:self.args.summary_top_n]
-    by_change = sorted(self.stats.items(), key=lambda x: x[1].changes, reverse=True)[:self.args.summary_top_n]
-    self.txt("# xnor AEB boot watch")
-    self.txt(f"jsonl: {self.jsonl_path}")
-    self.txt(f"duration_s: {round(time.monotonic()-self.start_mono, 1)}")
-    self.txt(f"total_can_frames: {self.can_count}")
-    self.txt(f"unique_src_addr: {len(self.stats)}")
-    self.txt("")
-    self.txt("Top CAN addresses by count:")
-    for (src, addr), st in by_count:
-      self.txt(f"  src={src} addr=0x{addr:X} count={st.count} changes={st.changes} unique={len(st.unique)} last={st.last}")
-    self.txt("")
-    self.txt("Top CAN addresses by payload changes:")
-    for (src, addr), st in by_change:
-      self.txt(f"  src={src} addr=0x{addr:X} count={st.count} changes={st.changes} unique={len(st.unique)} last={st.last}")
-    self.summary(force=True)
-    self.emit({"kind":"final_summary","jsonlPath":str(self.jsonl_path),"txtPath":str(self.txt_path),
-               "totalCanFrames":self.can_count,"uniqueAddrSrc":len(self.stats)})
-
-  def run(self) -> int:
-    signal.signal(signal.SIGINT, self.on_stop)
-    signal.signal(signal.SIGTERM, self.on_stop)
-    self.emit({"kind":"meta","started":now(),"argv":sys.argv,"duration":self.args.duration,
-               "note":"Boot capture for transient HUD warnings such as AEB unavailable."})
-    self.txt(f"Writing {self.jsonl_path}")
-    self.txt(f"Writing {self.txt_path}")
-    try:
-      import cereal.messaging as messaging
-    except Exception as exc:
-      self.emit({"kind":"error","where":"import","error":repr(exc)})
-      self.txt(f"failed to import cereal.messaging: {exc}")
-      return 2
-
-    can_sock = messaging.sub_sock("can", timeout=100)
-    sm = messaging.SubMaster(SERVICES, ignore_alive=SERVICES, ignore_avg_freq=SERVICES)
-    end = self.start_mono + self.args.duration
-    while not self.stop and time.monotonic() < end:
+  try:
+    if replay_path is not None:
+      nonlocal_rel_note = None
+      with open_replay(replay_path) as f:
+        for line in f:
+          if stopped:
+            break
+          try:
+            obj = json.loads(line)
+          except Exception:
+            continue
+          kind = obj.get("kind")
+          mono_ms = int(obj.get("monoMs", t0_mono) or t0_mono)
+          if rel_base_mono is None:
+            rel_base_mono = mono_ms
+          wall_time = obj.get("wallTime") or iso_now()
+          if kind == "state":
+            update_state_from_obj(mono_ms, wall_time, replay_state_dict=obj)
+          elif kind == "can":
+            process_can(int(obj.get("address", 0)), int(obj.get("src", 0)), obj.get("dat", ""), mono_ms, wall_time, int(obj.get("busTime", 0) or 0))
+    else:
       try:
-        sm.update(0)
-        self.log_state(sm)
-        for msg in messaging.drain_sock(can_sock, wait_for_one=False):
-          if msg.which() == "can":
-            for frame in msg.can:
-              self.log_frame(frame)
-        self.summary()
-        time.sleep(self.args.sleep)
-      except Exception as exc:
-        self.emit({"kind":"error","where":"loop","error":repr(exc)})
-        time.sleep(0.25)
-    self.final()
-    return 0
+        from cereal import messaging  # pylint: disable=import-error
+      except Exception as e:
+        raise RuntimeError("Live capture must be run from an openpilot environment where cereal.messaging is available") from e
+
+      services = ["can", "carState", "controlsState", "deviceState", "pandaStates", "managerState"]
+      sm = messaging.SubMaster(services, poll="can", ignore_alive=services, ignore_avg_freq=services)
+      deadline = time.monotonic() + float(args.duration)
+      while not stopped and time.monotonic() < deadline:
+        sm.update(1000)
+        mono_ms = int(time.monotonic() * 1000)
+        wall_time = iso_now()
+        update_state_from_obj(
+          mono_ms, wall_time,
+          car_state=sm["carState"] if sm.updated.get("carState") else None,
+          controls_state=sm["controlsState"] if sm.updated.get("controlsState") else None,
+          device_state=sm["deviceState"] if sm.updated.get("deviceState") else None,
+          panda_states=sm["pandaStates"] if sm.updated.get("pandaStates") else None,
+          manager_state=sm["managerState"] if sm.updated.get("managerState") else None,
+        )
+        if sm.updated.get("can"):
+          for c in sm["can"]:
+            try:
+              process_can(int(c.address), int(c.src), bytes(c.dat).hex(), mono_ms, wall_time, int(c.busTime))
+            except Exception as e:
+              writer.write_json({"kind": "decode_error", "monoMs": mono_ms, "wallTime": wall_time, "error": repr(e)})
+
+  finally:
+    top = counts_by_addr_src.most_common(40)
+    writer.write_txt("")
+    writer.write_txt("Top CAN addresses by count:")
+    for (src, addr), count in top:
+      writer.write_txt(f"  src={src} addr=0x{addr:X} count={count} changes={changes_by_addr_src[(src, addr)]} last={last_payload_by_addr_src.get((src, addr), '')}")
+    final = {
+      "kind": "final_summary",
+      "monoMs": int(time.monotonic() * 1000),
+      "wallTime": iso_now(),
+      "jsonlPath": str(writer.jsonl_path),
+      "txtPath": str(writer.txt_path),
+      "rawCanLogged": raw_can_logged if args.raw_can else 0,
+      "decodedEvents": decoded_events,
+      "totalCanFramesSeen": sum(counts_by_addr_src.values()),
+      "uniqueAddrSrc": len(counts_by_addr_src),
+      "rawCanEnabled": bool(args.raw_can),
+    }
+    writer.write_json(final)
+    writer.write_txt("")
+    writer.write_txt(f"decoded_events: {decoded_events}")
+    writer.write_txt(f"total_can_frames_seen: {sum(counts_by_addr_src.values())}")
+    writer.write_txt(f"raw_can_logged: {raw_can_logged if args.raw_can else 0}")
+    writer.write_txt(f"jsonl_size_bytes: {writer.jsonl_path.stat().st_size if writer.jsonl_path.exists() else 0}")
+    writer.close()
+
+  return writer.jsonl_path, writer.txt_path
+
 
 def parse_args() -> argparse.Namespace:
-  p = argparse.ArgumentParser(description="Boot CAN/state watcher for transient Tesla AEB unavailable warnings.")
-  p.add_argument("--duration", type=float, default=180)
-  p.add_argument("--output-dir", default="/data/openpilot/aeb_boot_watch")
-  p.add_argument("--addr", action="append")
-  p.add_argument("--log-all", action="store_true")
-  p.add_argument("--state-interval", type=float, default=0.2)
-  p.add_argument("--summary-interval", type=float, default=2.0)
-  p.add_argument("--summary-top-n", type=int, default=40)
-  p.add_argument("--can-gap-seconds", type=float, default=0.5)
-  p.add_argument("--sleep", type=float, default=0.01)
-  p.add_argument("--stdout", action="store_true")
+  p = argparse.ArgumentParser(description="XNOR AEB boot watcher v2")
+  p.add_argument("--duration", type=float, default=240.0, help="Live capture duration in seconds")
+  p.add_argument("--output-dir", default="/data/openpilot/aeb_boot_watch", help="Output directory")
+  p.add_argument("--state-interval", type=float, default=1.0, help="State snapshot interval in seconds")
+  p.add_argument("--repeat-suspicious-sec", type=float, default=2.0, help="Repeat suspicious AEB values this often even if unchanged")
+  p.add_argument("--raw-can", action="store_true", help="Log every raw CAN frame. WARNING: produces huge JSONL files.")
+  p.add_argument("--max-raw-can", type=int, default=0, help="Optional max raw CAN records when --raw-can is used; 0 means unlimited")
+  p.add_argument("--gzip-jsonl", action="store_true", help="Gzip the JSONL output")
+  p.add_argument("--quiet", action="store_true", help="Do not print event lines to console")
+  p.add_argument("--replay-jsonl", help="Offline re-decode an existing watcher JSONL instead of live capture")
+  p.add_argument("--boot-auto", action="store_true", help="Marker used when launched automatically from launch_openpilot.sh")
   return p.parse_args()
 
+
 def main() -> int:
-  w = Watch(parse_args())
-  try:
-    return w.run()
-  finally:
-    w.close()
+  args = parse_args()
+  replay = Path(args.replay_jsonl) if args.replay_jsonl else None
+  if replay is not None and not replay.exists():
+    print(f"Replay JSONL not found: {replay}", file=sys.stderr)
+    return 2
+  process_stream(args, replay)
+  return 0
+
 
 if __name__ == "__main__":
   raise SystemExit(main())
