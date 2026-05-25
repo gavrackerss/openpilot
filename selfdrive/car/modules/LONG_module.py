@@ -27,6 +27,8 @@ v93 adds strict highway curve lockout, zero-tolerance close-lead accel blocking,
 
 v94 adds a highway-exit exception so slip roads/exits/roundabouts can still slow when mapd provides a credible exit cue.
 
+v95 recovers stale LONG startup state, hard-releases roundabout state after road exit, lets very far non-closing leads accelerate, and blocks gas speed-sync inside roundabout confidence.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -158,6 +160,15 @@ class LongController:
   _V94_HIGHWAY_EXIT_NEXT_LIMIT_DROP_MS = 8.0 * CV.MPH_TO_MS
   _V94_HIGHWAY_EXIT_NEXT_LIMIT_MAX_MS = 45.0 * CV.MPH_TO_MS
   _V94_HIGHWAY_EXIT_NARROW_WIDTH_M = 10.5
+  _V95_STARTUP_LONG_RECOVER_AFTER_MS = 1000
+  _V95_STARTUP_LONG_RECOVER_WINDOW_MS = 7000
+  _V95_FAR_LEAD_ACCEL_GAP_S = 5.00
+  _V95_FAR_LEAD_ACCEL_MIN_DREL_M = 45.0
+  _V95_FAR_LEAD_ACCEL_MAX_CLOSING_MS = -0.05
+  _V95_FAR_LEAD_ACCEL_MAX_DECEL_MS2 = -0.25
+  _V95_ROUNDABOUT_EXIT_VISION_CLEAR_MS = 34.0 * CV.MPH_TO_MS
+  _V95_ROUNDABOUT_EXIT_MAP_CLEAR_MS = 32.0 * CV.MPH_TO_MS
+  _V95_GAS_SYNC_ROUNDABOUT_BLOCK_CONF = 0.60
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -502,6 +513,7 @@ class LongController:
     self._mapd_estimated_road_width_m: Optional[float] = None
     self._mapd_distance_from_way_center_m: Optional[float] = None
     self._v94_highway_exit_exception_recent_ms: int = 0
+    self._v95_startup_long_recovered: bool = False
     self._last_auto_engage_ms: int = 0
 
     self._last_info_log_ms: int = 0
@@ -790,6 +802,138 @@ class LongController:
         "v90_roundabout_confidence",
         "low_speed_lat_trim",
       )
+    )
+
+
+  @staticmethod
+  def _v95_src_has_roundabout_owner(src: str) -> bool:
+    src_text = str(src or "")
+    return any(
+      token in src_text
+      for token in (
+        "mapd_roundabout",
+        "roundabout_fused",
+        "late_roundabout_approach_guard",
+        "roundabout_dynamic_floor",
+        "roundabout_early_cap",
+        "roundabout_planner_early_cap",
+        "roundabout_release_guard",
+        "roundabout_cap",
+        "v90_roundabout_confidence",
+      )
+    )
+
+
+  def _v95_far_lead_release_allow_accel(self, *, v_ego_ms: float, src: str = "") -> bool:
+    if not self._v92_live_lead_for_accel_gate():
+      return False
+    if float(v_ego_ms) <= 0.1:
+      return False
+    if self._v93_src_has_curve_or_roundabout_owner(str(src)):
+      return False
+
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
+    return bool(
+      float(gap_s) >= float(self._V95_FAR_LEAD_ACCEL_GAP_S)
+      and float(self._lead_drel) >= float(self._V95_FAR_LEAD_ACCEL_MIN_DREL_M)
+      and float(self._lead_vrel) > float(self._V95_FAR_LEAD_ACCEL_MAX_CLOSING_MS)
+      and float(self._lp_a_target) > float(self._V95_FAR_LEAD_ACCEL_MAX_DECEL_MS2)
+    )
+
+
+  def _v95_gas_sync_roundabout_block_active(self, *, src: str, now_ms: int) -> bool:
+    return bool(
+      self._v95_src_has_roundabout_owner(str(src))
+      or bool(self._roundabout_release_guard_active(now_ms=int(now_ms)))
+      or float(self._v90_last_roundabout_conf) >= float(self._V95_GAS_SYNC_ROUNDABOUT_BLOCK_CONF)
+      or bool(self._mapd_roundabout_name_hint_active(now_ns=int(now_ms) * 1_000_000))
+    )
+
+
+  def _v95_roundabout_exit_hard_release(
+    self,
+    *,
+    now_ms: int,
+    src: str,
+    desired_ms: float,
+    reference_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+  ) -> tuple[float, str, bool]:
+    road_text = self._mapd_road_text()
+    last_roundabout_road_text = str(self._v92_last_roundabout_road_text or "")
+
+    if "roundabout" in str(road_text):
+      self._v92_last_roundabout_road_text = str(road_text)
+      return float(desired_ms), str(src), False
+
+    if not bool(last_roundabout_road_text) or "roundabout" not in last_roundabout_road_text:
+      return float(desired_ms), str(src), False
+    if not bool(road_text) or str(road_text) == str(last_roundabout_road_text):
+      return float(desired_ms), str(src), False
+
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ms) * 1_000_000)
+    vision_clear = bool(
+      raw_vision_ms is not None
+      and float(raw_vision_ms) >= float(self._V95_ROUNDABOUT_EXIT_VISION_CLEAR_MS)
+    )
+    roundabout_still_owning = bool(
+      self._v95_src_has_roundabout_owner(str(src))
+      or bool(self._roundabout_release_guard_active(now_ms=int(now_ms)))
+      or float(self._v90_last_roundabout_conf) >= float(self._V95_GAS_SYNC_ROUNDABOUT_BLOCK_CONF)
+    )
+    close_lead = bool(
+      self._v92_live_lead_for_accel_gate()
+      and not self._v95_far_lead_release_allow_accel(v_ego_ms=float(v_ego_ms), src=str(src))
+      and (
+        (float(self._lead_drel) / max(float(v_ego_ms), 0.1)) <= float(self._V92_LEAD_ACCEL_BLOCK_GAP_S)
+        or float(self._lead_vrel) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_VREL_MS)
+      )
+    )
+
+    if not bool(vision_clear and roundabout_still_owning and not close_lead):
+      return float(desired_ms), str(src), False
+
+    self._reset_lead_curve_hold()
+    self._reset_curve_hold()
+    self._clear_roundabout_release_guard()
+    self._v90_set_phase(phase="CLEAR", now_ms=int(now_ms))
+    self._v90_last_active_ms = 0
+    self._v90_last_target_ms = 0.0
+    self._v90_last_roundabout_conf = 0.0
+    self._v92_last_roundabout_road_text = ""
+    self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+    self._arbitration_curve_target_ms = 0.0
+
+    release_ms = min(float(reference_ms), max(float(desired_ms), float(current_set_ms), float(v_ego_ms)))
+    return float(release_ms), f"{src}+v95_roundabout_exit_hard_release[{last_roundabout_road_text}->{road_text}]", True
+
+
+  def _v95_startup_long_recover_needed(self, *, now_ms: int, src: str, v_ego_ms: float, gas_pressed: bool, brake_pressed: bool) -> bool:
+    if bool(self._v95_startup_long_recovered):
+      return False
+    if bool(gas_pressed) or bool(brake_pressed):
+      return False
+    if int(self._enabled_since_ms) <= 0:
+      return False
+
+    age_ms = int(now_ms) - int(self._enabled_since_ms)
+    if age_ms < int(self._V95_STARTUP_LONG_RECOVER_AFTER_MS):
+      return False
+    if age_ms > int(self._V95_STARTUP_LONG_RECOVER_WINDOW_MS):
+      return False
+    if self._v93_src_has_curve_or_roundabout_owner(str(src)):
+      return False
+    if self._v92_live_lead_for_accel_gate() and not self._v95_far_lead_release_allow_accel(v_ego_ms=float(v_ego_ms), src=str(src)):
+      return False
+
+    state_age_ms = int(now_ms) - int(self._arbitration_state_since_ms) if int(self._arbitration_state_since_ms) > 0 else age_ms
+    update_age_ms = int(now_ms) - int(self._arbitration_last_update_ms) if int(self._arbitration_last_update_ms) > 0 else age_ms
+    return bool(
+      str(self._arbitration_state) in ("INIT", "RECOVERY")
+      or (str(self._arbitration_state) != "CRUISE_SYNC" and state_age_ms >= int(self._V95_STARTUP_LONG_RECOVER_AFTER_MS))
+      or update_age_ms >= int(self._V95_STARTUP_LONG_RECOVER_AFTER_MS)
+      or age_ms >= int(self._V95_STARTUP_LONG_RECOVER_AFTER_MS)
     )
 
 
@@ -2403,6 +2547,10 @@ class LongController:
 
     gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
     closing = float(self._lead_vrel) <= float(self._V92_LEAD_ACCEL_BLOCK_CLOSING_VREL_MS)
+
+    # v95: a genuinely far, non-closing lead should not freeze acceleration after exits.
+    if self._v95_far_lead_release_allow_accel(v_ego_ms=float(v_ego_ms)):
+      return False
 
     # v93: a close lead is never a safe reason to raise ACC, even when it is
     # slightly opening. The earlier opening-clear bypass let lead_soft_release
@@ -5170,6 +5318,7 @@ class LongController:
       self._last_stock_cruise_enabled = False
       self._gas_speed_sync_until_ms = 0
       self._gas_speed_sync_peak_ms = 0.0
+      self._v95_startup_long_recovered = False
       self._v90_reset_speed_planner()
       return LongDecision(None, "gated: not enabled/adaptive")
 
@@ -5194,6 +5343,7 @@ class LongController:
       self._curve_limit_guard_release_candidate_since_ms = 0
       self._gas_speed_sync_until_ms = 0
       self._gas_speed_sync_peak_ms = 0.0
+      self._v95_startup_long_recovered = False
       self._v90_reset_speed_planner()
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
 
@@ -5211,6 +5361,7 @@ class LongController:
 
     if not self._last_active:
       self._enabled_since_ms = int(now)
+      self._v95_startup_long_recovered = False
       self._stable_plan_samples = 0
       self._last_lp_seen_ns = 0
       self._reset_lead_hold()
@@ -5251,6 +5402,10 @@ class LongController:
       self._reset_lead_curve_hold()
       self._clear_roundabout_release_guard()
       self._mapd_blank_guard_until_ms = int(now) + int(self._MAPD_FRESH_NS // 1_000_000)
+    else:
+      road_text_pre = self._mapd_road_text()
+      if "roundabout" in str(road_text_pre):
+        self._v92_last_roundabout_road_text = str(road_text_pre)
 
     if not bool(stock_cruise_now_enabled):
       self._reset_lead_hold()
@@ -5759,6 +5914,11 @@ class LongController:
           ):
             desired_ms = float(resume_ceiling_ms)
             src = "hold+ceiling+lead_opening"
+          elif self._v95_far_lead_release_allow_accel(v_ego_ms=float(v_ego_ms), src=str(src)):
+            desired_ms = float(resume_ceiling_ms)
+            src = "hold+ceiling+v95_far_lead_release_allow_accel"
+            self._reset_lead_hold()
+            self._reset_lead_curve_hold()
           else:
             desired_ms = float(current_set_ms if current_set_ms > 0.1 else resume_ceiling_ms)
             src = "hold+current_set+lead_present"
@@ -5922,6 +6082,26 @@ class LongController:
     if v90_marker:
       src = f"{src}+{v90_marker}"
 
+    desired_ms, src, roundabout_exit_released = self._v95_roundabout_exit_hard_release(
+      now_ms=int(now),
+      src=str(src),
+      desired_ms=float(desired_ms),
+      reference_ms=float(curve_reference_ms),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+    )
+
+    if self._v95_startup_long_recover_needed(now_ms=int(now), src=str(src), v_ego_ms=float(v_ego_ms), gas_pressed=bool(gas_pressed), brake_pressed=bool(brake_pressed)):
+      self._reset_lead_hold()
+      self._reset_lead_curve_hold()
+      self._reset_curve_hold()
+      self._clear_roundabout_release_guard()
+      self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now))
+      self._arbitration_curve_target_ms = 0.0
+      self._v95_startup_long_recovered = True
+      desired_ms = max(float(desired_ms), min(float(curve_reference_ms), max(float(current_set_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))))
+      src = f"{src}+v95_startup_long_recover"
+
     raw_map_ms_after, raw_vision_ms_after = self._curve_specific_mapd_sources(now_ns=int(now_ns))
     mapd_blank_after = raw_map_ms_after is None and raw_vision_ms_after is None
     if bool(mapd_blank_after) and any(token in str(src) for token in ("curve_hold[mapd]", "mapd_roundabout", "roundabout_fused", "mapd_cap", "lat_sat_hard_cap")):
@@ -5991,6 +6171,17 @@ class LongController:
       gas_sync_target_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
     elif bool(post_gas_sync_active):
       gas_sync_target_ms = max(float(self._gas_speed_sync_peak_ms), float(v_ego_ms), float(current_set_ms))
+
+    gas_sync_roundabout_block = bool(
+      (bool(gas_speed_sync_active) or bool(post_gas_sync_active))
+      and self._v95_gas_sync_roundabout_block_active(src=str(src), now_ms=int(now))
+    )
+    if bool(gas_sync_roundabout_block):
+      self._gas_speed_sync_until_ms = 0
+      self._gas_speed_sync_peak_ms = 0.0
+      gas_sync_target_ms = 0.0
+      if "v95_gas_sync_roundabout_block" not in str(src):
+        src = f"{src}+v95_gas_sync_roundabout_block"
 
     post_gas_live_lead = bool(
       self._v92_live_lead_for_accel_gate()
