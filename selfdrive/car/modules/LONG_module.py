@@ -31,6 +31,8 @@ v95 recovers stale LONG startup state, hard-releases roundabout state after road
 
 v96 fixes motorway lead recovery by allowing stalk-gap-based re-accel after a lead opens, stops v93 highway mode from blocking safe resume presses, and logs highway accel blocks instead of looking dead.
 
+v97 suppressed town A-road highway lock and released weak/false curve holds once vision/mapd indicated the curve had cleared. v98 reverts speed-limit ownership back to Tesla/CarState and disables the v97 mapd speed-limit cap/overshoot correction because it made set-speed behaviour jumpy.
+
 - weak/light curves are advisory and release existing curve ownership
 - confirmed map/vision curves use a slightly less vision-heavy fusion
 - lateral-load trim starts at 22 mph without restoring the old low-speed anchor
@@ -46,6 +48,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -183,6 +186,18 @@ class LongController:
   _V96_RESUME_PRESS_MIN_RISE_MS = 0.65 * CV.MPH_TO_MS
   _V96_RESUME_PRESS_COOLDOWN_MS = 520
   _V96_ACCEL_BUTTON = 4
+  _V97_DEFAULT_SPEED_LIMIT_OFFSET_MS = 2.0 * CV.MPH_TO_MS
+  _V97_SPEED_LIMIT_CAP_MARGIN_MS = 0.10 * CV.MPH_TO_MS
+  _V97_SPEED_LIMIT_OVERSHOOT_MARGIN_MS = 0.60 * CV.MPH_TO_MS
+  _V97_DECEL_BUTTON = 32
+  _V97_TOWN_A_ROAD_MAX_LIMIT_MS = 45.0 * CV.MPH_TO_MS
+  _V97_TOWN_A_ROAD_MAX_EGO_MS = 47.0 * CV.MPH_TO_MS
+  _V97_CURVE_EXIT_VISION_CLEAR_MS = 32.0 * CV.MPH_TO_MS
+  _V97_CURVE_EXIT_VISION_STRONG_CLEAR_MS = 45.0 * CV.MPH_TO_MS
+  _V97_CURVE_EXIT_MAP_CLEAR_MS = 27.0 * CV.MPH_TO_MS
+  _V97_CURVE_EXIT_MAX_STEER_DEG = 35.0
+  _V97_CURVE_EXIT_MAX_STEER_RATE_DEG = 60.0
+  _V97_CURVE_EXIT_MIN_RISE_MS = 1.0 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -655,6 +670,14 @@ class LongController:
 
 
   @staticmethod
+  def _v97_road_text_has_town_a_road_token(road_text: str) -> bool:
+    text = f" {str(road_text or '').lower().replace('_', ' ')} "
+    # A-road references can appear in wayRef even on 30/40 mph urban roads.
+    # Treat them as "major road" hints only when the speed context is actually high.
+    return bool(re.search(r"\ba\d{1,4}\b", text) or " a3(m) " in text)
+
+
+  @staticmethod
   def _v93_road_text_is_highway(road_text: str) -> bool:
     text = str(road_text or "").lower().replace("_", " ")
     if "roundabout" in text:
@@ -778,6 +801,17 @@ class LongController:
     if ctx == "freeway":
       return True
     if self._v93_road_text_is_highway(text):
+      map_limit_ms = self._mapd_speed_limit_ms
+      town_a_road_context = bool(
+        self._v97_road_text_has_town_a_road_token(str(text))
+        and ctx in ("city", "residential", "unknown", "")
+        and map_limit_ms is not None
+        and math.isfinite(float(map_limit_ms))
+        and float(map_limit_ms) <= float(self._V97_TOWN_A_ROAD_MAX_LIMIT_MS)
+        and max(float(v_ego_ms), float(reference_ms)) <= float(self._V97_TOWN_A_ROAD_MAX_EGO_MS)
+      )
+      if bool(town_a_road_context):
+        return False
       return True
     if ctx in ("unknown", "") and max(float(v_ego_ms), float(reference_ms)) >= float(self._V93_HIGHWAY_MIN_REFERENCE_MS):
       return True
@@ -934,7 +968,9 @@ class LongController:
       return False
     if bool(lead_accel_block):
       return False
-    if self._v93_src_has_curve_or_roundabout_owner(str(src)):
+    if self._v93_src_has_curve_or_roundabout_owner(str(src)) and not any(
+      token in str(src) for token in ("v97_curve_exit_release", "v97_weak_curve_release")
+    ):
       return False
     if bool(self._roundabout_release_guard_active(now_ms=int(now_ms))):
       return False
@@ -2565,6 +2601,110 @@ class LongController:
           self._mapd_last_ns = mono_ns
     except Exception:
       pass
+
+  def _v97_configured_speed_limit_offset_ms(self, CS) -> float:
+    """
+    Retained only for rollback compatibility. v98 no longer uses mapd speedLimit
+    as the speed-limit ceiling because Tesla/CarState is the stable source of
+    truth for the active cruise target and user offset.
+    """
+    return 0.0
+
+
+  def _v97_mapd_speed_limit_ceiling_ms(self, CS=None) -> tuple[Optional[float], str]:
+    """
+    v98 rollback: do not turn mapd speedLimit into a cruise target/cap.
+
+    mapd speedLimit is still cached for contextual logic such as highway-exit
+    and town-A-road suppression, but it must not override or clamp the Tesla
+    speed-limit target. The old v97 cap caused jumpy 30/40 mph behaviour on
+    roads where mapd and Tesla disagreed.
+    """
+    return None, "v98_tesla_speed_limit_passthrough"
+
+
+  def _v97_cap_speed_limit_target(
+    self,
+    *,
+    CS,
+    speed_limit_target_ms: Optional[float],
+    set_speed_limit_active: bool,
+    ceiling_src: str,
+  ) -> tuple[Optional[float], bool, str, Optional[float]]:
+    """
+    v98 rollback shim.
+
+    Keep the call sites stable, but pass the Tesla/CarState speed-limit target
+    through unchanged and return no cap. This disables:
+      - v97_mapd_limit_cap
+      - v97_speed_limit_cap
+      - v97_speed_limit_overshoot_decel
+    """
+    return speed_limit_target_ms, bool(set_speed_limit_active), str(ceiling_src), None
+
+
+  def _v97_curve_false_hold_release(
+    self,
+    *,
+    now_ms: int,
+    now_ns: int,
+    src: str,
+    desired_ms: float,
+    speed_ceiling_ms: Optional[float],
+    current_set_ms: float,
+    v_ego_ms: float,
+    current_angle_deg: float,
+    steering_rate_deg: float,
+  ) -> tuple[float, str, bool]:
+    src_text = str(src or "")
+    if not any(token in src_text for token in ("CURVE_ACTIVE", "CURVE_PRE_ENTRY", "curve_accel_block", "mapd_lead_curve", "curve_hold")):
+      return float(desired_ms), src_text, False
+    if self._v95_src_has_roundabout_owner(src_text) or self._mapd_roundabout_name_hint_active(now_ns=int(now_ns)):
+      return float(desired_ms), src_text, False
+    if self._lat_limit_saturated:
+      return float(desired_ms), src_text, False
+    if speed_ceiling_ms is None or not math.isfinite(float(speed_ceiling_ms)) or float(speed_ceiling_ms) <= 0.1:
+      return float(desired_ms), src_text, False
+    if float(current_set_ms) >= (float(speed_ceiling_ms) - float(self._V97_CURVE_EXIT_MIN_RISE_MS)):
+      return float(desired_ms), src_text, False
+    if self._v92_lead_accel_block_active(
+      v_ego_ms=float(v_ego_ms),
+      base_target_ms=float(speed_ceiling_ms),
+    ):
+      return float(desired_ms), src_text, False
+
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    vision_clear = bool(raw_vision_ms is not None and float(raw_vision_ms) >= float(self._V97_CURVE_EXIT_VISION_CLEAR_MS))
+    vision_strong_clear = bool(raw_vision_ms is not None and float(raw_vision_ms) >= float(self._V97_CURVE_EXIT_VISION_STRONG_CLEAR_MS))
+    map_clear = bool(raw_map_ms is None or float(raw_map_ms) >= float(self._V97_CURVE_EXIT_MAP_CLEAR_MS))
+    v90_says_clear = "v90_speed_planner[phase=CLEAR" in src_text
+    false_positive_marker = bool("fp=100" in src_text or "mapd_vision_clear" in src_text or "lead_straight_reject" in src_text)
+
+    steer_clear = bool(
+      abs(float(current_angle_deg)) <= float(self._V97_CURVE_EXIT_MAX_STEER_DEG)
+      and abs(float(steering_rate_deg)) <= float(self._V97_CURVE_EXIT_MAX_STEER_RATE_DEG)
+    )
+    clear_enough = bool(
+      (vision_clear and map_clear and (v90_says_clear or false_positive_marker or steer_clear))
+      or (vision_strong_clear and steer_clear)
+      or (map_clear and false_positive_marker and steer_clear)
+    )
+
+    if not bool(clear_enough):
+      return float(desired_ms), src_text, False
+
+    self._reset_curve_hold()
+    self._reset_lead_curve_hold()
+    self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+    released_ms = max(float(desired_ms), min(float(speed_ceiling_ms), max(float(current_set_ms), float(v_ego_ms)) + (2.5 * CV.MPH_TO_MS)))
+    # If the curve has clearly disappeared, restore the real speed-limit ceiling immediately.
+    if bool(map_clear and vision_clear and (v90_says_clear or false_positive_marker)):
+      released_ms = max(float(released_ms), float(speed_ceiling_ms))
+    marker = "v97_curve_exit_release" if bool(map_clear) else "v97_weak_curve_release"
+    if marker not in src_text:
+      src_text = f"{src_text}+{marker}"
+    return float(released_ms), src_text, True
+
 
   def _resolve_speed_limit_target_ms(self, CS, *, speed_units: str) -> tuple[Optional[float], bool, str]:
     """
@@ -5642,6 +5782,7 @@ class LongController:
     )
 
     speed_limit_target_ms, set_speed_limit_active, ceiling_src = self._resolve_speed_limit_target_ms(CS, speed_units=speed_units)
+    # v98: speed-limit ownership intentionally stays on Tesla/CarState. mapd speedLimit is not used as a target/cap.
     roadworks_cap_ms = self._roadworks_cap_ms()
     if roadworks_cap_ms is not None and speed_limit_target_ms is not None:
       capped_speed_limit_target_ms = self._roadworks_cap_target_ms(speed_limit_target_ms, roadworks_cap_ms)
@@ -5649,6 +5790,13 @@ class LongController:
         speed_limit_target_ms = float(capped_speed_limit_target_ms)
         if "roadworks_cap" not in str(ceiling_src):
           ceiling_src = f"{ceiling_src}+roadworks_cap"
+
+    speed_limit_target_ms, set_speed_limit_active, ceiling_src, v97_speed_limit_cap_ms = self._v97_cap_speed_limit_target(
+      CS=CS,
+      speed_limit_target_ms=speed_limit_target_ms,
+      set_speed_limit_active=bool(set_speed_limit_active),
+      ceiling_src=str(ceiling_src),
+    )
 
     if set_speed_limit_active and speed_limit_target_ms is not None:
       base_target_ms = float(speed_limit_target_ms)
@@ -6235,6 +6383,26 @@ class LongController:
       desired_ms = max(float(desired_ms), min(float(curve_reference_ms), max(float(current_set_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))))
       src = f"{src}+v95_startup_long_recover"
 
+    curve_release_ceiling_ms = float(v97_speed_limit_cap_ms) if v97_speed_limit_cap_ms is not None else float(curve_reference_ms)
+    desired_ms, src, v97_curve_released = self._v97_curve_false_hold_release(
+      now_ms=int(now),
+      now_ns=int(now_ns),
+      src=str(src),
+      desired_ms=float(desired_ms),
+      speed_ceiling_ms=float(curve_release_ceiling_ms),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+      current_angle_deg=float(current_angle_deg),
+      steering_rate_deg=float(steering_rate_deg),
+    )
+    if bool(v97_curve_released) and v97_speed_limit_cap_ms is not None:
+      curve_reference_ms = max(float(curve_reference_ms), float(v97_speed_limit_cap_ms))
+      if speed_limit_target_ms is not None and float(speed_limit_target_ms) < float(v97_speed_limit_cap_ms):
+        speed_limit_target_ms = float(v97_speed_limit_cap_ms)
+        set_speed_limit_active = True
+        if "v97_curve_release_ceiling" not in str(ceiling_src):
+          ceiling_src = f"{ceiling_src}+v97_curve_release_ceiling"
+
     raw_map_ms_after, raw_vision_ms_after = self._curve_specific_mapd_sources(now_ns=int(now_ns))
     mapd_blank_after = raw_map_ms_after is None and raw_vision_ms_after is None
     if bool(mapd_blank_after) and any(token in str(src) for token in ("curve_hold[mapd]", "mapd_roundabout", "roundabout_fused", "mapd_cap", "lat_sat_hard_cap")):
@@ -6346,6 +6514,9 @@ class LongController:
       if math.isfinite(float(lead_safe_sync_cap_ms)) and float(gas_sync_target_ms) > float(lead_safe_sync_cap_ms):
         gas_sync_target_ms = float(lead_safe_sync_cap_ms)
         gas_sync_marker = f"{gas_sync_marker}+gas_sync_lead_limit"
+      if v97_speed_limit_cap_ms is not None and float(gas_sync_target_ms) > float(v97_speed_limit_cap_ms):
+        gas_sync_target_ms = float(v97_speed_limit_cap_ms)
+        gas_sync_marker = f"{gas_sync_marker}+v97_speed_limit_cap"
       if float(gas_sync_target_ms) > (float(current_set_ms) + float(self._GAS_SPEED_SYNC_MIN_RISE_MS)):
         desired_ms = max(float(desired_ms), float(gas_sync_target_ms))
         self._reset_lead_approach_cancel()
@@ -6367,6 +6538,11 @@ class LongController:
       desired_ms = min(float(desired_ms), float(current_set_ms) + float(self._V93_LEAD_SYNC_SAFE_MARGIN_MS))
       if "lead_accel_hard_gate" not in str(src):
         src = f"{src}+lead_accel_hard_gate+v93_lead_zero_tolerance"
+
+    if v97_speed_limit_cap_ms is not None and float(desired_ms) > (float(v97_speed_limit_cap_ms) + float(self._V97_SPEED_LIMIT_CAP_MARGIN_MS)):
+      desired_ms = float(v97_speed_limit_cap_ms)
+      if "v97_speed_limit_cap" not in str(src):
+        src = f"{src}+v97_speed_limit_cap"
 
     if roadworks_cap_ms is not None and speed_limit_target_ms is not None:
       capped_speed_limit_target_ms = self._roadworks_cap_target_ms(speed_limit_target_ms, roadworks_cap_ms)
@@ -6495,6 +6671,24 @@ class LongController:
     )
 
     if decision.button is None or int(decision.button) == int(CruiseButtons.IDLE):
+      if (
+        stock_cruise_enabled
+        and not bool(gas_pressed)
+        and not bool(brake_pressed)
+        and v97_speed_limit_cap_ms is not None
+        and float(current_set_ms) > (float(v97_speed_limit_cap_ms) + float(self._V97_SPEED_LIMIT_OVERSHOOT_MARGIN_MS))
+      ):
+        kph_to_u = CV.KPH_TO_MPH if speed_units == "MPH" else 1.0
+        msg = (
+          f"[XNOR_CRUISE_SYNC] src={src}+v97_speed_limit_overshoot_decel uom={speed_units} "
+          f"tgt={float(v97_speed_limit_cap_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"cur={float(current_set_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"est={float(v_ego_ms) * CV.MS_TO_KPH * kph_to_u:.1f} "
+          f"btn={int(self._V97_DECEL_BUTTON)} reason=press[v97_speed_limit_overshoot]"
+        )
+        self._rate_log(msg)
+        return LongDecision(int(self._V97_DECEL_BUTTON), msg)
+
       if stock_cruise_enabled and self._v96_resume_press_allowed(
         src=str(src),
         desired_ms=float(desired_ms),
