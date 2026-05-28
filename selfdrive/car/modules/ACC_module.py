@@ -12,7 +12,7 @@ The acceleration side is tuned to feel more natural:
 - clear-road jumps may still begin with 5-step RES pulses
 - active lead-following sticks to 1-step RES pulses for smoother spacing
 - cadence stays calmer while a lead is still present to reduce hunting
-- v60 adds a bounded SET fallback when RES autoengage is ignored from STANDBY
+- v61 narrows cruise-min holds and blocks RES autoengage into low-speed curve targets
 """
 
 from __future__ import annotations
@@ -61,20 +61,21 @@ class ACCController:
   _AUTO_COOLDOWN_ACCEL_FAST_MS = 340
   _AUTO_COOLDOWN_ACCEL_SLOW_MS = 520
   _AUTO_COOLDOWN_ACCEL_FULL_MS = 440
-  _ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS = 180
+  _ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS = 420
   _FAST_DECEL_RESUME_HOLDOFF_MS = 2000
   _LEAD_FRESH_MS = 450
-  _AUTOENGAGE_SPEED_WINDOW_MS = 0.8
+  _AUTOENGAGE_SPEED_WINDOW_MS = 0.35
   _AUTOENGAGE_SET_FALLBACK_MS = 1400
   _AUTOENGAGE_SET_FALLBACK_REPEAT_MS = 2200
   _AUTO_ECHO_IGNORE_MS = 550
-  _MIN_CRUISE_HOLD_MARGIN_MS = 5.0 * CV.MPH_TO_MS
-  _MIN_CRUISE_CANCEL_VEGO_MARGIN_MS = 1.0 * CV.MPH_TO_MS
+  _MIN_CRUISE_HOLD_MARGIN_MS = 2.2 * CV.MPH_TO_MS
+  _MIN_CRUISE_CANCEL_VEGO_MARGIN_MS = 0.4 * CV.MPH_TO_MS
+  _AUTOENGAGE_MIN_TARGET_MARGIN_MS = 1.2 * CV.MPH_TO_MS
   _MANUAL_LOWER_STALE_CLEAR_MS = 6000
   _MANUAL_CONFIRM_WINDOW_MS = 1500
   _MANUAL_PENDING_TIMEOUT_MS = 1800
   _MANUAL_LATCH_SUPPRESS_AFTER_AUTO_DECEL_MS = 2600
-  _LEAD_FOLLOW_SOFT_DEADBAND_MPH = 1.0
+  _LEAD_FOLLOW_SOFT_DEADBAND_MPH = 0.7
   _LEAD_FOLLOW_PERSIST_BAND_MPH = 2.0
   _LEAD_FOLLOW_PERSIST_MS = 900
 
@@ -697,6 +698,7 @@ class ACCController:
     if stock_state == "STANDBY":
       can_autoengage = (
         float(desired_speed_ms) >= float(v_ego_ms) - float(self._AUTOENGAGE_SPEED_WINDOW_MS)
+        and float(desired_speed_ms) >= (float(self.MIN_CRUISE_SPEED_MS) + float(self._AUTOENGAGE_MIN_TARGET_MARGIN_MS))
         and self._no_human_action_for(now_ms=now_ms, milliseconds=self._HUMAN_COOLDOWN_MS)
         and self._no_automated_action_for(now_ms=now_ms, milliseconds=self._AUTO_COOLDOWN_MS)
         and self._should_autoengage_cc(now_ms=now_ms, v_ego_ms=v_ego_ms, brake_pressed=brake_pressed, lead=lead)

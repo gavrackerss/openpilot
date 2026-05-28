@@ -7,12 +7,14 @@ making lead-follow recovery smoother and less sticky:
 
 v61 adds an explicit final LONG arbitration state machine.
 
-v63 tightens far-lead release, hard-entry/roundabout caps, and steering-saturation response.
+v64 tightens roundabout/curve entry, low-speed cruise-min cancellation, and curve accel blocking.
 
 - lead critical / lead follow / curve pre-entry / curve active / curve exit / cruise sync are resolved in one final pass
 - stale lead/planner ownership is expired before it can hold speed down after curves
 - map-only curve caps are ignored when vision/steering/planner do not confirm the bend
 - curve exit releases cleanly so speed can resume after roundabouts
+- low-speed roundabout targets below Tesla's cruise minimum now cancel instead of holding 18 mph
+- active curve targets block RES/accelerate pulses until the curve clears
 
 XNOR architecture adaptations retained:
 - 5 Hz cruise stalk pacing
@@ -69,14 +71,14 @@ class LongController:
   _CURVE_EXIT_RECOVERY_MS_PER_S = 3.2
   _CURVE_HOLD_ENTRY_FREEZE_MS = 900
   _CURVE_HOLD_DROP_PERSIST_MS = 260
-  _CURVE_HOLD_DROP_RATE_MS_PER_S = 1.8
+  _CURVE_HOLD_DROP_RATE_MS_PER_S = 3.2
   _CURVE_HOLD_HARD_DROP_EXTRA_MS = 5.0 * CV.MPH_TO_MS
   _CURVE_ENTRY_PREVIEW_DROP_MS = 2.0 * CV.MPH_TO_MS
   _CURVE_PRE_ENTRY_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
   _CURVE_PRE_ENTRY_PREVIEW_DROP_MS = 5.0 * CV.MPH_TO_MS
   _CURVE_PRE_ENTRY_MIN_RATIO = 0.42
-  _CURVE_MIN_CRUISE_HOLD_MARGIN_MS = 5.0 * CV.MPH_TO_MS
-  _CURVE_MAPD_MIN_HOLD_MARGIN_MS = 0.5 * CV.MPH_TO_MS
+  _CURVE_MIN_CRUISE_HOLD_MARGIN_MS = 2.2 * CV.MPH_TO_MS
+  _CURVE_MAPD_MIN_HOLD_MARGIN_MS = 0.25 * CV.MPH_TO_MS
   _CURVE_HARD_ENTRY_EXTRA_MS = 3.0 * CV.MPH_TO_MS
   _CURVE_RELEASE_NEAR_TARGET_MARGIN_MS = 0.4 * CV.MPH_TO_MS
   _CURVE_HOLD_DROP_DEADBAND_MS = 2.0 * CV.MPH_TO_MS
@@ -100,7 +102,7 @@ class LongController:
   _MAPD_ONLY_HIGHWAY_ENTRY_PERSIST_MS = 460
   _MAPD_ONLY_ENTRY_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DUAL_SOURCE_AGREE_MS = 4.0 * CV.MPH_TO_MS
-  _MAPD_DISAGREE_COMFORT_BLEND = 0.90
+  _MAPD_DISAGREE_COMFORT_BLEND = 0.45
   _MAPD_DISAGREE_PLANNER_CONFIRM_MS = 2.0 * CV.MPH_TO_MS
   _MAPD_DISAGREE_STEER_CONFIRM_DEG = 3.5
   _MAPD_ONLY_HIGHWAY_SPEED_MS = 55.0 * CV.MPH_TO_MS
@@ -161,19 +163,19 @@ class LongController:
   _STALE_PLANNER_LEAD_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _STALE_PLANNER_LEAD_MAX_LIVE_DROP_MS = 0.75 * CV.MPH_TO_MS
 
-  _CURVE_FORCE_ENTRY_MIN_SPEED_MS = 18.0 * CV.MPH_TO_MS
-  _CURVE_FORCE_ENTRY_MIN_DROP_MS = 6.0 * CV.MPH_TO_MS
+  _CURVE_FORCE_ENTRY_MIN_SPEED_MS = 15.0 * CV.MPH_TO_MS
+  _CURVE_FORCE_ENTRY_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
   _CURVE_FORCE_ENTRY_EGO_DROP_MS = 2.0 * CV.MPH_TO_MS
   _CURVE_FORCE_ENTRY_PERSIST_MS = 420
   _CURVE_FORCE_ENTRY_STEER_PERSIST_MS = 180
   _CURVE_FORCE_ENTRY_PREVIEW_DROP_MS = 3.5 * CV.MPH_TO_MS
-  _CURVE_FORCE_ENTRY_TARGET_OFFSET_MS = 4.0 * CV.MPH_TO_MS
-  _CURVE_ACCEL_BLOCK_STEER_DEG = 4.8
-  _CURVE_ACCEL_BLOCK_STEER_RATE_DEG = 13.0
-  _CURVE_ACCEL_BLOCK_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
-  _CURVE_ACCEL_BLOCK_EGO_MARGIN_MS = 2.0 * CV.MPH_TO_MS
+  _CURVE_FORCE_ENTRY_TARGET_OFFSET_MS = 2.0 * CV.MPH_TO_MS
+  _CURVE_ACCEL_BLOCK_STEER_DEG = 2.8
+  _CURVE_ACCEL_BLOCK_STEER_RATE_DEG = 9.0
+  _CURVE_ACCEL_BLOCK_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
+  _CURVE_ACCEL_BLOCK_EGO_MARGIN_MS = 0.5 * CV.MPH_TO_MS
   _CURVE_STEER_LIMIT_HOLD_MS = 260
-  _CURVE_STEER_LIMIT_HOLD_DROP_MS = 0.75 * CV.MPH_TO_MS
+  _CURVE_STEER_LIMIT_HOLD_DROP_MS = 1.5 * CV.MPH_TO_MS
 
   _MAPD_STRAIGHT_STALE_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
   _MAPD_STRAIGHT_STALE_VISION_CLEAR_MS = 6.0 * CV.MPH_TO_MS
@@ -241,7 +243,7 @@ class LongController:
   _ARBITRATION_CURVE_EGO_DROP_MS = 1.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EXIT_RELEASE_MS = 650
-  _ARBITRATION_CURVE_ENTRY_STEP_MS = 2.2 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_ENTRY_STEP_MS = 4.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EXIT_STEP_MS = 3.6 * CV.MPH_TO_MS
   _FOLLOW_GAP_DEFAULT_S = 2.35
   _FOLLOW_GAP_MIN_S = 1.25
@@ -249,19 +251,21 @@ class LongController:
   _FOLLOW_GAP_STALK_STEP_S = 0.35
   _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.85
   _FOLLOW_GAP_RELEASE_VREL_MS = 0.10
-  _CURVE_CONFIRMED_COMFORT_BIAS_MS = 2.0 * CV.MPH_TO_MS
-  _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 1.25 * CV.MPH_TO_MS
+  _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
+  _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
   _FAR_LEAD_RELEASE_MIN_GAP_S = 4.20
   _FAR_LEAD_RELEASE_MARGIN_S = 1.80
   _FAR_LEAD_RELEASE_MIN_DREL_M = 48.0
   _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.45
   _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.45
-  _ROUNDABOUT_HARD_ENTRY_CAP_MS = 33.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS = 28.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_CAP_MS = 26.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_DROP_MS = 5.0 * CV.MPH_TO_MS
-  _LAT_SAT_HARD_MIN_SPEED_MS = 22.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_HARD_ENTRY_CAP_MS = 25.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_CAP_MS = 22.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_DROP_MS = 7.0 * CV.MPH_TO_MS
+  _LAT_SAT_HARD_MIN_SPEED_MS = 18.0 * CV.MPH_TO_MS
+  _CURVE_ACTIVE_ACCEL_BLOCK_MARGIN_MS = 0.35 * CV.MPH_TO_MS
+  _CURVE_ACTIVE_ACCEL_BLOCK_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
 
 
   _LEAD_CLOSE_CANCEL_MIN_SPEED_MS = 5.0 * CV.MPH_TO_MS
@@ -1842,6 +1846,55 @@ class LongController:
     if float(desired_ms) <= (float(accel_block_ms) + 0.01):
       return float(desired_ms), False
     return float(accel_block_ms), True
+
+
+  def _curve_active_accel_block_target(
+    self,
+    *,
+    now_ns: int,
+    desired_ms: float,
+    src: str,
+    reference_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+    current_angle_deg: float,
+  ) -> tuple[float, bool]:
+    curve_src = str(src or "")
+    in_curve_state = (
+      "CURVE_ACTIVE" in curve_src
+      or "CURVE_PRE_ENTRY" in curve_src
+      or "curve_hold" in curve_src
+      or "mapd_cap" in curve_src
+      or "lat_sat" in curve_src
+    )
+    if not in_curve_state:
+      return float(desired_ms), False
+
+    hold_ceiling_ms = max(float(current_set_ms), float(v_ego_ms))
+    if float(desired_ms) <= (hold_ceiling_ms + float(self._CURVE_ACTIVE_ACCEL_BLOCK_MARGIN_MS)):
+      return float(desired_ms), False
+
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    curve_candidates = [
+      float(x)
+      for x in (raw_map_ms, raw_vision_ms)
+      if x is not None and math.isfinite(float(x)) and float(x) > 0.1
+    ]
+    curve_floor_ms = min(curve_candidates) if curve_candidates else 0.0
+    curve_drop_ms = float(reference_ms) - float(curve_floor_ms) if curve_floor_ms > 0.1 else 0.0
+
+    low_speed_curve = float(v_ego_ms) <= 35.0 * CV.MPH_TO_MS
+    meaningful_curve = (
+      curve_drop_ms >= float(self._CURVE_ACTIVE_ACCEL_BLOCK_MIN_DROP_MS)
+      or abs(float(current_angle_deg)) >= float(self._CURVE_REENTRY_ALLOW_STEER_DEG)
+      or bool(self._lat_limit_saturated)
+      or low_speed_curve
+    )
+    if not meaningful_curve:
+      return float(desired_ms), False
+
+    blocked_ms = max(float(self.MIN_CRUISE_SPEED_MS), hold_ceiling_ms - float(self._CURVE_ACTIVE_ACCEL_BLOCK_MARGIN_MS))
+    return min(float(desired_ms), float(blocked_ms)), True
 
 
   def _apply_lead_present_mapd_cap(
@@ -3464,6 +3517,18 @@ class LongController:
       if curve_accel_blocked and "curve_accel_block[steer_busy]" not in src:
         src = f"{src}+curve_accel_block[steer_busy]"
 
+    desired_ms, curve_active_accel_blocked = self._curve_active_accel_block_target(
+      now_ns=int(now_ns),
+      desired_ms=float(desired_ms),
+      src=str(src),
+      reference_ms=float(curve_reference_ms),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+      current_angle_deg=float(current_angle_deg),
+    )
+    if curve_active_accel_blocked and "curve_accel_block[active]" not in src:
+      src = f"{src}+curve_accel_block[active]"
+
     desired_ms, src = self._arbitrate_target_state_machine(
       now_ms=int(now),
       now_ns=int(now_ns),
@@ -3477,6 +3542,18 @@ class LongController:
       lp_fresh=bool(lp_fresh),
       cs_out=cs_out,
     )
+
+    desired_ms, curve_active_accel_blocked = self._curve_active_accel_block_target(
+      now_ns=int(now_ns),
+      desired_ms=float(desired_ms),
+      src=str(src),
+      reference_ms=float(curve_reference_ms),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+      current_angle_deg=float(current_angle_deg),
+    )
+    if curve_active_accel_blocked and "curve_accel_block[active]" not in src:
+      src = f"{src}+curve_accel_block[active]"
 
     desired_ms, lead_low_speed_blocked = self._low_speed_lead_block_target(
       now_ms=int(now),
