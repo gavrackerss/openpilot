@@ -3,17 +3,18 @@
 #include "common/swaglog.h"
 
 namespace {
-static volatile const char xnor_v120_early_tesla_safety_marker_blob[] __attribute__((used)) = "XNOR_V120_EARLY_TESLA_SAFETY";
+static volatile const char xnor_v122_persistent_tesla_carparams_marker_blob[] __attribute__((used)) = "XNOR_V122_PERSISTENT_TESLA_CARPARAMS";
 
-static const char *xnorV120EarlyTeslaSafetyMarker() {
-  return const_cast<const char *>(xnor_v120_early_tesla_safety_marker_blob);
+static const char *xnorV122PersistentTeslaCarParamsMarker() {
+  return const_cast<const char *>(xnor_v122_persistent_tesla_carparams_marker_blob);
 }
 }
 
-// XNOR_V120_EARLY_TESLA_SAFETY:
-// Avoid the boot window where pandad uses ELM327 forwarding before ControlsReady.
-// If cached CarParams already prove this is Tesla legacy, set the real safety
-// model immediately, then let ControlsReady apply the final current-route safety.
+// XNOR_V122_PERSISTENT_TESLA_CARPARAMS:
+// v120 proved the patch could rebuild pandad, but the boot logs still showed an
+// ELM327/silent window before ControlsReady. This version uses a persistent copy
+// of the previous route's Tesla CarParams so teslaLegacy safety can be applied
+// before the transient HUD/AEB frames are forwarded.
 bool PandaSafety::carParamsHaveTeslaLegacySafety(const std::string &params_string) {
   if (params_string.empty()) {
     return false;
@@ -37,17 +38,18 @@ bool PandaSafety::carParamsHaveTeslaLegacySafety(const std::string &params_strin
   return false;
 }
 
-bool PandaSafety::trySetCachedTeslaSafety() {
-  static const char *cached_param_keys[] = {
+bool PandaSafety::trySetEarlyTeslaSafety() {
+  static const char *early_param_keys[] = {
     "CarParamsPersistent",
-    "CarParamsCache",
     "CarParamsPrevRoute",
+    "CarParamsCache",
+    "CarParams",
   };
 
-  for (const char *key : cached_param_keys) {
+  for (const char *key : early_param_keys) {
     const std::string params_string = params_.get(key);
     if (carParamsHaveTeslaLegacySafety(params_string)) {
-      LOGW("%s: applying cached Tesla safety from %s before ControlsReady", xnorV120EarlyTeslaSafetyMarker(), key);
+      LOGW("%s: applying early Tesla safety from %s before ControlsReady", xnorV122PersistentTeslaCarParamsMarker(), key);
       setSafetyMode(params_string);
       return true;
     }
@@ -58,9 +60,9 @@ bool PandaSafety::trySetCachedTeslaSafety() {
 
 void PandaSafety::configureSafetyMode(bool is_onroad) {
   if (is_onroad && !safety_configured_) {
-    if (!cached_tesla_safety_configured_) {
-      cached_tesla_safety_configured_ = trySetCachedTeslaSafety();
-      if (!cached_tesla_safety_configured_) {
+    if (!early_tesla_safety_configured_) {
+      early_tesla_safety_configured_ = trySetEarlyTeslaSafety();
+      if (!early_tesla_safety_configured_) {
         updateMultiplexingMode();
       }
     }
@@ -73,7 +75,7 @@ void PandaSafety::configureSafetyMode(bool is_onroad) {
     }
   } else if (!is_onroad) {
     initialized_ = false;
-    cached_tesla_safety_configured_ = false;
+    early_tesla_safety_configured_ = false;
     safety_configured_ = false;
     log_once_ = false;
   }
