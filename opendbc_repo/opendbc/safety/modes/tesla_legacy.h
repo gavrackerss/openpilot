@@ -162,6 +162,17 @@ static void tesla_legacy_clear_warning_matrix(CANPacket_t *msg) {
 }
 
 
+// XNOR_V116_AEB_BOOT_SCRUB: only hide stale boot/standstill AP warning frames.
+// Preserve moving stock AEB/FCW visibility when OP is not in control.
+static bool tesla_legacy_vehicle_stopped_or_unknown(void) {
+  return vehicle_speed.max < 500;  // 0.5 m/s in VEHICLE_SPEED_FACTOR units
+}
+
+static bool tesla_legacy_boot_warning_scrub_active(void) {
+  return !controls_allowed && tesla_legacy_vehicle_stopped_or_unknown();
+}
+
+
 
 // --- RX hook ---
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
@@ -443,10 +454,14 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   //   stock longControl except real stock AEB events.
   if (tesla_legacy_external_panda) {
     if ((bus_num == 2) && (addr == 0x2BF)) {
+      const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
+      const bool real_stock_aeb = (aeb_event == 1);
+      const bool stale_boot_warning = (aeb_event != 0) && !real_stock_aeb;
+
       if (!controls_allowed) {
-        return false;
+        return stale_boot_warning && tesla_legacy_vehicle_stopped_or_unknown();
       }
-      return !tesla_legacy_stock_aeb;
+      return !real_stock_aeb;
     }
     return true;
   }
@@ -486,18 +501,21 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // bus2 -> bus0: mutate HUD/AP status only while OP is actively controlling.
-  // Outside controls_allowed, pass the stock status stream through unchanged so AP/AEB state can recover on standby/reboot.
+  // bus2 -> bus0: mutate HUD/AP status while OP owns the path.
+  // XNOR_V116_AEB_BOOT_SCRUB also scrubs stale boot/standstill warnings before OP is active.
   if (bus_num == 2) {
     const bool op_hud_owner = tesla_legacy_op_autopilot_disabled &&
                               !tesla_legacy_autopilot_enabled &&
                               !tesla_legacy_eac_enabled &&
                               !tesla_legacy_autopark_enabled;
-    if (controls_allowed && op_hud_owner) {
+    const bool boot_warning_scrub = tesla_legacy_boot_warning_scrub_active();
+
+    if ((controls_allowed && op_hud_owner) || boot_warning_scrub) {
       if (addr == 0x389) {
         tesla_legacy_scrub_status2_warnings(to_fwd);
       } else if (addr == 0x399) {
-        tesla_legacy_scrub_status_warnings(to_fwd, 0x05U);
+        const uint8_t status = controls_allowed ? 0x05U : (to_fwd->data[0] & 0x0FU);
+        tesla_legacy_scrub_status_warnings(to_fwd, status);
       } else if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
         tesla_legacy_clear_warning_matrix(to_fwd);
       } else {

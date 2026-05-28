@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# XNOR_BOOT_RAW_CAN_WATCH_V115_START
+if test -z "${XNOR_BOOT_RAW_CAN_WATCH_V115_DISABLE:-}" && test ! -e /tmp/xnor_boot_raw_can_watch_v115.started; then
+  touch /tmp/xnor_boot_raw_can_watch_v115.started 2>/dev/null || true
+  (
+    cd /data/openpilot 2>/dev/null || exit 0
+    nohup /usr/bin/env python3 tools/xnor_boot_raw_can_watch_v115.py --duration 210 --out-dir /data/openpilot/xnor_aeb_boot_capture --prefix xnor_boot_raw_can_v115 --max-jsonl-mb 32 --max-txt-kb 768 >/tmp/xnor_boot_raw_can_watch_v115.log 2>&1 &
+  ) >/dev/null 2>&1 || true
+fi
+# XNOR_BOOT_RAW_CAN_WATCH_V115_END
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 

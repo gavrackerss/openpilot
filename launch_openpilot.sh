@@ -15,13 +15,13 @@ fi
 
 
 # XNOR_AEB_BOOT_WATCH_START
-if [ -x /data/openpilot/tools/xnor_aeb_boot_watch.py ]; then
-  mkdir -p /data/openpilot/aeb_boot_watch
-  if ! pgrep -f "xnor_aeb_boot_watch.py --duration 240" >/dev/null 2>&1; then
+# XNOR_DISABLED_BY_V115 if [ -x /data/openpilot/tools/xnor_aeb_boot_watch.py ]; then
+# XNOR_DISABLED_BY_V115   mkdir -p /data/openpilot/aeb_boot_watch
+# XNOR_DISABLED_BY_V115   if ! pgrep -f "xnor_aeb_boot_watch.py --duration 240" >/dev/null 2>&1; then
     (
       cd /data/openpilot
-      nohup python3 tools/xnor_aeb_boot_watch.py --duration 240 --output-dir /data/openpilot/aeb_boot_watch \
-        >/data/openpilot/aeb_boot_watch/boot_hook_launcher.log 2>&1 &
+# XNOR_DISABLED_BY_V115       nohup python3 tools/xnor_aeb_boot_watch.py --duration 240 --output-dir /data/openpilot/aeb_boot_watch \
+# XNOR_DISABLED_BY_V115         >/data/openpilot/aeb_boot_watch/boot_hook_launcher.log 2>&1 &
     )
   fi
 fi
