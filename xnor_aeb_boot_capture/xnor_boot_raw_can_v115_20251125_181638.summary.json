@@ -1,0 +1,89 @@
+{
+  "caps": {
+    "jsonl_dropped_records": 0,
+    "jsonl_records": 33269,
+    "jsonl_uncompressed_bytes": 5683226,
+    "max_jsonl_mb_uncompressed": 32.0,
+    "max_txt_kb": 768.0,
+    "txt_bytes": 189299,
+    "txt_dropped_lines": 0
+  },
+  "counts": {
+    "can:0x20A@4": 1644,
+    "can:0x20A@6": 1643,
+    "can:0x219@0": 1587,
+    "can:0x219@2": 1587,
+    "can:0x219@4": 1644,
+    "can:0x219@6": 1644,
+    "can:0x239@0": 635,
+    "can:0x239@2": 635,
+    "can:0x239@4": 1642,
+    "can:0x239@6": 1642,
+    "can:0x2BF@4": 1588,
+    "can:0x2BF@6": 1588,
+    "can:0x309@0": 2119,
+    "can:0x309@2": 2119,
+    "can:0x329@4": 165,
+    "can:0x329@6": 165,
+    "can:0x349@4": 165,
+    "can:0x349@6": 165,
+    "can:0x368@4": 1642,
+    "can:0x368@6": 1642,
+    "can:0x369@4": 165,
+    "can:0x369@6": 165,
+    "can:0x389@0": 128,
+    "can:0x389@2": 128,
+    "can:0x399@0": 131,
+    "can:0x399@2": 131,
+    "can:0x488@0": 3172,
+    "can:0x488@2": 3172
+  },
+  "dropped_summary": {
+    "can_not_target": 409212
+  },
+  "duration_sec": 210.006,
+  "finished": "2026-05-28T16:53:34.843608+00:00",
+  "first_fault_temp_t": null,
+  "jsonl_gz": "/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181638.jsonl.gz",
+  "last_car_state": {},
+  "last_controls_state": {},
+  "last_panda_state": {
+    "0": {
+      "controls_allowed": 0,
+      "fault_status": "none",
+      "faults": [],
+      "idx": 0,
+      "safety_model": "noOutput",
+      "safety_param": 0,
+      "safety_rx_checks_invalid": 0,
+      "safety_rx_invalid": 0,
+      "safety_tx_blocked": 0,
+      "t": 209.959157,
+      "type": "pandaState"
+    },
+    "1": {
+      "controls_allowed": 0,
+      "fault_status": "none",
+      "faults": [],
+      "idx": 1,
+      "safety_model": "noOutput",
+      "safety_param": 0,
+      "safety_rx_checks_invalid": 0,
+      "safety_rx_invalid": 0,
+      "safety_tx_blocked": 0,
+      "t": 209.959157,
+      "type": "pandaState"
+    }
+  },
+  "summary": "/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181638.summary.json",
+  "txblk_events": 0,
+  "txt": "/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181638.txt",
+  "version": "v115",
+  "warning_counts": {
+    "can:0x389@0": 22,
+    "can:0x389@2": 22,
+    "can:0x399@0": 131,
+    "can:0x399@2": 131
+  },
+  "warning_events": 306
+}

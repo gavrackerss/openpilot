@@ -54,11 +54,6 @@ ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
 ROADWORKS_DEFAULT_KPH = 50.0 * CV.MPH_TO_KPH
 
-# XNOR_V121_BOOT_SENDCAN_GATE:
-# Debug guard to avoid Tesla AP/HUD boot-warning feedback before CarState is valid.
-XNOR_BOOT_SENDCAN_GUARD_FRAMES = 4500  # 90s at 50 Hz once controlsd starts calling update().
-XNOR_BOOT_SENDCAN_MIN_VALID_FRAMES = 25
-
 
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP, VM=None):
@@ -104,10 +99,6 @@ class CarController(CarControllerBase):
     self._virtual_turn_last_send_frame = -100000
     self._hud_prev_enabled = False
     self._telemetry_prev_active = False
-
-    self._xnor_boot_gate_valid_frames = 0
-    self._xnor_boot_gate_released = False
-    self._xnor_boot_gate_last_log_frame = -100000
 
     self._roadworks_main_pulls_ms: list[int] = []
     self._roadworks_toggle_latch_until_ms = 0
@@ -540,85 +531,6 @@ class CarController(CarControllerBase):
     self._xnor_diag_last_log_ms = int(now_ms)
     cloudlog.info(msg)
 
-  def _boot_gate_gear_name(self, CS) -> str:
-    cs_out = getattr(CS, "out", None)
-    for obj, attr in ((cs_out, "gearShifter"), (CS, "gear_shifter"), (CS, "gearShifter")):
-      if obj is None:
-        continue
-      try:
-        value = getattr(obj, attr)
-      except Exception:
-        continue
-      if value is not None:
-        return str(value).lower()
-    return "unknown"
-
-  def _boot_gate_carstate_valid(self, CC, CS) -> bool:
-    cs_out = getattr(CS, "out", None)
-    if cs_out is None:
-      return False
-
-    try:
-      v_ego = float(getattr(cs_out, "vEgo", 0.0))
-      if not np.isfinite(v_ego):
-        return False
-    except Exception:
-      return False
-
-    gear = self._boot_gate_gear_name(CS)
-    if (not gear) or ("unknown" in gear) or ("none" in gear):
-      return False
-
-    try:
-      if not bool(self.params.get_bool("ControlsReady")):
-        return False
-    except Exception:
-      return False
-
-    return True
-
-  def _reset_boot_gated_outputs(self) -> None:
-    self._stw_release_frame = -1
-    self._stw_sequence = []
-    self._virtual_turn_prev = 0
-    self._telemetry_prev_active = False
-    self._body_controls_prev_turn = 0
-
-  def _boot_sendcan_guard_active(self, CC, CS) -> bool:
-    if bool(getattr(self, "_xnor_boot_gate_released", False)):
-      return False
-
-    if self._boot_gate_carstate_valid(CC, CS):
-      self._xnor_boot_gate_valid_frames = int(getattr(self, "_xnor_boot_gate_valid_frames", 0)) + 1
-    else:
-      self._xnor_boot_gate_valid_frames = 0
-
-    frame_ready = int(self.frame) >= int(XNOR_BOOT_SENDCAN_GUARD_FRAMES)
-    valid_ready = int(self._xnor_boot_gate_valid_frames) >= int(XNOR_BOOT_SENDCAN_MIN_VALID_FRAMES)
-
-    if frame_ready and valid_ready:
-      self._xnor_boot_gate_released = True
-      cloudlog.warning(
-        "[XNOR_V121_BOOT_SENDCAN_GATE] released frame=%d valid_frames=%d gear=%s",
-        int(self.frame),
-        int(self._xnor_boot_gate_valid_frames),
-        self._boot_gate_gear_name(CS),
-      )
-      return False
-
-    if (int(self.frame) - int(getattr(self, "_xnor_boot_gate_last_log_frame", -100000))) >= 250:
-      self._xnor_boot_gate_last_log_frame = int(self.frame)
-      cloudlog.warning(
-        "[XNOR_V121_BOOT_SENDCAN_GATE] holding sendcan frame=%d/%d valid_frames=%d/%d gear=%s",
-        int(self.frame),
-        int(XNOR_BOOT_SENDCAN_GUARD_FRAMES),
-        int(self._xnor_boot_gate_valid_frames),
-        int(XNOR_BOOT_SENDCAN_MIN_VALID_FRAMES),
-        self._boot_gate_gear_name(CS),
-      )
-
-    return True
-
   def _speed_limit_sync(self, CC, CS, can_sends) -> None:
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
     if (not enabled) or (not self._cached_autopilot_disabled):
@@ -660,18 +572,6 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
-
-    if self._boot_sendcan_guard_active(CC, CS):
-      self._reset_boot_gated_outputs()
-      try:
-        self.apply_angle_last = float(getattr(CS.out, "steeringAngleDeg", self.apply_angle_last))
-      except Exception:
-        pass
-      new_actuators = actuators.as_builder()
-      new_actuators.steeringAngleDeg = float(self.apply_angle_last)
-      self.frame += 1
-      return new_actuators, can_sends
-
     self._emit_internal_0x659(CS, can_sends)
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)
