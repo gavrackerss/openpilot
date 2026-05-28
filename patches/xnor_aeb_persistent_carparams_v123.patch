@@ -1,0 +1,104 @@
+--- a/selfdrive/pandad/pandad.h
++++ b/selfdrive/pandad/pandad.h
+@@ -15,12 +15,15 @@
+
+ private:
+   void updateMultiplexingMode();
++  bool trySetEarlyTeslaSafety();
++  bool carParamsHaveTeslaLegacySafety(const std::string &params_string);
+   std::string fetchCarParams();
+   void setSafetyMode(const std::string &params_string);
+
+   bool initialized_ = false;
+   bool log_once_ = false;
+   bool safety_configured_ = false;
++  bool early_tesla_safety_configured_ = false;
+   bool prev_obd_multiplexing_ = false;
+   std::vector<Panda *> pandas_;
+   Params params_;
+--- a/selfdrive/pandad/panda_safety.cc
++++ b/selfdrive/pandad/panda_safety.cc
+@@ -2,9 +2,70 @@
+ #include "cereal/messaging/messaging.h"
+ #include "common/swaglog.h"
+
++namespace {
++static volatile const char xnor_v123_persistent_carparams_parse_fix_marker_blob[] __attribute__((used)) = "XNOR_V123_PERSISTENT_CARPARAMS_PARSE_FIX";
++
++static const char *xnorV123PersistentCarParamsParseFixMarker() {
++  return const_cast<const char *>(xnor_v123_persistent_carparams_parse_fix_marker_blob);
++}
++}
++
++// XNOR_V123_PERSISTENT_CARPARAMS_PARSE_FIX:
++// Use a persistent copy of the previous route's Tesla CarParams so pandad can
++// set teslaLegacy before ControlsReady and avoid the early ELM327 forwarding
++// window. v123 fixes the installer-side Python capnp parse bug from v122.
++bool PandaSafety::carParamsHaveTeslaLegacySafety(const std::string &params_string) {
++  if (params_string.empty()) {
++    return false;
++  }
++
++  try {
++    AlignedBuffer aligned_buf;
++    capnp::FlatArrayMessageReader cmsg(aligned_buf.align(params_string.data(), params_string.size()));
++    cereal::CarParams::Reader car_params = cmsg.getRoot<cereal::CarParams>();
++
++    auto safety_configs = car_params.getSafetyConfigs();
++    for (uint32_t i = 0; i < safety_configs.size(); ++i) {
++      if (safety_configs[i].getSafetyModel() == cereal::CarParams::SafetyModel::TESLA_LEGACY) {
++        return true;
++      }
++    }
++  } catch (...) {
++    return false;
++  }
++
++  return false;
++}
++
++bool PandaSafety::trySetEarlyTeslaSafety() {
++  static const char *early_param_keys[] = {
++    "CarParamsPersistent",
++    "CarParamsPrevRoute",
++    "CarParamsCache",
++    "CarParams",
++  };
++
++  for (const char *key : early_param_keys) {
++    const std::string params_string = params_.get(key);
++    if (carParamsHaveTeslaLegacySafety(params_string)) {
++      LOGW("%s: applying early Tesla safety from %s before ControlsReady", xnorV123PersistentCarParamsParseFixMarker(), key);
++      setSafetyMode(params_string);
++      return true;
++    }
++  }
++
++  return false;
++}
++
+ void PandaSafety::configureSafetyMode(bool is_onroad) {
+   if (is_onroad && !safety_configured_) {
+-    updateMultiplexingMode();
++    if (!early_tesla_safety_configured_) {
++      early_tesla_safety_configured_ = trySetEarlyTeslaSafety();
++      if (!early_tesla_safety_configured_) {
++        updateMultiplexingMode();
++      }
++    }
+
+     auto car_params = fetchCarParams();
+     if (!car_params.empty()) {
+@@ -14,10 +75,12 @@
+     }
+   } else if (!is_onroad) {
+     initialized_ = false;
++    early_tesla_safety_configured_ = false;
+     safety_configured_ = false;
+     log_once_ = false;
+   }
+ }
++
+
+ void PandaSafety::updateMultiplexingMode() {
+   // Initialize to ELM327 without OBD multiplexing for initial fingerprinting
