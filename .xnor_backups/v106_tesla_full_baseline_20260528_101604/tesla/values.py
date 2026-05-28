@@ -181,49 +181,22 @@ GEAR_MAP = {
 AVERAGE_ROAD_ROLL = 0.06  # ~3.4 degrees, 6% superelevation. higher actual roll lowers lateral acceleration
 
 
-class CruiseButtons:
-  """SpdCtrlLvr_Stat values (tesla_can.dbc STW_ACTN_RQ)."""
-  IDLE = 0
-  CANCEL = 1      # FWD
-  MAIN = 2        # RWD
-  RES_ACCEL_2ND = 4
-  DECEL_2ND = 8
-  RES_ACCEL = 16
-  DECEL_SET = 32
-
-  @classmethod
-  def is_accel(cls, btn: int) -> bool:
-    return btn in (cls.RES_ACCEL, cls.RES_ACCEL_2ND)
-
-  @classmethod
-  def is_decel(cls, btn: int) -> bool:
-    return btn in (cls.DECEL_SET, cls.DECEL_2ND)
-
-
 class CarControllerParams:
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
     # EPAS faults above this angle
     360,  # deg
+    # Tesla uses a vehicle model instead, check carcontroller.py for details
+    ([], []),
+    ([], []),
 
-    # Give Tesla a little more turn-in and hold in real corners without making
-    # light bends darty.
-    ([0., 5., 15.], [11.5, 10.5, 3.6]),   # up
-    ([0., 5., 15.], [11.5, 11.5, 6.2]),   # down
+    # Vehicle model angle limits
+    # Add extra tolerance for average banked road since safety doesn't have the roll
+    MAX_LATERAL_ACCEL=ISO_LATERAL_ACCEL + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL),  # ~3.6 m/s^2
+    MAX_LATERAL_JERK=3.0 + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL),  # ~3.6 m/s^3
 
-    # Keep the vehicle-model fields populated for compatibility with newer helpers.
-    MAX_LATERAL_ACCEL=ISO_LATERAL_ACCEL + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL),
-    MAX_LATERAL_JERK=3.2 + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL),
-    MAX_ANGLE_RATE=5,
+    # limit angle rate to both prevent a fault and for low speed comfort (~12 mph rate down to 0 mph)
+    MAX_ANGLE_RATE=5,  # deg/20ms frame, EPS faults at 12 at a standstill
   )
-
-  # Curvature-aware lane-positioning bias.
-  CURVE_ASSIST_ANGLE_BP = [0.0, 4.0, 10.0, 18.0]
-  CURVE_ASSIST_GAIN_V = [1.00, 1.005, 1.015, 1.025]
-  CURVE_ASSIST_EXTRA_DEG_V = [0.0, 0.03, 0.18, 0.40]
-  CURVE_ASSIST_SPEED_BP = [0.0, 8.0, 15.0, 25.0, 35.0]
-  CURVE_ASSIST_SPEED_GAIN_V = [0.0, 0.25, 0.45, 0.60, 0.70]
-  CURVE_ASSIST_MAX_DELTA_BP = [0.0, 10.0, 20.0, 30.0]
-  CURVE_ASSIST_MAX_DELTA_V = [0.3, 0.6, 1.0, 1.8]
 
   STEER_STEP = 2  # Angle command is sent at 50 Hz
   ACCEL_MAX = 2.0    # m/s^2
@@ -231,7 +204,6 @@ class CarControllerParams:
   JERK_LIMIT_MAX = 4.9  # m/s^3, ACC faults at 5.0
   JERK_LIMIT_MIN = -4.9  # m/s^3, ACC faults at 5.0
   JERK_RAMP_RATE = JERK_LIMIT_MAX * 0.002  # m/s^3 per control step, for smooth gas override
-
 
 
 class TeslaLegacyParams(IntFlag):
@@ -245,7 +217,6 @@ class TeslaSafetyFlags(IntFlag):
   FLAG_HW1 = 8
   FLAG_HW2 = 16
   FLAG_HW3 = 32
-  OP_STALK_ENABLE = 64
 
 
 class TeslaFlags(IntFlag):
