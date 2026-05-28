@@ -13,6 +13,7 @@ The acceleration side is tuned to feel more natural:
 - active lead-following sticks to 1-step RES pulses for smoother spacing
 - cadence stays calmer while a lead is still present to reduce hunting
 - v61 narrows cruise-min holds and blocks RES autoengage into low-speed curve targets
+- v65 keeps v64 curve/roundabout fixes but treats distant leads as clear-road for acceleration recovery
 """
 
 from __future__ import annotations
@@ -61,7 +62,11 @@ class ACCController:
   _AUTO_COOLDOWN_ACCEL_FAST_MS = 340
   _AUTO_COOLDOWN_ACCEL_SLOW_MS = 520
   _AUTO_COOLDOWN_ACCEL_FULL_MS = 440
-  _ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS = 420
+  _ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS = 180
+  _DISTANT_LEAD_ACCEL_CLEAR_DREL_M = 70.0
+  _DISTANT_LEAD_ACCEL_CLEAR_VREL_MS = -1.2
+  _LEAD_RELEVANT_DREL_M = 45.0
+  _LEAD_RELEVANT_TTC_S = 7.0
   _FAST_DECEL_RESUME_HOLDOFF_MS = 2000
   _LEAD_FRESH_MS = 450
   _AUTOENGAGE_SPEED_WINDOW_MS = 0.35
@@ -317,6 +322,18 @@ class ACCController:
       return 1e6
     return float(lead.d_rel) / max(1e-3, -float(lead.v_rel))
 
+  def _lead_is_accel_relevant(self, *, lead: LeadInfo) -> bool:
+    if not lead.status or lead.d_rel <= 0.0:
+      return False
+
+    if float(lead.d_rel) >= float(self._DISTANT_LEAD_ACCEL_CLEAR_DREL_M) and float(lead.v_rel) >= float(self._DISTANT_LEAD_ACCEL_CLEAR_VREL_MS):
+      return False
+
+    if float(lead.d_rel) <= float(self._LEAD_RELEVANT_DREL_M):
+      return True
+
+    return self._seconds_to_collision(lead=lead) <= float(self._LEAD_RELEVANT_TTC_S)
+
 
   def _note_lead_transition(self, *, lead: LeadInfo, now_ms: int) -> None:
     lead_present = bool(lead.status)
@@ -327,7 +344,7 @@ class ACCController:
     self._last_lead_status = lead_present
 
   def _lead_blocks_fast_accel(self, *, lead: LeadInfo) -> bool:
-    if not lead.status or lead.d_rel <= 0.0:
+    if not self._lead_is_accel_relevant(lead=lead):
       return False
 
     close_lead = float(lead.d_rel) < 30.0
@@ -343,11 +360,11 @@ class ACCController:
     available_speed_kph: float,
     lead: LeadInfo,
   ) -> int:
-    if bool(lead.status):
-      return int(self._AUTO_COOLDOWN_ACCEL_BASE_MS)
-
     if self._lead_blocks_fast_accel(lead=lead):
       return int(self._AUTO_COOLDOWN_ACCEL_SLOW_MS)
+
+    if self._lead_is_accel_relevant(lead=lead):
+      return int(self._AUTO_COOLDOWN_ACCEL_BASE_MS)
 
     if (int(now_ms) - int(self._lead_cleared_time_ms)) <= int(self._ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS):
       return int(self._AUTO_COOLDOWN_ACCEL_SLOW_MS)
@@ -390,7 +407,7 @@ class ACCController:
     single_available_threshold_kph = max(0.35 * float(half_kph), 0.3)
     full_available_threshold_kph = max(0.60 * float(full_kph), 2.0)
     recent_lead_clear = (int(now_ms) - int(self._lead_cleared_time_ms)) <= int(self._ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS)
-    active_lead_follow = bool(lead.status)
+    active_lead_follow = self._lead_is_accel_relevant(lead=lead)
     burst_blocked = active_lead_follow or self._lead_blocks_fast_accel(lead=lead)
 
     if burst_blocked or recent_lead_clear:
@@ -448,7 +465,7 @@ class ACCController:
     speed_offset_kph: float,
     lead: LeadInfo,
   ) -> float:
-    if not bool(lead.status):
+    if not self._lead_is_accel_relevant(lead=lead):
       self._reset_lead_follow_deadband()
       return float(speed_offset_kph)
 
@@ -481,7 +498,8 @@ class ACCController:
 
     collision_imminent = self._seconds_to_collision(lead=lead) < 4.0
     lead_absolute_speed_ms = float(v_ego_ms) + float(lead.v_rel)
-    lead_too_slow = lead_absolute_speed_ms < float(self.MIN_CRUISE_SPEED_MS)
+    slow_relevant_lead = self._lead_is_accel_relevant(lead=lead) and float(lead.d_rel) <= 55.0
+    lead_too_slow = slow_relevant_lead and lead_absolute_speed_ms < float(self.MIN_CRUISE_SPEED_MS)
     return bool(collision_imminent or lead_too_slow)
 
   def _should_autoengage_cc(
@@ -499,7 +517,7 @@ class ACCController:
     if int(now_ms) <= int(self.fast_decel_time_ms) + int(self._FAST_DECEL_RESUME_HOLDOFF_MS):
       return False
 
-    recent_lead = lead.status or ((int(now_ms) - int(self.lead_last_seen_time_ms)) < int(self._LEAD_FRESH_MS))
+    recent_lead = self._lead_is_accel_relevant(lead=lead)
     if recent_lead and lead.status:
       if self._fast_decel_required(v_ego_ms=v_ego_ms, lead=lead):
         return False
