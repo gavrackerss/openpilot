@@ -15,6 +15,7 @@ The acceleration side is tuned to feel more natural:
 - v61 narrows cruise-min holds and blocks RES autoengage into low-speed curve targets
 - v65 keeps v64 curve/roundabout fixes but treats distant leads as clear-road for acceleration recovery
 - v66 uses time-gap/opening-rate lead release so ACC does not stay muted behind a pulling-away lead
+- v67 aligns ACC lead relevance with LONG's softer far-lead release
 """
 
 from __future__ import annotations
@@ -66,11 +67,11 @@ class ACCController:
   _ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS = 180
   _DISTANT_LEAD_ACCEL_CLEAR_DREL_M = 70.0
   _DISTANT_LEAD_ACCEL_CLEAR_VREL_MS = -1.2
-  _LEAD_RELEVANT_DREL_M = 45.0
+  _LEAD_RELEVANT_DREL_M = 38.0
   _LEAD_RELEVANT_TTC_S = 7.0
-  _OPENING_LEAD_ACCEL_CLEAR_GAP_S = 2.45
-  _OPENING_LEAD_ACCEL_CLEAR_DREL_M = 18.0
-  _OPENING_LEAD_ACCEL_CLEAR_VREL_MS = -0.25
+  _OPENING_LEAD_ACCEL_CLEAR_GAP_S = 2.25
+  _OPENING_LEAD_ACCEL_CLEAR_DREL_M = 20.0
+  _OPENING_LEAD_ACCEL_CLEAR_VREL_MS = -0.10
   _FAST_DECEL_RESUME_HOLDOFF_MS = 2000
   _LEAD_FRESH_MS = 450
   _AUTOENGAGE_SPEED_WINDOW_MS = 0.35

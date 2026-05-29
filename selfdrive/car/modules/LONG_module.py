@@ -10,12 +10,16 @@ v61 adds an explicit final LONG arbitration state machine.
 v64 tightens roundabout/curve entry, low-speed cruise-min cancellation, and curve accel blocking.
 v66 fixes stale low suggested-speed / lead-release recovery after 30->40 transitions and stop-go leads.
 
+v67 improves post-curve release and adds a shallow high-speed map-only early curve assist.
+
 - lead critical / lead follow / curve pre-entry / curve active / curve exit / cruise sync are resolved in one final pass
 - stale lead/planner ownership is expired before it can hold speed down after curves
 - map-only curve caps are ignored when vision/steering/planner do not confirm the bend
 - curve exit releases cleanly so speed can resume after roundabouts
 - low-speed roundabout targets below Tesla's cruise minimum now cancel instead of holding 18 mph
 - active curve targets block RES/accelerate pulses until the curve clears
+- high-speed map-only curve hints start with a shallow pre-brake cap instead of waiting for steering confirmation
+- stale generic suggested-speed curve ownership releases once map/vision no longer confirm a bend
 
 XNOR architecture adaptations retained:
 - 5 Hz cruise stalk pacing
@@ -57,7 +61,7 @@ class LongController:
   _ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS = 8_000
   _ROADWORKS_CAP_HIGHER_LIMIT_MARGIN_MS = 4.0 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
-  _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
+  _LEAD_NIBBLE_HOLD_MIN_DREL_M = 40.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
   _LEAD_NIBBLE_HOLD_MAX_ATARGET_MS2 = -0.30
   _LP_FRESH_NS = 1_500_000_000
@@ -174,6 +178,14 @@ class LongController:
   _CURVE_FORCE_ENTRY_STEER_PERSIST_MS = 180
   _CURVE_FORCE_ENTRY_PREVIEW_DROP_MS = 3.5 * CV.MPH_TO_MS
   _CURVE_FORCE_ENTRY_TARGET_OFFSET_MS = 2.0 * CV.MPH_TO_MS
+  _MAP_ONLY_EARLY_ENTRY_MIN_SPEED_MS = 45.0 * CV.MPH_TO_MS
+  _MAP_ONLY_EARLY_ENTRY_MIN_DROP_MS = 12.0 * CV.MPH_TO_MS
+  _MAP_ONLY_EARLY_ENTRY_MAX_DROP_MS = 8.0 * CV.MPH_TO_MS
+  _MAP_ONLY_EARLY_ENTRY_TARGET_OFFSET_MS = 12.0 * CV.MPH_TO_MS
+  _MAP_ONLY_EARLY_ENTRY_PERSIST_MS = 520
+  _PLANNER_ONLY_CURVE_RELEASE_STEER_DEG = 7.0
+  _PLANNER_ONLY_CURVE_RELEASE_RATE_DEG = 8.0
+  _PLANNER_ONLY_CURVE_RELEASE_VISION_MARGIN_MS = 7.0 * CV.MPH_TO_MS
   _CURVE_ACCEL_BLOCK_STEER_DEG = 2.8
   _CURVE_ACCEL_BLOCK_STEER_RATE_DEG = 9.0
   _CURVE_ACCEL_BLOCK_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
@@ -239,7 +251,7 @@ class LongController:
   _LOW_SPEED_LEAD_BLOCK_OPENING_VREL_MS = 1.0
   _LOW_SPEED_LEAD_BLOCK_TARGET_MARGIN_MS = 0.35 * CV.MPH_TO_MS
   _ARBITRATION_LEAD_CRITICAL_TIME_GAP_S = 1.35
-  _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 2.35
+  _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 2.15
   _ARBITRATION_LEAD_CLOSING_MS = -0.15
   _ARBITRATION_LEAD_PLANNER_DROP_MS = 1.5 * CV.MPH_TO_MS
   _ARBITRATION_STALE_LOW_TARGET_DROP_MS = 3.0 * CV.MPH_TO_MS
@@ -258,11 +270,11 @@ class LongController:
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
-  _FAR_LEAD_RELEASE_MIN_GAP_S = 3.20
-  _FAR_LEAD_RELEASE_MARGIN_S = 1.80
-  _FAR_LEAD_RELEASE_MIN_DREL_M = 32.0
-  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.45
-  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.45
+  _FAR_LEAD_RELEASE_MIN_GAP_S = 2.85
+  _FAR_LEAD_RELEASE_MARGIN_S = 1.35
+  _FAR_LEAD_RELEASE_MIN_DREL_M = 28.0
+  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.20
+  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.30
   _POSTED_LIMIT_RELEASE_MARGIN_MS = 3.0 * CV.MPH_TO_MS
   _POSTED_LIMIT_RELEASE_MIN_DREL_M = 18.0
   _POSTED_LIMIT_RELEASE_MIN_GAP_S = 2.45
@@ -1856,8 +1868,37 @@ class LongController:
     steer_busy = self._steer_busy_for_curve(current_angle_deg=current_angle_deg, steering_rate_deg=steering_rate_deg)
     map_only_without_confirmation = bool(map_owned_low and not (vision_supports or steer_busy or bool(self._lat_limit_saturated)))
     if map_only_without_confirmation:
-      self._curve_force_entry_candidate_since_ms = 0
-      return None, ""
+      strong_map_only_hint = bool(
+        raw_map_ms is not None
+        and float(v_ego_ms) >= float(self._MAP_ONLY_EARLY_ENTRY_MIN_SPEED_MS)
+        and float(raw_map_ms) <= (float(reference_ms) - float(self._MAP_ONLY_EARLY_ENTRY_MIN_DROP_MS))
+        and float(raw_map_ms) <= (float(v_ego_ms) - float(self._CURVE_FORCE_ENTRY_EGO_DROP_MS))
+      )
+      if not strong_map_only_hint:
+        self._curve_force_entry_candidate_since_ms = 0
+        return None, ""
+
+      if int(self._curve_force_entry_candidate_since_ms) == 0:
+        self._curve_force_entry_candidate_since_ms = int(now_ms)
+        return None, ""
+
+      elapsed_ms = int(now_ms) - int(self._curve_force_entry_candidate_since_ms)
+      if elapsed_ms < int(self._MAP_ONLY_EARLY_ENTRY_PERSIST_MS):
+        return None, ""
+
+      shallow_cap_ms = max(
+        float(self.MIN_CRUISE_SPEED_MS),
+        min(
+          float(raw_map_ms) + float(self._MAP_ONLY_EARLY_ENTRY_TARGET_OFFSET_MS),
+          reference_ms - min(
+            float(self._MAP_ONLY_EARLY_ENTRY_MAX_DROP_MS),
+            max(0.0, reference_ms - float(raw_map_ms)),
+          ),
+        ),
+      )
+      if float(shallow_cap_ms) >= (float(desired_ms) - (0.25 * CV.MPH_TO_MS)):
+        return None, ""
+      return float(shallow_cap_ms), "mapd_map_only_early_cap"
 
     allowed_context = bool(lead_context or steer_busy or vision_supports or bool(self._lat_limit_saturated))
     if not allowed_context:
@@ -2637,6 +2678,20 @@ class LongController:
         )
         return float(lat_target_ms), "lat_sat"
       return None, "no_curve"
+
+    planner_only_suggested_low = bool(planner_curve_active and not map_supports and not vision_supports)
+    if planner_only_suggested_low:
+      vision_clear = bool(
+        raw_vision_ms is not None
+        and float(raw_vision_ms) >= (float(reference_ms) - float(self._PLANNER_ONLY_CURVE_RELEASE_VISION_MARGIN_MS))
+      )
+      straightish = bool(
+        abs(float(current_angle_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_STEER_DEG)
+        and abs(float(steering_rate_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_RATE_DEG)
+      )
+      generic_plan_source = str(self._lp_source or "").lower() in ("", "cruise", "e2e")
+      if generic_plan_source and vision_clear and straightish and not bool(self._lat_limit_saturated):
+        return None, "planner_suggested_unconfirmed"
 
     map_only_low = bool(
       map_supports
