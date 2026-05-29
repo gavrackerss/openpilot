@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import signal
 import threading
 import time
@@ -16,6 +17,19 @@ from typing import Any
 from cereal import messaging
 
 RUNNING = True
+
+CRUISE_SYNC_RE = re.compile(
+  r"\[XNOR_CRUISE_SYNC\]\s+"
+  r"src=(?P<src>.*?)\s+"
+  r"uom=(?P<uom>\S+)\s+"
+  r"tgt=(?P<tgt>-?\d+(?:\.\d+)?)\s+"
+  r"cur=(?P<cur>-?\d+(?:\.\d+)?)\s+"
+  r"est=(?P<est>-?\d+(?:\.\d+)?)\s+"
+  r"btn=(?P<btn>-?\d+)\s+"
+  r"reason=(?P<reason>.*)$"
+)
+CC_DIAG_RE = re.compile(r"\[XNOR_CC_DIAG\]\s+gate=(?P<gate>\S+)(?:\s+(?P<rest>.*))?$")
+KEYVAL_RE = re.compile(r"(?P<key>[a-zA-Z_][a-zA-Z0-9_]*)=(?P<value>[^\s]+)")
 
 
 def _sig_handler(signum, frame) -> None:
@@ -594,6 +608,7 @@ class FlapTracker:
 class SwaglogTail:
   KEYWORDS = (
     "[XNOR_CRUISE_SYNC]",
+    "[XNOR_CC_DIAG]",
     "lead_guard",
     "lead_stuck_cancel",
     "lead_approach_force",
@@ -655,9 +670,14 @@ class SwaglogTail:
     with self._lock:
       return list(self._recent)
 
-  def latest(self) -> dict[str, Any] | None:
+  def latest(self, kind: str | None = None) -> dict[str, Any] | None:
     with self._lock:
-      return self._recent[-1] if self._recent else None
+      if kind is None:
+        return self._recent[-1] if self._recent else None
+      for record in reversed(self._recent):
+        if _safe_str(record.get("kind")) == kind:
+          return record
+      return None
 
   def _log_files(self) -> list[Path]:
     out: list[Path] = []
@@ -726,33 +746,97 @@ class SwaglogTail:
     except Exception:
       pass
 
+    kind = "long_decision" if "[XNOR_CRUISE_SYNC]" in msg_s else ("cc_diag" if "[XNOR_CC_DIAG]" in msg_s else "event")
     record = {
       "created": created,
       "filename": filename,
       "module": module,
+      "kind": kind,
       "message": msg_s,
       "raw": raw_message,
     }
 
     msg = msg_s
-    for token in msg.split():
-      if "=" not in token:
-        continue
-      k, v = token.split("=", 1)
-      if k in ("src", "uom", "reason", "mode", "state"):
-        record[k] = v
-      elif k in ("tgt", "cur", "est", "gap", "delta", "cooldown", "stuck", "vrel", "drel"):
-        record[k] = _safe_float(v, 0.0)
-      elif k == "btn":
-        record[k] = _safe_int(v, 0)
+    if "[XNOR_CC_DIAG]" in msg:
+      m = CC_DIAG_RE.search(msg)
+      if m:
+        rest = m.group("rest") or ""
+        record["gate"] = m.group("gate")
+        record["extra"] = {km.group("key"): km.group("value") for km in KEYVAL_RE.finditer(rest)}
+        if "detail=" in rest:
+          record["detail"] = rest.split("detail=", 1)[1].strip()
+          msg = record["detail"]
+
+    sync_match = CRUISE_SYNC_RE.search(msg)
+    if sync_match:
+      gd = sync_match.groupdict()
+      record["src"] = gd.get("src", "")
+      record["uom"] = gd.get("uom", "")
+      record["tgt"] = _safe_float(gd.get("tgt"), 0.0)
+      record["cur"] = _safe_float(gd.get("cur"), 0.0)
+      record["est"] = _safe_float(gd.get("est"), 0.0)
+      record["btn"] = _safe_int(gd.get("btn"), 0)
+      record["reason"] = _safe_str(gd.get("reason"), "")
+    else:
+      for token in msg.split():
+        if "=" not in token:
+          continue
+        k, v = token.split("=", 1)
+        if k in ("src", "uom", "reason", "mode", "state", "gate", "detail"):
+          record[k] = v
+        elif k in ("tgt", "cur", "est", "gap", "delta", "cooldown", "stuck", "vrel", "drel"):
+          record[k] = _safe_float(v, 0.0)
+        elif k == "btn":
+          record[k] = _safe_int(v, 0)
 
     with self._lock:
       self._recent.append(record)
 
 
+
+def _diag_classification(record: dict[str, Any]) -> str:
+  cc = record.get("cc_diag_log") if isinstance(record.get("cc_diag_log"), dict) else {}
+  long_log = record.get("long_log") if isinstance(record.get("long_log"), dict) else {}
+
+  gate = _safe_str(cc.get("gate", ""))
+  reason = _safe_str(long_log.get("reason", "")) or _safe_str(cc.get("reason", ""))
+  extra = cc.get("extra") if isinstance(cc.get("extra"), dict) else {}
+
+  if gate == "pre":
+    if _safe_str(extra.get("ap_disabled")) == "0":
+      return "blocked_before_long:ap_disabled_param_false"
+    if _safe_str(extra.get("enabled")) == "0":
+      return "blocked_before_long:control_not_enabled"
+    return "blocked_before_long:pre"
+  if gate == "pending_release":
+    return "blocked_before_long:pending_stalk_release"
+  if gate == "turn_hold":
+    return "blocked_before_long:virtual_turn_hold"
+  if gate == "no_decision":
+    if reason.startswith("gated:"):
+      return f"long_returned_gate:{reason}"
+    if reason.startswith("standby:"):
+      return f"long_returned_standby:{reason}"
+    if reason.startswith("no-op"):
+      return f"long_returned_noop:{reason}"
+    if "cooldown" in reason:
+      return "long_returned_cooldown"
+    return "long_returned_no_button"
+  if _safe_int(long_log.get("btn"), 0) != 0:
+    return "long_sent_button"
+  if record.get("derived", {}).get("pedalOverride"):
+    return "driver_pedal_active"
+  if not record.get("derived", {}).get("cruiseEnabled"):
+    return "cruise_disabled"
+  return "no_recent_long_or_cc_log"
+
+
+
 def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
   flags = record["derived"]
   long_log = record.get("long_log") or {}
+  cc_diag = record.get("cc_diag_log") or {}
+  cc_extra = cc_diag.get("extra") if isinstance(cc_diag.get("extra"), dict) else {}
   flap = record.get("leadState", {})
   follow = flags.get("followGap", {}) if isinstance(flags.get("followGap"), dict) else {}
   mapd = flags.get("mapd", {}) if isinstance(flags.get("mapd"), dict) else {}
@@ -776,6 +860,8 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"leadSel={_safe_str(flap.get('primary', '-'))} "
     f"toggles={_safe_int(flap.get('presenceToggles', 0))} "
     f"gapS={_safe_float(follow.get('actualGapS'), 0.0):.2f} "
+    f"dRel={_safe_float(follow.get('dRel'), 0.0):.1f} "
+    f"vRel={_safe_float(follow.get('vRel'), 0.0):.2f} "
     f"desiredTF={_safe_float(follow.get('desiredTF'), 0.0):.2f} "
     f"pNear={_safe_float(flags.get('pNear'), 0.0):.2f} "
     f"mapAlive={int(_safe_bool(mapd.get('alive', False)))} "
@@ -794,6 +880,9 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"btnEvt={','.join(_safe_str(e.get('type'), '') for e in (follow.get('buttonEvents') or [])[-3:]) or '-'} "
     f"longAge={_safe_float(record.get('longLogAgeMs'), 0.0):.0f} "
     f"longStale={int(_safe_bool(record.get('longLogStale', False)))} "
+    f"ccGate={_safe_str(cc_diag.get('gate'), '-') or '-'} "
+    f"ccAge={_safe_float(record.get('ccDiagAgeMs'), -1.0):.0f} "
+    f"ccClass={_safe_str(record.get('decisionClassification'), '-') or '-'} "
     f"src={flags['longSource'] or '-'} "
     f"tgt={_safe_float(long_log.get('tgt'), 0.0):.2f} "
     f"cur={_safe_float(long_log.get('cur'), 0.0):.2f} "
@@ -865,15 +954,36 @@ def main() -> int:
         _safe_float(mapd.get("mapCurveSpeed"), 0.0) > 0.1
         or _safe_float(mapd.get("visionCurveSpeed"), 0.0) > 0.1
       )
-      long_log_raw = tail.latest()
-      long_log_age_ms = 0.0
-      if isinstance(long_log_raw, dict) and long_log_raw.get("created") is not None:
+      long_decision_raw = tail.latest(kind="long_decision")
+      cc_diag_raw = tail.latest(kind="cc_diag")
+
+      long_log_age_ms = -1.0
+      if isinstance(long_decision_raw, dict) and long_decision_raw.get("created") is not None:
         try:
-          long_log_age_ms = max(0.0, (time.time() - float(long_log_raw.get("created"))) * 1000.0)
+          long_log_age_ms = max(0.0, (time.time() - float(long_decision_raw.get("created"))) * 1000.0)
         except Exception:
-          long_log_age_ms = 0.0
-      long_log_stale = bool(long_log_age_ms > 1800.0)
-      long_log = {} if long_log_stale else long_log_raw
+          long_log_age_ms = -1.0
+      long_log_stale = bool(long_log_age_ms < 0.0 or long_log_age_ms > 1800.0)
+
+      cc_diag_age_ms = -1.0
+      if isinstance(cc_diag_raw, dict) and cc_diag_raw.get("created") is not None:
+        try:
+          cc_diag_age_ms = max(0.0, (time.time() - float(cc_diag_raw.get("created"))) * 1000.0)
+        except Exception:
+          cc_diag_age_ms = -1.0
+      cc_diag_stale = bool(cc_diag_age_ms < 0.0 or cc_diag_age_ms > 1800.0)
+
+      decision_raw = long_decision_raw
+      if (
+        isinstance(cc_diag_raw, dict)
+        and not cc_diag_stale
+        and _safe_str(cc_diag_raw.get("gate")) == "no_decision"
+      ):
+        decision_raw = cc_diag_raw
+
+      decision_age_ms = cc_diag_age_ms if decision_raw is cc_diag_raw else long_log_age_ms
+      decision_stale = cc_diag_stale if decision_raw is cc_diag_raw else long_log_stale
+      long_log = {} if decision_stale else decision_raw
       lead_state = flap_tracker.update(now_ms, radar["leadOne"], radar["leadTwo"])
 
       record = {
@@ -890,10 +1000,14 @@ def main() -> int:
         "leadState": lead_state,
         "followGap": _follow_gap_summary(car, plan, radar["leadOne"], radar["leadTwo"]),
         "long_log": long_log,
-        "long_log_raw": long_log_raw,
-        "longLogAgeMs": long_log_age_ms,
-        "longLogStale": long_log_stale,
-        "recent_long_logs": tail.recent()[-12:],
+        "long_decision_log": {} if long_log_stale else long_decision_raw,
+        "cc_diag_log": {} if cc_diag_stale else cc_diag_raw,
+        "long_log_raw": decision_raw,
+        "longLogAgeMs": decision_age_ms,
+        "longLogStale": decision_stale,
+        "ccDiagAgeMs": cc_diag_age_ms,
+        "ccDiagStale": cc_diag_stale,
+        "recent_long_logs": tail.recent()[-20:],
       }
       record["derived"] = _derive_flags(
         car=car,
@@ -903,6 +1017,7 @@ def main() -> int:
         mapd=mapd,
         long_log=long_log,
       )
+      record["decisionClassification"] = _diag_classification(record)
 
       jsonl_f.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n")
       jsonl_f.flush()
@@ -916,6 +1031,8 @@ def main() -> int:
       if lead_state["present"] and (lead_state["sinceStatusChangeMs"] < 1500 or lead_state["shortDropouts"] > 0):
         interesting = True
       if d["closingLead"] and d["plannerDropVsSet"]:
+        interesting = True
+      if _safe_str(record.get("decisionClassification"), "no_recent_long_or_cc_log") != "no_recent_long_or_cc_log":
         interesting = True
       if any(
         marker in d["longSource"]

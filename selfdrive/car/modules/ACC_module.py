@@ -14,6 +14,7 @@ The acceleration side is tuned to feel more natural:
 - cadence stays calmer while a lead is still present to reduce hunting
 - v61 narrows cruise-min holds and blocks RES autoengage into low-speed curve targets
 - v65 keeps v64 curve/roundabout fixes but treats distant leads as clear-road for acceleration recovery
+- v66 uses time-gap/opening-rate lead release so ACC does not stay muted behind a pulling-away lead
 """
 
 from __future__ import annotations
@@ -67,6 +68,9 @@ class ACCController:
   _DISTANT_LEAD_ACCEL_CLEAR_VREL_MS = -1.2
   _LEAD_RELEVANT_DREL_M = 45.0
   _LEAD_RELEVANT_TTC_S = 7.0
+  _OPENING_LEAD_ACCEL_CLEAR_GAP_S = 2.45
+  _OPENING_LEAD_ACCEL_CLEAR_DREL_M = 18.0
+  _OPENING_LEAD_ACCEL_CLEAR_VREL_MS = -0.25
   _FAST_DECEL_RESUME_HOLDOFF_MS = 2000
   _LEAD_FRESH_MS = 450
   _AUTOENGAGE_SPEED_WINDOW_MS = 0.35
@@ -322,12 +326,21 @@ class ACCController:
       return 1e6
     return float(lead.d_rel) / max(1e-3, -float(lead.v_rel))
 
-  def _lead_is_accel_relevant(self, *, lead: LeadInfo) -> bool:
+  def _lead_is_accel_relevant(self, *, lead: LeadInfo, v_ego_ms: float = 0.0) -> bool:
     if not lead.status or lead.d_rel <= 0.0:
       return False
 
     if float(lead.d_rel) >= float(self._DISTANT_LEAD_ACCEL_CLEAR_DREL_M) and float(lead.v_rel) >= float(self._DISTANT_LEAD_ACCEL_CLEAR_VREL_MS):
       return False
+
+    if float(v_ego_ms) > 0.1:
+      gap_s = float(lead.d_rel) / max(float(v_ego_ms), 0.1)
+      if (
+        float(lead.d_rel) >= float(self._OPENING_LEAD_ACCEL_CLEAR_DREL_M)
+        and float(gap_s) >= float(self._OPENING_LEAD_ACCEL_CLEAR_GAP_S)
+        and float(lead.v_rel) >= float(self._OPENING_LEAD_ACCEL_CLEAR_VREL_MS)
+      ):
+        return False
 
     if float(lead.d_rel) <= float(self._LEAD_RELEVANT_DREL_M):
       return True
@@ -343,8 +356,8 @@ class ACCController:
 
     self._last_lead_status = lead_present
 
-  def _lead_blocks_fast_accel(self, *, lead: LeadInfo) -> bool:
-    if not self._lead_is_accel_relevant(lead=lead):
+  def _lead_blocks_fast_accel(self, *, lead: LeadInfo, v_ego_ms: float) -> bool:
+    if not self._lead_is_accel_relevant(lead=lead, v_ego_ms=v_ego_ms):
       return False
 
     close_lead = float(lead.d_rel) < 30.0
@@ -359,11 +372,12 @@ class ACCController:
     speed_offset_kph: float,
     available_speed_kph: float,
     lead: LeadInfo,
+    v_ego_ms: float,
   ) -> int:
-    if self._lead_blocks_fast_accel(lead=lead):
+    if self._lead_blocks_fast_accel(lead=lead, v_ego_ms=v_ego_ms):
       return int(self._AUTO_COOLDOWN_ACCEL_SLOW_MS)
 
-    if self._lead_is_accel_relevant(lead=lead):
+    if self._lead_is_accel_relevant(lead=lead, v_ego_ms=v_ego_ms):
       return int(self._AUTO_COOLDOWN_ACCEL_BASE_MS)
 
     if (int(now_ms) - int(self._lead_cleared_time_ms)) <= int(self._ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS):
@@ -401,14 +415,15 @@ class ACCController:
     speed_offset_kph: float,
     available_speed_kph: float,
     lead: LeadInfo,
+    v_ego_ms: float,
   ) -> Optional[int]:
     half_kph, full_kph = _cc_units_kph(speed_units)
     single_threshold_kph = max(0.60 * float(half_kph), 0.5)
     single_available_threshold_kph = max(0.35 * float(half_kph), 0.3)
     full_available_threshold_kph = max(0.60 * float(full_kph), 2.0)
     recent_lead_clear = (int(now_ms) - int(self._lead_cleared_time_ms)) <= int(self._ACCEL_AFTER_LEAD_CLEAR_SETTLE_MS)
-    active_lead_follow = self._lead_is_accel_relevant(lead=lead)
-    burst_blocked = active_lead_follow or self._lead_blocks_fast_accel(lead=lead)
+    active_lead_follow = self._lead_is_accel_relevant(lead=lead, v_ego_ms=v_ego_ms)
+    burst_blocked = active_lead_follow or self._lead_blocks_fast_accel(lead=lead, v_ego_ms=v_ego_ms)
 
     if burst_blocked or recent_lead_clear:
       self._reset_accel_burst()
@@ -438,6 +453,7 @@ class ACCController:
       speed_offset_kph=float(speed_offset_kph),
       available_speed_kph=float(available_speed_kph),
       lead=lead,
+      v_ego_ms=v_ego_ms,
     )
     accel_ready = self._no_automated_action_for(now_ms=now_ms, milliseconds=accel_cooldown_ms)
     lead_single_threshold_kph = max(float(single_threshold_kph), 0.7)
@@ -464,8 +480,9 @@ class ACCController:
     speed_units: str,
     speed_offset_kph: float,
     lead: LeadInfo,
+    v_ego_ms: float,
   ) -> float:
-    if not self._lead_is_accel_relevant(lead=lead):
+    if not self._lead_is_accel_relevant(lead=lead, v_ego_ms=v_ego_ms):
       self._reset_lead_follow_deadband()
       return float(speed_offset_kph)
 
@@ -498,7 +515,7 @@ class ACCController:
 
     collision_imminent = self._seconds_to_collision(lead=lead) < 4.0
     lead_absolute_speed_ms = float(v_ego_ms) + float(lead.v_rel)
-    slow_relevant_lead = self._lead_is_accel_relevant(lead=lead) and float(lead.d_rel) <= 55.0
+    slow_relevant_lead = self._lead_is_accel_relevant(lead=lead, v_ego_ms=v_ego_ms) and float(lead.d_rel) <= 55.0
     lead_too_slow = slow_relevant_lead and lead_absolute_speed_ms < float(self.MIN_CRUISE_SPEED_MS)
     return bool(collision_imminent or lead_too_slow)
 
@@ -517,7 +534,7 @@ class ACCController:
     if int(now_ms) <= int(self.fast_decel_time_ms) + int(self._FAST_DECEL_RESUME_HOLDOFF_MS):
       return False
 
-    recent_lead = self._lead_is_accel_relevant(lead=lead)
+    recent_lead = self._lead_is_accel_relevant(lead=lead, v_ego_ms=v_ego_ms)
     if recent_lead and lead.status:
       if self._fast_decel_required(v_ego_ms=v_ego_ms, lead=lead):
         return False
@@ -790,6 +807,7 @@ class ACCController:
       speed_units=speed_units,
       speed_offset_kph=float(raw_speed_offset_kph),
       lead=lead,
+      v_ego_ms=v_ego_ms,
     )
     desired_headroom_kph = max(float(self.acc_speed_kph), float(effective_target_kph)) - float(current_kph)
     available_speed_kph = max(0.0, float(desired_headroom_kph))
@@ -813,6 +831,7 @@ class ACCController:
         speed_offset_kph=float(speed_offset_kph),
         available_speed_kph=float(available_speed_kph),
         lead=lead,
+        v_ego_ms=v_ego_ms,
       )
 
     if button is None:

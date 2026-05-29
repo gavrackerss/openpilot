@@ -8,6 +8,7 @@ making lead-follow recovery smoother and less sticky:
 v61 adds an explicit final LONG arbitration state machine.
 
 v64 tightens roundabout/curve entry, low-speed cruise-min cancellation, and curve accel blocking.
+v66 fixes stale low suggested-speed / lead-release recovery after 30->40 transitions and stop-go leads.
 
 - lead critical / lead follow / curve pre-entry / curve active / curve exit / cruise sync are resolved in one final pass
 - stale lead/planner ownership is expired before it can hold speed down after curves
@@ -52,6 +53,9 @@ class LongDecision:
 class LongController:
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
+  _ROADWORKS_CAP_MAX_AGE_MS = 120_000
+  _ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS = 8_000
+  _ROADWORKS_CAP_HIGHER_LIMIT_MARGIN_MS = 4.0 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 32.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -254,11 +258,16 @@ class LongController:
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
-  _FAR_LEAD_RELEASE_MIN_GAP_S = 4.20
+  _FAR_LEAD_RELEASE_MIN_GAP_S = 3.20
   _FAR_LEAD_RELEASE_MARGIN_S = 1.80
-  _FAR_LEAD_RELEASE_MIN_DREL_M = 48.0
+  _FAR_LEAD_RELEASE_MIN_DREL_M = 32.0
   _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.45
   _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.45
+  _POSTED_LIMIT_RELEASE_MARGIN_MS = 3.0 * CV.MPH_TO_MS
+  _POSTED_LIMIT_RELEASE_MIN_DREL_M = 18.0
+  _POSTED_LIMIT_RELEASE_MIN_GAP_S = 2.45
+  _POSTED_LIMIT_RELEASE_MAX_CLOSING_MS = -0.25
+  _POSTED_LIMIT_RELEASE_MAX_DECEL_MS2 = -0.35
   _ROUNDABOUT_HARD_ENTRY_CAP_MS = 25.0 * CV.MPH_TO_MS
   _ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
   _LAT_SAT_HARD_CAP_MS = 22.0 * CV.MPH_TO_MS
@@ -300,6 +309,7 @@ class LongController:
     self._lead_vrel: float = 0.0
     self._lead_yrel: float = 0.0
     self._mapd_suggested_ms: Optional[float] = None
+    self._mapd_speed_limit_ms: Optional[float] = None
     self._mapd_map_curve_ms: Optional[float] = None
     self._mapd_vision_curve_ms: Optional[float] = None
     self._mapd_last_ns: int = 0
@@ -501,6 +511,68 @@ class LongController:
     if not (math.isfinite(suggested_ms) and suggested_ms > 0.1):
       return None
     return suggested_ms
+
+  def _mapd_posted_limit_ms(self, *, now_ns: int) -> Optional[float]:
+    if self._mapd_speed_limit_ms is None:
+      return None
+    if int(self._mapd_last_ns) <= 0:
+      return None
+    if (int(now_ns) - int(self._mapd_last_ns)) >= int(self._MAPD_FRESH_NS):
+      return None
+    posted_ms = float(self._mapd_speed_limit_ms)
+    if not (math.isfinite(posted_ms) and posted_ms > 0.1):
+      return None
+    return posted_ms
+
+
+  def _mapd_has_active_curve_cap(self, *, posted_limit_ms: float) -> bool:
+    for raw in (self._mapd_map_curve_ms, self._mapd_vision_curve_ms):
+      if raw is None:
+        continue
+      val = float(raw)
+      if math.isfinite(val) and val > 0.1 and val < (float(posted_limit_ms) - float(self._POSTED_LIMIT_RELEASE_MARGIN_MS)):
+        return True
+    return False
+
+
+  def _lead_clear_for_speed_recovery(self, *, base_target_ms: float, v_ego_ms: float) -> bool:
+    if (not self._lead_present) or float(self._lead_drel) <= 0.0:
+      return True
+    if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
+      return True
+    if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
+      return True
+
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
+    return bool(
+      float(self._lead_drel) >= float(self._POSTED_LIMIT_RELEASE_MIN_DREL_M)
+      and float(gap_s) >= float(self._POSTED_LIMIT_RELEASE_MIN_GAP_S)
+      and float(self._lead_vrel) >= float(self._POSTED_LIMIT_RELEASE_MAX_CLOSING_MS)
+      and float(self._lp_a_target) >= float(self._POSTED_LIMIT_RELEASE_MAX_DECEL_MS2)
+    )
+
+
+  def _posted_limit_release_target_ms(
+    self,
+    *,
+    now_ns: int,
+    current_target_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+  ) -> Optional[float]:
+    posted_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
+    if posted_ms is None:
+      return None
+    if float(posted_ms) <= (float(current_target_ms) + float(self._POSTED_LIMIT_RELEASE_MARGIN_MS)):
+      return None
+    if float(posted_ms) <= (float(current_set_ms) + (1.0 * CV.MPH_TO_MS)):
+      return None
+    if self._mapd_has_active_curve_cap(posted_limit_ms=float(posted_ms)):
+      return None
+    if not self._lead_clear_for_speed_recovery(base_target_ms=float(posted_ms), v_ego_ms=float(v_ego_ms)):
+      return None
+    return float(posted_ms)
+
 
 
   def _curve_specific_mapd_target_ms(
@@ -1484,6 +1556,7 @@ class LongController:
       if self._has_mapd and bool(self._sm.valid.get("mapdOut", False)):
         mo = self._sm["mapdOut"]
         suggested_ms = float(getattr(mo, "suggestedSpeed", 0.0) or 0.0)
+        speed_limit_ms = float(getattr(mo, "speedLimit", 0.0) or 0.0)
         map_curve_ms = float(getattr(mo, "mapCurveSpeed", 0.0) or 0.0)
         vision_curve_ms = float(getattr(mo, "visionCurveSpeed", 0.0) or 0.0)
         mono_ns = int(self._sm.logMonoTime.get("mapdOut", 0) or 0)
@@ -1493,6 +1566,7 @@ class LongController:
           # survive into clear-road motorway segments and keep reopening
           # curve_hold[mapd] after mapd has already stopped publishing a curve.
           self._mapd_suggested_ms = suggested_ms if (math.isfinite(suggested_ms) and suggested_ms > 0.1) else None
+          self._mapd_speed_limit_ms = speed_limit_ms if (math.isfinite(speed_limit_ms) and speed_limit_ms > 0.1) else None
           self._mapd_map_curve_ms = map_curve_ms if (math.isfinite(map_curve_ms) and map_curve_ms > 0.1) else None
           self._mapd_vision_curve_ms = vision_curve_ms if (math.isfinite(vision_curve_ms) and vision_curve_ms > 0.1) else None
           self._mapd_last_ns = mono_ns
@@ -1527,25 +1601,38 @@ class LongController:
       return float(speed_limit_target_ms), True, "carstate_speed_limit_target"
     return None, False, "none"
 
-  def _roadworks_cap_ms(self) -> Optional[float]:
+  def _roadworks_cap_ms(self, *, now_ms: int, posted_limit_ms: Optional[float] = None) -> tuple[Optional[float], str]:
     try:
+      stat = os.stat(self._ROADWORKS_CAP_FILE)
+      age_ms = max(0, int(now_ms) - int(stat.st_mtime * 1000.0))
       with open(self._ROADWORKS_CAP_FILE, "r", encoding="utf-8") as f:
         raw = str(f.read()).strip()
     except OSError:
-      return None
+      return None, "none"
 
     if not raw:
-      return None
+      return None, "none"
 
     try:
       kph = float(raw)
     except Exception:
-      return None
+      return None, "parse_error"
 
     if (not math.isfinite(kph)) or kph <= 0.1:
-      return None
+      return None, "invalid"
 
-    return float(kph) * CV.KPH_TO_MS
+    cap_ms = float(kph) * CV.KPH_TO_MS
+    if int(age_ms) > int(self._ROADWORKS_CAP_MAX_AGE_MS):
+      return None, "roadworks_cap_stale"
+
+    if (
+      posted_limit_ms is not None
+      and float(posted_limit_ms) > (float(cap_ms) + float(self._ROADWORKS_CAP_HIGHER_LIMIT_MARGIN_MS))
+      and int(age_ms) > int(self._ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS)
+    ):
+      return None, "roadworks_cap_ignored_higher_limit"
+
+    return float(cap_ms), "roadworks_cap"
 
 
   def _lead_is_constraining(self, *, base_target_ms: float, v_ego_ms: float) -> bool:
@@ -3066,24 +3153,38 @@ class LongController:
     )
 
     speed_limit_target_ms, set_speed_limit_active, ceiling_src = self._resolve_speed_limit_target_ms(CS, speed_units=speed_units)
-    roadworks_cap_ms = self._roadworks_cap_ms()
+    posted_limit_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
+    roadworks_cap_ms, roadworks_cap_src = self._roadworks_cap_ms(now_ms=int(now), posted_limit_ms=posted_limit_ms)
 
     if set_speed_limit_active and speed_limit_target_ms is not None:
       base_target_ms = float(speed_limit_target_ms)
       if roadworks_cap_ms is not None:
         base_target_ms = min(float(base_target_ms), float(roadworks_cap_ms))
         ceiling_src = f"{ceiling_src}+roadworks_cap"
+      else:
+        posted_release_ms = self._posted_limit_release_target_ms(
+          now_ns=int(now_ns),
+          current_target_ms=float(base_target_ms),
+          current_set_ms=float(current_set_ms),
+          v_ego_ms=float(v_ego_ms),
+        )
+        if posted_release_ms is not None:
+          base_target_ms = max(float(base_target_ms), float(posted_release_ms))
+          ceiling_src = f"{ceiling_src}+mapd_posted_limit_release"
+          if str(roadworks_cap_src).startswith("roadworks_cap_"):
+            ceiling_src = f"{ceiling_src}+{roadworks_cap_src}"
+
       desired_ms = float(base_target_ms)
       src = f"speed_limit_target[{ceiling_src}]"
 
       if lp_fresh and self._lp_target_last_ms is not None:
         suppress_planner_lead_owner = (
           self._lead_present
-          and self._lead_is_opening_clear(
+          and self._lead_clear_for_speed_recovery(
             base_target_ms=float(base_target_ms),
             v_ego_ms=float(v_ego_ms),
           )
-          and str(self._lp_source or "") in ("cruise", "e2e")
+          and str(self._lp_source or "") in ("cruise", "e2e", "lead0", "lead1")
           and not self._lead_planner_guard_active(
             base_target_ms=float(base_target_ms),
             planner_ms=float(planner_last_ms),
@@ -3236,19 +3337,30 @@ class LongController:
       resume_ceiling_ms = self._resume_ceiling_ms(current_set_ms=float(current_set_ms), v_ego_ms=float(v_ego_ms))
       if roadworks_cap_ms is not None:
         resume_ceiling_ms = min(float(resume_ceiling_ms), float(roadworks_cap_ms))
+      else:
+        posted_release_ms = self._posted_limit_release_target_ms(
+          now_ns=int(now_ns),
+          current_target_ms=float(resume_ceiling_ms),
+          current_set_ms=float(current_set_ms),
+          v_ego_ms=float(v_ego_ms),
+        )
+        if posted_release_ms is not None:
+          resume_ceiling_ms = max(float(resume_ceiling_ms), float(posted_release_ms))
       desired_ms = float(resume_ceiling_ms)
       src = "hold+ceiling"
       if roadworks_cap_ms is not None:
         src = f"{src}+roadworks_cap"
+      elif float(resume_ceiling_ms) > max(float(current_set_ms), float(v_ego_ms)) + float(self._POSTED_LIMIT_RELEASE_MARGIN_MS):
+        src = f"{src}+mapd_posted_limit_release"
 
       if lp_fresh:
         suppress_planner_lead_owner = (
           self._lead_present
-          and self._lead_is_opening_clear(
+          and self._lead_clear_for_speed_recovery(
             base_target_ms=float(resume_ceiling_ms),
             v_ego_ms=float(v_ego_ms),
           )
-          and str(self._lp_source or "") in ("cruise", "e2e")
+          and str(self._lp_source or "") in ("cruise", "e2e", "lead0", "lead1")
           and not self._lead_planner_guard_active(
             base_target_ms=float(resume_ceiling_ms),
             planner_ms=float(planner_last_ms),
