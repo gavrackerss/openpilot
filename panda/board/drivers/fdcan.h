@@ -1,5 +1,26 @@
 #include "board/drivers/drivers.h"
 
+#define XNOR_V128_BOOT_WARNING_FORWARD_QUARANTINE 1
+
+static bool xnor_v128_startup_safety_mode(void) {
+  return (current_safety_mode == SAFETY_SILENT) ||
+         (current_safety_mode == SAFETY_NOOUTPUT) ||
+         (current_safety_mode == SAFETY_ELM327);
+}
+
+static bool xnor_v128_tesla_warning_addr(uint32_t addr) {
+  return (addr == 0x2BFU) ||  // DAS_control / AEB event
+         (addr == 0x389U) ||  // DAS_status2 / long collision HUD
+         (addr == 0x399U);    // AutopilotStatus / FCW HUD
+}
+
+static bool xnor_v128_block_startup_fwd_fallback(uint8_t bus_number, int fallback_bus, const CANPacket_t *msg) {
+  return xnor_v128_startup_safety_mode() &&
+         (bus_number == 2U) &&
+         (fallback_bus == 0) &&
+         xnor_v128_tesla_warning_addr(msg->addr);
+}
+
 FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT] = {FDCAN1, FDCAN2, FDCAN3};
 
 static bool can_set_speed(uint8_t can_number) {
@@ -199,10 +220,13 @@ void can_rx(uint8_t can_number) {
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
     if (bus_fwd_num < 0) {
-      bus_fwd_num = bus_config[can_number].forwarding_bus;
-      to_send = to_push;
-      to_send.returned = 0U;
-      to_send.rejected = 0U;
+      const int fallback_bus = bus_config[can_number].forwarding_bus;
+      if (!xnor_v128_block_startup_fwd_fallback(bus_number, fallback_bus, &to_push)) {
+        bus_fwd_num = fallback_bus;
+        to_send = to_push;
+        to_send.returned = 0U;
+        to_send.rejected = 0U;
+      }
     }
     if (bus_fwd_num != -1) {
       to_send.bus = (uint8_t)bus_fwd_num;
