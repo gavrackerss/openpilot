@@ -15,15 +15,12 @@ public:
 
 private:
   void updateMultiplexingMode();
-  bool trySetEarlyTeslaSafety();
-  bool carParamsHaveTeslaLegacySafety(const std::string &params_string);
   std::string fetchCarParams();
   void setSafetyMode(const std::string &params_string);
 
   bool initialized_ = false;
   bool log_once_ = false;
   bool safety_configured_ = false;
-  bool early_tesla_safety_configured_ = false;
   bool prev_obd_multiplexing_ = false;
   std::vector<Panda *> pandas_;
   Params params_;
