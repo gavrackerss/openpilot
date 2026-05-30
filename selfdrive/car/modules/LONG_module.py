@@ -12,6 +12,9 @@ v66 fixes stale low suggested-speed / lead-release recovery after 30->40 transit
 
 v67 improves post-curve release and adds a shallow high-speed map-only early curve assist.
 
+v68 fixes low-target stickiness after curves, blocks stale posted-limit release after downshifts,
+and stops lead-release oscillation at short time gaps.
+
 - lead critical / lead follow / curve pre-entry / curve active / curve exit / cruise sync are resolved in one final pass
 - stale lead/planner ownership is expired before it can hold speed down after curves
 - map-only curve caps are ignored when vision/steering/planner do not confirm the bend
@@ -98,8 +101,8 @@ class LongController:
   _LEAD_HOLD_PERSIST_MS = 560
   _LEAD_HOLD_RELEASE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
   _LEAD_OPENING_VREL_MS = 0.12
-  _LEAD_OPENING_GAP_MIN_M = 18.0
-  _LEAD_OPENING_TIME_GAP_S = 1.15
+  _LEAD_OPENING_GAP_MIN_M = 24.0
+  _LEAD_OPENING_TIME_GAP_S = 1.85
   _LEAD_CONSTRAIN_CLOSING_VREL_MS = -0.15
   _LEAD_CONSTRAIN_GAP_MIN_M = 22.0
   _LEAD_CONSTRAIN_TIME_GAP_S = 1.7
@@ -271,15 +274,16 @@ class LongController:
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
   _FAR_LEAD_RELEASE_MIN_GAP_S = 2.85
-  _FAR_LEAD_RELEASE_MARGIN_S = 1.35
+  _FAR_LEAD_RELEASE_MARGIN_S = 0.75
   _FAR_LEAD_RELEASE_MIN_DREL_M = 28.0
-  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.20
+  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.70
   _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.30
   _POSTED_LIMIT_RELEASE_MARGIN_MS = 3.0 * CV.MPH_TO_MS
   _POSTED_LIMIT_RELEASE_MIN_DREL_M = 18.0
   _POSTED_LIMIT_RELEASE_MIN_GAP_S = 2.45
-  _POSTED_LIMIT_RELEASE_MAX_CLOSING_MS = -0.25
+  _POSTED_LIMIT_RELEASE_MAX_CLOSING_MS = -0.65
   _POSTED_LIMIT_RELEASE_MAX_DECEL_MS2 = -0.35
+  _POSTED_LIMIT_DROP_BLOCK_MS = 8_000
   _ROUNDABOUT_HARD_ENTRY_CAP_MS = 25.0 * CV.MPH_TO_MS
   _ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
   _LAT_SAT_HARD_CAP_MS = 22.0 * CV.MPH_TO_MS
@@ -325,6 +329,7 @@ class LongController:
     self._mapd_map_curve_ms: Optional[float] = None
     self._mapd_vision_curve_ms: Optional[float] = None
     self._mapd_last_ns: int = 0
+    self._posted_limit_drop_block_until_ms: int = 0
     self._mapd_comfort_bias_active: bool = False
 
     self._last_info_log_ms: int = 0
@@ -567,11 +572,15 @@ class LongController:
   def _posted_limit_release_target_ms(
     self,
     *,
+    now_ms: int,
     now_ns: int,
     current_target_ms: float,
     current_set_ms: float,
     v_ego_ms: float,
   ) -> Optional[float]:
+    if int(now_ms) <= int(self._posted_limit_drop_block_until_ms):
+      return None
+
     posted_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
     if posted_ms is None:
       return None
@@ -1577,8 +1586,16 @@ class LongController:
           # current fields are zero. Otherwise a stale earlier curve speed can
           # survive into clear-road motorway segments and keep reopening
           # curve_hold[mapd] after mapd has already stopped publishing a curve.
+          prev_speed_limit_ms = float(self._mapd_speed_limit_ms) if self._mapd_speed_limit_ms is not None else 0.0
+          fresh_speed_limit_ms = speed_limit_ms if (math.isfinite(speed_limit_ms) and speed_limit_ms > 0.1) else 0.0
+          if (
+            fresh_speed_limit_ms > 0.1
+            and prev_speed_limit_ms > (fresh_speed_limit_ms + (3.0 * CV.MPH_TO_MS))
+          ):
+            self._posted_limit_drop_block_until_ms = int(now_ms) + int(self._POSTED_LIMIT_DROP_BLOCK_MS)
+
           self._mapd_suggested_ms = suggested_ms if (math.isfinite(suggested_ms) and suggested_ms > 0.1) else None
-          self._mapd_speed_limit_ms = speed_limit_ms if (math.isfinite(speed_limit_ms) and speed_limit_ms > 0.1) else None
+          self._mapd_speed_limit_ms = fresh_speed_limit_ms if fresh_speed_limit_ms > 0.1 else None
           self._mapd_map_curve_ms = map_curve_ms if (math.isfinite(map_curve_ms) and map_curve_ms > 0.1) else None
           self._mapd_vision_curve_ms = vision_curve_ms if (math.isfinite(vision_curve_ms) and vision_curve_ms > 0.1) else None
           self._mapd_last_ns = mono_ns
@@ -1705,7 +1722,7 @@ class LongController:
       self._lead_context_curve_cap_candidate_since_ms = 0
       return None, ""
 
-    in_lead_context = bool(self._lead_present) or bool(self._lp_has_lead) or int(now_ms) <= int(self._lead_recently_cleared_until_ms)
+    in_lead_context = bool(self._lead_present) or int(now_ms) <= int(self._lead_recently_cleared_until_ms)
     if not in_lead_context:
       self._lead_context_curve_cap_candidate_since_ms = 0
       return None, ""
@@ -2815,7 +2832,16 @@ class LongController:
       planner_ms=float(planner_last_ms),
       v_ego_ms=float(v_ego_ms),
     )
-    planner_lead_valid = bool(bool(lp_fresh) and bool(self._lp_has_lead) and not stale_planner_lead and not bool(far_lead_release))
+    planner_lead_recent_context = bool(
+      bool(live_lead) or int(now_ms) <= int(self._lead_recently_cleared_until_ms)
+    )
+    planner_lead_valid = bool(
+      bool(lp_fresh)
+      and bool(self._lp_has_lead)
+      and bool(planner_lead_recent_context)
+      and not stale_planner_lead
+      and not bool(far_lead_release)
+    )
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_below_reference = bool(
       float(planner_floor_ms) > 0.1
@@ -2869,6 +2895,7 @@ class LongController:
         )
       )
     )
+    opening_recovery_gap_s = max(1.95, float(desired_follow_s) - 0.25)
     lead_clear_for_recovery = bool(
       live_lead
       and (
@@ -2879,6 +2906,7 @@ class LongController:
             lead_time_gap_s >= float(lead_release_gap_s)
             or (
               lead_opening_clear
+              and float(lead_time_gap_s) >= float(opening_recovery_gap_s)
               and float(self._lead_vrel) >= float(self._FOLLOW_GAP_RELEASE_VREL_MS)
             )
           )
@@ -3218,6 +3246,7 @@ class LongController:
         ceiling_src = f"{ceiling_src}+roadworks_cap"
       else:
         posted_release_ms = self._posted_limit_release_target_ms(
+          now_ms=int(now),
           now_ns=int(now_ns),
           current_target_ms=float(base_target_ms),
           current_set_ms=float(current_set_ms),
@@ -3394,6 +3423,7 @@ class LongController:
         resume_ceiling_ms = min(float(resume_ceiling_ms), float(roadworks_cap_ms))
       else:
         posted_release_ms = self._posted_limit_release_target_ms(
+          now_ms=int(now),
           now_ns=int(now_ns),
           current_target_ms=float(resume_ceiling_ms),
           current_set_ms=float(current_set_ms),
@@ -3625,7 +3655,7 @@ class LongController:
 
     current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
     steering_rate_deg = abs(float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0))
-    curve_lead_context = bool(self._lead_present) or bool(self._lp_has_lead) or int(now) <= int(self._lead_recently_cleared_until_ms)
+    curve_lead_context = bool(self._lead_present) or int(now) <= int(self._lead_recently_cleared_until_ms)
     curve_reference_ms = float(speed_limit_target_ms if (set_speed_limit_active and speed_limit_target_ms is not None) else max(float(desired_ms), float(current_set_ms), float(v_ego_ms)))
     stale_lead_curve_release = bool(
       bool(self._lead_curve_hold_active)

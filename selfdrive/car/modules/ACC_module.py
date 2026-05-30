@@ -16,6 +16,7 @@ The acceleration side is tuned to feel more natural:
 - v65 keeps v64 curve/roundabout fixes but treats distant leads as clear-road for acceleration recovery
 - v66 uses time-gap/opening-rate lead release so ACC does not stay muted behind a pulling-away lead
 - v67 aligns ACC lead relevance with LONG's softer far-lead release
+v68 blocks close-lead acceleration pulses that caused speed hunting
 """
 
 from __future__ import annotations
@@ -69,7 +70,7 @@ class ACCController:
   _DISTANT_LEAD_ACCEL_CLEAR_VREL_MS = -1.2
   _LEAD_RELEVANT_DREL_M = 38.0
   _LEAD_RELEVANT_TTC_S = 7.0
-  _OPENING_LEAD_ACCEL_CLEAR_GAP_S = 2.25
+  _OPENING_LEAD_ACCEL_CLEAR_GAP_S = 2.45
   _OPENING_LEAD_ACCEL_CLEAR_DREL_M = 20.0
   _OPENING_LEAD_ACCEL_CLEAR_VREL_MS = -0.10
   _FAST_DECEL_RESUME_HOLDOFF_MS = 2000
@@ -428,6 +429,8 @@ class ACCController:
 
     if burst_blocked or recent_lead_clear:
       self._reset_accel_burst()
+      if self._lead_blocks_fast_accel(lead=lead, v_ego_ms=v_ego_ms):
+        return None
     elif int(self._accel_burst_steps_remaining) <= 0:
       self._prime_accel_burst(
         speed_offset_kph=float(speed_offset_kph),
