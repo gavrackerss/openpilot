@@ -1,23 +1,114 @@
 #include "board/drivers/drivers.h"
 
-#define XNOR_V134_BOOT_WARNING_FORWARD_QUARANTINE 1
-#define XNOR_V134_BOOT_WARNING_FORWARD_QUARANTINE_US 90000000U
+#define XNOR_V135_BOOT_WARNING_RX_SCRUB 1
+#define XNOR_V135_BOOT_WARNING_RX_SCRUB_US 90000000U
 
-static bool xnor_v134_boot_quarantine_active(void) {
-  return microsecond_timer_get() < XNOR_V134_BOOT_WARNING_FORWARD_QUARANTINE_US;
+static bool xnor_v135_boot_quarantine_active(void) {
+  return microsecond_timer_get() < XNOR_V135_BOOT_WARNING_RX_SCRUB_US;
 }
 
-static bool xnor_v134_tesla_warning_addr(uint32_t addr) {
+static bool xnor_v135_tesla_warning_addr(uint32_t addr) {
   return (addr == 0x2BFU) ||  // DAS_control / AEB event
          (addr == 0x389U) ||  // DAS_status2 / long collision HUD
          (addr == 0x399U);    // AutopilotStatus / FCW HUD
 }
 
-static bool xnor_v134_block_startup_forwarding(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
-  return xnor_v134_boot_quarantine_active() &&
+static bool xnor_v135_block_startup_forwarding(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
+  return xnor_v135_boot_quarantine_active() &&
          (bus_number == 2U) &&
          (forward_bus == 0) &&
-         xnor_v134_tesla_warning_addr(msg->addr);
+         xnor_v135_tesla_warning_addr(msg->addr);
+}
+
+static uint8_t xnor_v135_tesla_checksum_addr(uint32_t addr) {
+  const uint32_t checksum_addr = (addr == 0x2BFU) ? 0x2B9U : addr;
+  return (uint8_t)(checksum_addr & 0xFFU) + (uint8_t)((checksum_addr >> 8) & 0xFFU);
+}
+
+static uint8_t xnor_v135_tesla_calc_checksum8(const CANPacket_t *msg, uint8_t len) {
+  uint8_t checksum = xnor_v135_tesla_checksum_addr(msg->addr);
+  for (uint8_t i = 0U; i < (len - 1U); i++) {
+    checksum = (uint8_t)(checksum + msg->data[i]);
+  }
+  return checksum;
+}
+
+static void xnor_v135_tesla_set_last_byte_checksum(CANPacket_t *msg) {
+  const uint8_t len = dlc_to_len[msg->data_len_code];
+  if (len > 0U) {
+    msg->data[len - 1U] = xnor_v135_tesla_calc_checksum8(msg, len);
+  }
+}
+
+static void xnor_v135_scrub_tesla_status2_warnings(CANPacket_t *msg) {
+  uint32_t w0 = ((uint32_t)msg->data[0]) |
+                (((uint32_t)msg->data[1]) << 8) |
+                (((uint32_t)msg->data[2]) << 16) |
+                (((uint32_t)msg->data[3]) << 24);
+  uint32_t w1 = ((uint32_t)msg->data[4]) |
+                (((uint32_t)msg->data[5]) << 8) |
+                (((uint32_t)msg->data[6]) << 16) |
+                (((uint32_t)msg->data[7]) << 24);
+
+  w0 &= ~((0x7U << 10) | (1U << 13) | (0x3U << 14) |
+          (0x7U << 16) | (0x3U << 19) | (0x7U << 21) |
+          (0x3U << 24) | (0x1FU << 26) | (1U << 31));
+  w1 &= ~((0xFFU << 0) | (0xFU << 16) | (0xFFU << 24));
+
+  w0 |= (1U << 26);
+  w0 |= (1U << 31);
+  w1 |= 0x03U;
+  w1 |= (1U << 2);
+  w1 |= (2U << 4);
+  w1 |= (0x0FU << 16);
+
+  msg->data[0] = (uint8_t)(w0 & 0xFFU);
+  msg->data[1] = (uint8_t)((w0 >> 8) & 0xFFU);
+  msg->data[2] = (uint8_t)((w0 >> 16) & 0xFFU);
+  msg->data[3] = (uint8_t)((w0 >> 24) & 0xFFU);
+  msg->data[4] = (uint8_t)(w1 & 0xFFU);
+  msg->data[5] = (uint8_t)((w1 >> 8) & 0xFFU);
+  msg->data[6] = (uint8_t)((w1 >> 16) & 0xFFU);
+  msg->data[7] = (uint8_t)((w1 >> 24) & 0xFFU);
+  xnor_v135_tesla_set_last_byte_checksum(msg);
+}
+
+static void xnor_v135_scrub_tesla_status_warnings(CANPacket_t *msg) {
+  msg->data[2] &= 0x3FU;
+  msg->data[3] &= 0x3FU;
+  msg->data[4] = 0U;
+  xnor_v135_tesla_set_last_byte_checksum(msg);
+}
+
+static void xnor_v135_scrub_tesla_das_control_aeb(CANPacket_t *msg) {
+  msg->data[2] &= 0xFCU;
+  xnor_v135_tesla_set_last_byte_checksum(msg);
+}
+
+static void xnor_v135_scrub_startup_rx(CANPacket_t *msg) {
+  if (!xnor_v135_boot_quarantine_active() || (msg->bus != 2U)) {
+    return;
+  }
+
+  if ((msg->addr != 0x2BFU) && (msg->addr != 0x389U) && (msg->addr != 0x399U)) {
+    return;
+  }
+
+  const uint8_t len = dlc_to_len[msg->data_len_code];
+  if (len != 8U) {
+    return;
+  }
+
+  if (msg->addr == 0x2BFU) {
+    xnor_v135_scrub_tesla_das_control_aeb(msg);
+  } else if (msg->addr == 0x389U) {
+    xnor_v135_scrub_tesla_status2_warnings(msg);
+  } else if (msg->addr == 0x399U) {
+    xnor_v135_scrub_tesla_status_warnings(msg);
+  } else {
+  }
+
+  can_set_checksum(msg);
 }
 
 FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT] = {FDCAN1, FDCAN2, FDCAN3};
@@ -211,19 +302,21 @@ void can_rx(uint8_t can_number) {
     for (unsigned int i = 0; i < data_len_w; i++) {
       WORD_TO_BYTE_ARRAY(&to_push.data[i*4U], fifo->data_word[i]);
     }
-    can_set_checksum(&to_push);
+        can_set_checksum(&to_push);
+
+    xnor_v135_scrub_startup_rx(&to_push);
 
     // forwarding (panda only)
     CANPacket_t to_send = to_push;
     to_send.returned = 0U;
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
-    const bool xnor_v134_block_hook_fwd = xnor_v134_block_startup_forwarding(bus_number, bus_fwd_num, &to_send);
-    if (xnor_v134_block_hook_fwd) {
+    const bool xnor_v135_block_hook_fwd = xnor_v135_block_startup_forwarding(bus_number, bus_fwd_num, &to_send);
+    if (xnor_v135_block_hook_fwd) {
       bus_fwd_num = -1;
     } else if (bus_fwd_num < 0) {
       const int fallback_bus = bus_config[can_number].forwarding_bus;
-      if (!xnor_v134_block_startup_forwarding(bus_number, fallback_bus, &to_push)) {
+      if (!xnor_v135_block_startup_forwarding(bus_number, fallback_bus, &to_push)) {
         bus_fwd_num = fallback_bus;
         to_send = to_push;
         to_send.returned = 0U;
