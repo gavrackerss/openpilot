@@ -1,24 +1,23 @@
 #include "board/drivers/drivers.h"
 
-#define XNOR_V129_BOOT_WARNING_FORWARD_QUARANTINE 1
+#define XNOR_V134_BOOT_WARNING_FORWARD_QUARANTINE 1
+#define XNOR_V134_BOOT_WARNING_FORWARD_QUARANTINE_US 90000000U
 
-static bool xnor_v129_startup_safety_mode(void) {
-  return (current_safety_mode == SAFETY_SILENT) ||
-         (current_safety_mode == SAFETY_NOOUTPUT) ||
-         (current_safety_mode == SAFETY_ELM327);
+static bool xnor_v134_boot_quarantine_active(void) {
+  return microsecond_timer_get() < XNOR_V134_BOOT_WARNING_FORWARD_QUARANTINE_US;
 }
 
-static bool xnor_v129_tesla_warning_addr(uint32_t addr) {
+static bool xnor_v134_tesla_warning_addr(uint32_t addr) {
   return (addr == 0x2BFU) ||  // DAS_control / AEB event
          (addr == 0x389U) ||  // DAS_status2 / long collision HUD
          (addr == 0x399U);    // AutopilotStatus / FCW HUD
 }
 
-static bool xnor_v129_block_startup_forwarding(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
-  return xnor_v129_startup_safety_mode() &&
+static bool xnor_v134_block_startup_forwarding(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
+  return xnor_v134_boot_quarantine_active() &&
          (bus_number == 2U) &&
          (forward_bus == 0) &&
-         xnor_v129_tesla_warning_addr(msg->addr);
+         xnor_v134_tesla_warning_addr(msg->addr);
 }
 
 FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT] = {FDCAN1, FDCAN2, FDCAN3};
@@ -219,12 +218,12 @@ void can_rx(uint8_t can_number) {
     to_send.returned = 0U;
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
-    const bool xnor_v129_block_hook_fwd = xnor_v129_block_startup_forwarding(bus_number, bus_fwd_num, &to_send);
-    if (xnor_v129_block_hook_fwd) {
+    const bool xnor_v134_block_hook_fwd = xnor_v134_block_startup_forwarding(bus_number, bus_fwd_num, &to_send);
+    if (xnor_v134_block_hook_fwd) {
       bus_fwd_num = -1;
     } else if (bus_fwd_num < 0) {
       const int fallback_bus = bus_config[can_number].forwarding_bus;
-      if (!xnor_v129_block_startup_forwarding(bus_number, fallback_bus, &to_push)) {
+      if (!xnor_v134_block_startup_forwarding(bus_number, fallback_bus, &to_push)) {
         bus_fwd_num = fallback_bus;
         to_send = to_push;
         to_send.returned = 0U;
