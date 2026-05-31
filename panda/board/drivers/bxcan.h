@@ -1,123 +1,5 @@
 #include "bxcan_declarations.h"
 
-#define XNOR_V137_CAN_DRIVER_WARNING_RX_SCRUB 1
-__attribute__((used)) static const char xnor_v137_bxcan_fw_marker[] = "XNOR_V137_BXCAN_WARNING_RX_SCRUB";
-
-static bool xnor_v137_startup_safety_mode(void) {
-  return (current_safety_mode == SAFETY_SILENT) ||
-         (current_safety_mode == SAFETY_NOOUTPUT) ||
-         (current_safety_mode == SAFETY_ELM327);
-}
-
-static bool xnor_v137_warning_quarantine_active(void) {
-  return xnor_v137_startup_safety_mode() ||
-         (current_safety_mode != SAFETY_TESLA_LEGACY);
-}
-
-static bool xnor_v137_tesla_warning_addr(uint32_t addr) {
-  return (addr == 0x2BFU) ||
-         (addr == 0x389U) ||
-         (addr == 0x399U);
-}
-
-static bool xnor_v137_block_startup_forwarding(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
-  (void)bus_number;
-  return xnor_v137_warning_quarantine_active() &&
-         (forward_bus == 0) &&
-         xnor_v137_tesla_warning_addr(msg->addr);
-}
-
-static uint8_t xnor_v137_tesla_checksum_addr(uint32_t addr) {
-  const uint32_t checksum_addr = (addr == 0x2BFU) ? 0x2B9U : addr;
-  return (uint8_t)(checksum_addr & 0xFFU) + (uint8_t)((checksum_addr >> 8) & 0xFFU);
-}
-
-static uint8_t xnor_v137_tesla_calc_checksum8(const CANPacket_t *msg, uint8_t len) {
-  uint8_t checksum = xnor_v137_tesla_checksum_addr(msg->addr);
-  for (uint8_t i = 0U; i < (len - 1U); i++) {
-    checksum = (uint8_t)(checksum + msg->data[i]);
-  }
-  return checksum;
-}
-
-static void xnor_v137_tesla_set_last_byte_checksum(CANPacket_t *msg) {
-  const uint8_t len = dlc_to_len[msg->data_len_code];
-  if (len > 0U) {
-    msg->data[len - 1U] = xnor_v137_tesla_calc_checksum8(msg, len);
-  }
-}
-
-static void xnor_v137_scrub_tesla_status2_warnings(CANPacket_t *msg) {
-  uint32_t w0 = ((uint32_t)msg->data[0]) |
-                (((uint32_t)msg->data[1]) << 8) |
-                (((uint32_t)msg->data[2]) << 16) |
-                (((uint32_t)msg->data[3]) << 24);
-  uint32_t w1 = ((uint32_t)msg->data[4]) |
-                (((uint32_t)msg->data[5]) << 8) |
-                (((uint32_t)msg->data[6]) << 16) |
-                (((uint32_t)msg->data[7]) << 24);
-
-  w0 &= ~((0x7U << 10) | (1U << 13) | (0x3U << 14) |
-          (0x7U << 16) | (0x3U << 19) | (0x7U << 21) |
-          (0x3U << 24) | (0x1FU << 26) | (1U << 31));
-  w1 &= ~((0xFFU << 0) | (0xFU << 16) | (0xFFU << 24));
-
-  w0 |= (1U << 26);
-  w0 |= (1U << 31);
-  w1 |= 0x03U;
-  w1 |= (1U << 2);
-  w1 |= (2U << 4);
-  w1 |= (0x0FU << 16);
-
-  msg->data[0] = (uint8_t)(w0 & 0xFFU);
-  msg->data[1] = (uint8_t)((w0 >> 8) & 0xFFU);
-  msg->data[2] = (uint8_t)((w0 >> 16) & 0xFFU);
-  msg->data[3] = (uint8_t)((w0 >> 24) & 0xFFU);
-  msg->data[4] = (uint8_t)(w1 & 0xFFU);
-  msg->data[5] = (uint8_t)((w1 >> 8) & 0xFFU);
-  msg->data[6] = (uint8_t)((w1 >> 16) & 0xFFU);
-  msg->data[7] = (uint8_t)((w1 >> 24) & 0xFFU);
-  xnor_v137_tesla_set_last_byte_checksum(msg);
-}
-
-static void xnor_v137_scrub_tesla_status_warnings(CANPacket_t *msg) {
-  msg->data[2] &= 0x3FU;
-  msg->data[3] &= 0x3FU;
-  msg->data[4] = 0U;
-  xnor_v137_tesla_set_last_byte_checksum(msg);
-}
-
-static void xnor_v137_scrub_tesla_das_control_aeb(CANPacket_t *msg) {
-  msg->data[2] &= 0xFCU;
-  xnor_v137_tesla_set_last_byte_checksum(msg);
-}
-
-static void xnor_v137_scrub_startup_rx(CANPacket_t *msg) {
-  if (!xnor_v137_warning_quarantine_active()) {
-    return;
-  }
-
-  if ((msg->addr != 0x2BFU) && (msg->addr != 0x389U) && (msg->addr != 0x399U)) {
-    return;
-  }
-
-  const uint8_t len = dlc_to_len[msg->data_len_code];
-  if (len != 8U) {
-    return;
-  }
-
-  if (msg->addr == 0x2BFU) {
-    xnor_v137_scrub_tesla_das_control_aeb(msg);
-  } else if (msg->addr == 0x389U) {
-    xnor_v137_scrub_tesla_status2_warnings(msg);
-  } else if (msg->addr == 0x399U) {
-    xnor_v137_scrub_tesla_status_warnings(msg);
-  } else {
-  }
-
-  can_set_checksum(msg);
-}
-
 // IRQs: CAN1_TX, CAN1_RX0, CAN1_SCE
 //       CAN2_TX, CAN2_RX0, CAN2_SCE
 //       CAN3_TX, CAN3_RX0, CAN3_SCE
@@ -277,16 +159,12 @@ void can_rx(uint8_t can_number) {
     WORD_TO_BYTE_ARRAY(&to_push.data[0], CANx->sFIFOMailBox[0].RDLR);
     WORD_TO_BYTE_ARRAY(&to_push.data[4], CANx->sFIFOMailBox[0].RDHR);
     can_set_checksum(&to_push);
-    xnor_v137_scrub_startup_rx(&to_push);
 
     // forwarding (panda only)
     CANPacket_t to_send = to_push;
     to_send.returned = 0U;
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
-    if (xnor_v137_block_startup_forwarding(bus_number, bus_fwd_num, &to_send)) {
-      bus_fwd_num = -1;
-    }
     if (bus_fwd_num != -1) {
       to_send.bus = (uint8_t)bus_fwd_num;
       can_set_checksum(&to_send);
