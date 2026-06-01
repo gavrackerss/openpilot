@@ -1,35 +1,35 @@
 #include "board/drivers/drivers.h"
 
-#define XNOR_V141_UNITY_STARTUP_FORWARD_SCRUB 1
-__attribute__((used)) static const char xnor_v141_fdcan_fw_marker[] = "XNOR_V141_UNITY_STARTUP_FORWARD_SCRUB_FDCAN";
+#define XNOR_V142_UNITY_STARTUP_FORWARD_SCRUB 1
+__attribute__((used)) static const char xnor_v142_fdcan_fw_marker[] = "XNOR_V142_UNITY_STARTUP_FORWARD_SCRUB_FDCAN";
 
-static bool xnor_v141_startup_safety_mode(void) {
+static bool xnor_v142_startup_safety_mode(void) {
   return (current_safety_mode == SAFETY_SILENT) ||
          (current_safety_mode == SAFETY_NOOUTPUT) ||
          (current_safety_mode == SAFETY_ELM327);
 }
 
-static uint8_t xnor_v141_tesla_checksum_addr(uint32_t addr) {
+static uint8_t xnor_v142_tesla_checksum_addr(uint32_t addr) {
   const uint32_t checksum_addr = (addr == 0x2BFU) ? 0x2B9U : addr;
   return (uint8_t)(checksum_addr & 0xFFU) + (uint8_t)((checksum_addr >> 8) & 0xFFU);
 }
 
-static uint8_t xnor_v141_tesla_calc_checksum8(const CANPacket_t *msg, uint8_t len) {
-  uint8_t checksum = xnor_v141_tesla_checksum_addr(msg->addr);
+static uint8_t xnor_v142_tesla_calc_checksum8(const CANPacket_t *msg, uint8_t len) {
+  uint8_t checksum = xnor_v142_tesla_checksum_addr(msg->addr);
   for (uint8_t i = 0U; i < (uint8_t)(len - 1U); i++) {
     checksum = (uint8_t)(checksum + msg->data[i]);
   }
   return checksum;
 }
 
-static void xnor_v141_tesla_set_last_byte_checksum(CANPacket_t *msg) {
+static void xnor_v142_tesla_set_last_byte_checksum(CANPacket_t *msg) {
   const uint8_t len = dlc_to_len[msg->data_len_code];
   if (len > 0U) {
-    msg->data[len - 1U] = xnor_v141_tesla_calc_checksum8(msg, len);
+    msg->data[len - 1U] = xnor_v142_tesla_calc_checksum8(msg, len);
   }
 }
 
-static bool xnor_v141_scrub_forwarded_399(CANPacket_t *msg) {
+static bool xnor_v142_scrub_forwarded_399(CANPacket_t *msg) {
   const uint8_t before2 = msg->data[2];
   const uint8_t before3 = msg->data[3];
   const uint8_t before4 = msg->data[4];
@@ -43,13 +43,13 @@ static bool xnor_v141_scrub_forwarded_399(CANPacket_t *msg) {
          (msg->data[4] != before4);
 }
 
-static bool xnor_v141_scrub_forwarded_2bf(CANPacket_t *msg) {
+static bool xnor_v142_scrub_forwarded_2bf(CANPacket_t *msg) {
   const uint8_t before2 = msg->data[2];
   msg->data[2] &= 0xFCU;  // DAS_aebEvent bits only
   return msg->data[2] != before2;
 }
 
-static bool xnor_v141_scrub_forwarded_389(CANPacket_t *msg) {
+static bool xnor_v142_scrub_forwarded_389(CANPacket_t *msg) {
   const uint8_t before3 = msg->data[3];
   const uint8_t before6 = msg->data[6];
 
@@ -60,23 +60,23 @@ static bool xnor_v141_scrub_forwarded_389(CANPacket_t *msg) {
          (msg->data[6] != before6);
 }
 
-static void xnor_v141_scrub_startup_forwarded_warning(uint8_t source_bus, int forward_bus, CANPacket_t *msg) {
-  if (!xnor_v141_startup_safety_mode() || (source_bus == 0U) || (forward_bus != 0)) {
+static void xnor_v142_scrub_startup_forwarded_warning(uint8_t source_bus, int forward_bus, CANPacket_t *msg) {
+  if (!xnor_v142_startup_safety_mode() || (source_bus == 0U) || (forward_bus != 0)) {
     return;
   }
 
   bool changed = false;
   const uint8_t len = dlc_to_len[msg->data_len_code];
   if ((msg->addr == 0x399U) && (len >= 8U)) {
-    changed = xnor_v141_scrub_forwarded_399(msg);
+    changed = xnor_v142_scrub_forwarded_399(msg);
   } else if ((msg->addr == 0x389U) && (len >= 8U)) {
-    changed = xnor_v141_scrub_forwarded_389(msg);
+    changed = xnor_v142_scrub_forwarded_389(msg);
   } else if ((msg->addr == 0x2BFU) && (len >= 8U)) {
-    changed = xnor_v141_scrub_forwarded_2bf(msg);
+    changed = xnor_v142_scrub_forwarded_2bf(msg);
   }
 
   if (changed) {
-    xnor_v141_tesla_set_last_byte_checksum(msg);
+    xnor_v142_tesla_set_last_byte_checksum(msg);
   }
 }
 
@@ -286,7 +286,7 @@ void can_rx(uint8_t can_number) {
     }
     if (bus_fwd_num != -1) {
       to_send.bus = (uint8_t)bus_fwd_num;
-      xnor_v141_scrub_startup_forwarded_warning(bus_number, bus_fwd_num, &to_send);
+      xnor_v142_scrub_startup_forwarded_warning(bus_number, bus_fwd_num, &to_send);
       can_set_checksum(&to_send);
 
       can_send(&to_send, bus_fwd_num, true);
