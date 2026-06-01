@@ -1,24 +1,70 @@
 #include "board/drivers/drivers.h"
 
-#define XNOR_V129_BOOT_WARNING_FORWARD_QUARANTINE 1
+#define XNOR_V140_UNITY_STARTUP_FORWARD_SCRUB 1
+__attribute__((used)) static const char xnor_v140_fdcan_fw_marker[] = "XNOR_V140_UNITY_STARTUP_FORWARD_SCRUB_FDCAN";
 
-static bool xnor_v129_startup_safety_mode(void) {
+static bool xnor_v140_startup_safety_mode(void) {
   return (current_safety_mode == SAFETY_SILENT) ||
          (current_safety_mode == SAFETY_NOOUTPUT) ||
          (current_safety_mode == SAFETY_ELM327);
 }
 
-static bool xnor_v129_tesla_warning_addr(uint32_t addr) {
-  return (addr == 0x2BFU) ||  // DAS_control / AEB event
-         (addr == 0x389U) ||  // DAS_status2 / long collision HUD
-         (addr == 0x399U);    // AutopilotStatus / FCW HUD
+static uint8_t xnor_v140_tesla_checksum_addr(uint32_t addr) {
+  const uint32_t checksum_addr = (addr == 0x2BFU) ? 0x2B9U : addr;
+  return (uint8_t)(checksum_addr & 0xFFU) + (uint8_t)((checksum_addr >> 8) & 0xFFU);
 }
 
-static bool xnor_v129_block_startup_forwarding(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
-  return xnor_v129_startup_safety_mode() &&
-         (bus_number == 2U) &&
-         (forward_bus == 0) &&
-         xnor_v129_tesla_warning_addr(msg->addr);
+static uint8_t xnor_v140_tesla_calc_checksum8(const CANPacket_t *msg, uint8_t len) {
+  uint8_t checksum = xnor_v140_tesla_checksum_addr(msg->addr);
+  for (uint8_t i = 0U; i < (uint8_t)(len - 1U); i++) {
+    checksum = (uint8_t)(checksum + msg->data[i]);
+  }
+  return checksum;
+}
+
+static void xnor_v140_tesla_set_last_byte_checksum(CANPacket_t *msg) {
+  const uint8_t len = dlc_to_len[msg->data_len_code];
+  if (len > 0U) {
+    msg->data[len - 1U] = xnor_v140_tesla_calc_checksum8(msg, len);
+  }
+}
+
+static bool xnor_v140_scrub_forwarded_399(CANPacket_t *msg) {
+  const uint8_t before2 = msg->data[2];
+  const uint8_t before3 = msg->data[3];
+  const uint8_t before4 = msg->data[4];
+
+  msg->data[2] &= 0x3FU;  // FCW bits only
+  msg->data[3] &= 0x3FU;  // side-collision warning bits; keep bit5 status
+  msg->data[4] &= 0x0FU;  // side-collision avoidance warning nibble
+
+  return (msg->data[2] != before2) ||
+         (msg->data[3] != before3) ||
+         (msg->data[4] != before4);
+}
+
+static bool xnor_v140_scrub_forwarded_2bf(CANPacket_t *msg) {
+  const uint8_t before2 = msg->data[2];
+  msg->data[2] &= 0xFCU;  // DAS_aebEvent bits only
+  return msg->data[2] != before2;
+}
+
+static void xnor_v140_scrub_startup_forwarded_warning(uint8_t source_bus, int forward_bus, CANPacket_t *msg) {
+  if (!xnor_v140_startup_safety_mode() || (source_bus != 2U) || (forward_bus != 0)) {
+    return;
+  }
+
+  bool changed = false;
+  const uint8_t len = dlc_to_len[msg->data_len_code];
+  if ((msg->addr == 0x399U) && (len >= 8U)) {
+    changed = xnor_v140_scrub_forwarded_399(msg);
+  } else if ((msg->addr == 0x2BFU) && (len >= 8U)) {
+    changed = xnor_v140_scrub_forwarded_2bf(msg);
+  }
+
+  if (changed) {
+    xnor_v140_tesla_set_last_byte_checksum(msg);
+  }
 }
 
 FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT] = {FDCAN1, FDCAN2, FDCAN3};
@@ -219,20 +265,15 @@ void can_rx(uint8_t can_number) {
     to_send.returned = 0U;
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
-    const bool xnor_v129_block_hook_fwd = xnor_v129_block_startup_forwarding(bus_number, bus_fwd_num, &to_send);
-    if (xnor_v129_block_hook_fwd) {
-      bus_fwd_num = -1;
-    } else if (bus_fwd_num < 0) {
-      const int fallback_bus = bus_config[can_number].forwarding_bus;
-      if (!xnor_v129_block_startup_forwarding(bus_number, fallback_bus, &to_push)) {
-        bus_fwd_num = fallback_bus;
-        to_send = to_push;
-        to_send.returned = 0U;
-        to_send.rejected = 0U;
-      }
+    if (bus_fwd_num < 0) {
+      bus_fwd_num = bus_config[can_number].forwarding_bus;
+      to_send = to_push;
+      to_send.returned = 0U;
+      to_send.rejected = 0U;
     }
     if (bus_fwd_num != -1) {
       to_send.bus = (uint8_t)bus_fwd_num;
+      xnor_v140_scrub_startup_forwarded_warning(bus_number, bus_fwd_num, &to_send);
       can_set_checksum(&to_send);
 
       can_send(&to_send, bus_fwd_num, true);
