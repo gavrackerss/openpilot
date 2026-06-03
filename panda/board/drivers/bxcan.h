@@ -1,125 +1,18 @@
 #include "bxcan_declarations.h"
 
-#define XNOR_V142_STARTUP_WARNING_CLEAR_ECHO 1
-__attribute__((used)) static const char xnor_v142_bxcan_fw_marker[] = "XNOR_V142_STARTUP_WARNING_CLEAR_ECHO_BXCAN";
+#define XNOR_V143_NO_FORWARD_PROOF_DIAG 1
+#define XNOR_V143_NO_FORWARD_PROOF_DIAG_MARKER "XNOR_V143_NO_FORWARD_PROOF_DIAG"
 
-static bool xnor_v142_startup_safety_mode(void) {
-  return (current_safety_mode == SAFETY_SILENT) ||
-         (current_safety_mode == SAFETY_NOOUTPUT) ||
-         (current_safety_mode == SAFETY_ELM327);
+static bool xnor_v143_tesla_warning_addr(uint32_t addr) {
+  return (addr == 0x2BFU) ||
+         (addr == 0x389U) ||
+         (addr == 0x399U);
 }
 
-static uint8_t xnor_v142_tesla_checksum_addr(uint32_t addr) {
-  const uint32_t checksum_addr = (addr == 0x2BFU) ? 0x2B9U : addr;
-  return (uint8_t)(checksum_addr & 0xFFU) + (uint8_t)((checksum_addr >> 8) & 0xFFU);
-}
-
-static uint8_t xnor_v142_tesla_calc_checksum8(const CANPacket_t *msg, uint8_t len) {
-  uint8_t checksum = xnor_v142_tesla_checksum_addr(msg->addr);
-  for (uint8_t i = 0U; i < (uint8_t)(len - 1U); i++) {
-    checksum = (uint8_t)(checksum + msg->data[i]);
-  }
-  return checksum;
-}
-
-static void xnor_v142_tesla_set_last_byte_checksum(CANPacket_t *msg) {
-  const uint8_t len = (msg->data_len_code <= 8U) ? msg->data_len_code : 8U;
-  if (len > 0U) {
-    msg->data[len - 1U] = xnor_v142_tesla_calc_checksum8(msg, len);
-  }
-}
-
-static bool xnor_v142_scrub_forwarded_399(CANPacket_t *msg) {
-  const uint8_t before2 = msg->data[2];
-  const uint8_t before3 = msg->data[3];
-  const uint8_t before4 = msg->data[4];
-
-  msg->data[2] &= 0x3FU;
-  msg->data[3] &= 0x3FU;
-  msg->data[4] &= 0x0FU;
-
-  return (msg->data[2] != before2) ||
-         (msg->data[3] != before3) ||
-         (msg->data[4] != before4);
-}
-
-static bool xnor_v142_scrub_forwarded_2bf(CANPacket_t *msg) {
-  const uint8_t before2 = msg->data[2];
-  msg->data[2] &= 0xFCU;
-  return msg->data[2] != before2;
-}
-
-static bool xnor_v142_scrub_forwarded_389(CANPacket_t *msg) {
-  const uint8_t before3 = msg->data[3];
-  const uint8_t before6 = msg->data[6];
-
-  msg->data[3] &= 0x0FU;
-  msg->data[6] &= 0xF0U;
-
-  return (msg->data[3] != before3) ||
-         (msg->data[6] != before6);
-}
-
-static void xnor_v142_scrub_startup_forwarded_warning(uint8_t source_bus, int forward_bus, CANPacket_t *msg) {
-  if (!xnor_v142_startup_safety_mode() || (source_bus == 0U) || (forward_bus != 0)) {
-    return;
-  }
-
-  bool changed = false;
-  const uint8_t len = (msg->data_len_code <= 8U) ? msg->data_len_code : 8U;
-  if ((msg->addr == 0x399U) && (len >= 8U)) {
-    changed = xnor_v142_scrub_forwarded_399(msg);
-  } else if ((msg->addr == 0x389U) && (len >= 8U)) {
-    changed = xnor_v142_scrub_forwarded_389(msg);
-  } else if ((msg->addr == 0x2BFU) && (len >= 8U)) {
-    changed = xnor_v142_scrub_forwarded_2bf(msg);
-  }
-
-  if (changed) {
-    xnor_v142_tesla_set_last_byte_checksum(msg);
-  }
-}
-
-
-static void xnor_v142_echo_clean_startup_warning(uint8_t source_bus, const CANPacket_t *rx_msg) {
-  if (!xnor_v142_startup_safety_mode()) {
-    return;
-  }
-
-  if ((source_bus != 0U) && (source_bus != 2U)) {
-    return;
-  }
-
-  const uint8_t len = (rx_msg->data_len_code <= 8U) ? rx_msg->data_len_code : 8U;
-  if (len < 8U) {
-    return;
-  }
-
-  if ((rx_msg->addr != 0x399U) && (rx_msg->addr != 0x389U) && (rx_msg->addr != 0x2BFU)) {
-    return;
-  }
-
-  CANPacket_t clean_msg = *rx_msg;
-  clean_msg.bus = 0U;
-  clean_msg.returned = 0U;
-  clean_msg.rejected = 0U;
-
-  bool changed = false;
-  if (clean_msg.addr == 0x399U) {
-    changed = xnor_v142_scrub_forwarded_399(&clean_msg);
-  } else if (clean_msg.addr == 0x389U) {
-    changed = xnor_v142_scrub_forwarded_389(&clean_msg);
-  } else if (clean_msg.addr == 0x2BFU) {
-    changed = xnor_v142_scrub_forwarded_2bf(&clean_msg);
-  } else {
-    changed = false;
-  }
-
-  if (changed) {
-    xnor_v142_tesla_set_last_byte_checksum(&clean_msg);
-    can_set_checksum(&clean_msg);
-    can_send(&clean_msg, 0U, true);
-  }
+static bool xnor_v143_block_target_forward_to_bus0(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
+  return (bus_number != 0U) &&
+         (forward_bus == 0) &&
+         xnor_v143_tesla_warning_addr(msg->addr);
 }
 
 
@@ -282,16 +175,17 @@ void can_rx(uint8_t can_number) {
     WORD_TO_BYTE_ARRAY(&to_push.data[0], CANx->sFIFOMailBox[0].RDLR);
     WORD_TO_BYTE_ARRAY(&to_push.data[4], CANx->sFIFOMailBox[0].RDHR);
     can_set_checksum(&to_push);
-    xnor_v142_echo_clean_startup_warning(bus_number, &to_push);
 
     // forwarding (panda only)
     CANPacket_t to_send = to_push;
     to_send.returned = 0U;
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
+    if (xnor_v143_block_target_forward_to_bus0(bus_number, bus_fwd_num, &to_send)) {
+      bus_fwd_num = -1;
+    }
     if (bus_fwd_num != -1) {
       to_send.bus = (uint8_t)bus_fwd_num;
-      xnor_v142_scrub_startup_forwarded_warning(bus_number, bus_fwd_num, &to_send);
       can_set_checksum(&to_send);
       can_send(&to_send, (uint8_t)bus_fwd_num, true);
       can_health[can_number].total_fwd_cnt += 1U;
