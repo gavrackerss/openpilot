@@ -1,6 +1,12 @@
 // opendbc_repo/opendbc/safety/modes/tesla_legacy.h
 #pragma once
 
+#define XNOR_V139_UNITY_AEB_SAFETY_PARITY 1
+#define XNOR_V146_EARLY_TESLA_DIAGNOSTIC_SAFE 1
+
+static const char xnor_v146_early_tesla_diag_safe_marker[] __attribute__((used)) =
+    "XNOR_V146_EARLY_TESLA_DIAGNOSTIC_SAFE";
+
 #include "opendbc/safety/declarations.h"
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
@@ -117,6 +123,51 @@ static void tesla_legacy_set_last_byte_checksum(CANPacket_t *msg) {
   }
 }
 
+static bool tesla_legacy_vehicle_stopped_or_unknown(void) {
+  return vehicle_speed.max < 500;  // 0.5 m/s, same boot-parked guard used by earlier XNOR safety.
+}
+
+static bool tesla_legacy_startup_hud_scrub_active(void) {
+  return !controls_allowed &&
+         tesla_legacy_vehicle_stopped_or_unknown() &&
+         !tesla_legacy_autopilot_enabled &&
+         !tesla_legacy_eac_enabled &&
+         !tesla_legacy_autopark_enabled;
+}
+
+static void tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {
+  msg->data[2] &= 0xFCU;
+  tesla_legacy_set_last_byte_checksum(msg);
+}
+
+static bool tesla_legacy_is_diagnostic_tx_addr(int addr) {
+  if ((addr >= 0x700) && (addr <= 0x7FF)) {
+    return true;
+  }
+
+  switch (addr) {
+    case 0x18DA0BF1:
+    case 0x18DA10F1:
+    case 0x18DA18F1:
+    case 0x18DA1EF1:
+    case 0x18DA28F1:
+    case 0x18DA2BF1:
+    case 0x18DA30F1:
+    case 0x18DA53F1:
+    case 0x18DA60F1:
+    case 0x18DA61F1:
+    case 0x18DAB0F1:
+    case 0x18DAB5F1:
+    case 0x18DAC0F1:
+    case 0x18DAD0F1:
+    case 0x18DAEFF1:
+    case 0x18DB33F1:
+      return true;
+    default:
+      return false;
+  }
+}
+
 static void tesla_legacy_scrub_status2_warnings(CANPacket_t *msg) {
   uint32_t w0 = (uint32_t)GET_BYTES(msg, 0, 4);
   uint32_t w1 = (uint32_t)GET_BYTES(msg, 4, 4);
@@ -162,16 +213,9 @@ static void tesla_legacy_clear_warning_matrix(CANPacket_t *msg) {
 }
 
 
-// XNOR_V116_AEB_BOOT_SCRUB: only hide stale boot/standstill AP warning frames.
-// Preserve moving stock AEB/FCW visibility when OP is not in control.
-static bool tesla_legacy_vehicle_stopped_or_unknown(void) {
-  return vehicle_speed.max < 500;  // 0.5 m/s in VEHICLE_SPEED_FACTOR units
-}
-
-static bool tesla_legacy_boot_warning_scrub_active(void) {
-  return !controls_allowed && tesla_legacy_vehicle_stopped_or_unknown();
-}
-
+// XNOR_V139: no boot-wide CAN-driver or status-frame scrub here.
+// Match Unity's safety-layer pattern: detect/allow real stock AEB,
+// block OP-generated AEB, and only hide HUD warnings while OP owns control.
 
 
 // --- RX hook ---
@@ -320,6 +364,11 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return false;
   }
 
+  // Allow VIN/FW diagnostic queries while v146 early Tesla safety is active.
+  if (tesla_legacy_is_diagnostic_tx_addr(addr)) {
+    return true;
+  }
+
   // Unity parity: on AP hardware cars, block OP actuation unless stock AP is disabled
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
     if ((addr == 0x488) || (addr == 0x27D) || (addr == 0x2BF)) {
@@ -455,13 +504,23 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   if (tesla_legacy_external_panda) {
     if ((bus_num == 2) && (addr == 0x2BF)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
+
+      if ((aeb_event != 0) && tesla_legacy_startup_hud_scrub_active()) {
+        tesla_legacy_scrub_das_control_aeb(to_fwd);
+        return false;
+      }
+
       const bool real_stock_aeb = (aeb_event == 1);
-      const bool stale_boot_warning = (aeb_event != 0) && !real_stock_aeb;
+      if (real_stock_aeb) {
+        controls_allowed = false;
+        return false;
+      }
 
       if (!controls_allowed) {
-        return stale_boot_warning && tesla_legacy_vehicle_stopped_or_unknown();
+        return false;
       }
-      return !real_stock_aeb;
+
+      return true;
     }
     return true;
   }
@@ -501,17 +560,20 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // bus2 -> bus0: mutate HUD/AP status while OP owns the path.
-  // XNOR_V116_AEB_BOOT_SCRUB also scrubs stale boot/standstill warnings before OP is active.
+  // bus2 -> bus0: Unity-style behavior.
+  // v146 extends HUD warning scrubbing to the stopped startup window when early Tesla safety owns forwarding.
   if (bus_num == 2) {
     const bool op_hud_owner = tesla_legacy_op_autopilot_disabled &&
                               !tesla_legacy_autopilot_enabled &&
                               !tesla_legacy_eac_enabled &&
                               !tesla_legacy_autopark_enabled;
-    const bool boot_warning_scrub = tesla_legacy_boot_warning_scrub_active();
+    const bool startup_hud_owner = tesla_legacy_startup_hud_scrub_active();
+    const bool should_scrub_hud = (controls_allowed && op_hud_owner) || startup_hud_owner;
 
-    if ((controls_allowed && op_hud_owner) || boot_warning_scrub) {
-      if (addr == 0x389) {
+    if (should_scrub_hud) {
+      if (addr == 0x2BF) {
+        tesla_legacy_scrub_das_control_aeb(to_fwd);
+      } else if (addr == 0x389) {
         tesla_legacy_scrub_status2_warnings(to_fwd);
       } else if (addr == 0x399) {
         const uint8_t status = controls_allowed ? 0x05U : (to_fwd->data[0] & 0x0FU);
@@ -561,6 +623,134 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x27D, 0, 3, .check_relay = false},  // APS_eacMonitor
     {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
+    {0x700, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x700, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x701, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x701, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x706, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x706, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x707, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x707, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x712, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x712, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x715, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x715, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x720, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x720, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x721, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x721, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x730, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x730, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x732, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x732, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x733, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x733, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x734, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x734, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x740, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x740, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x742, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x742, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x743, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x743, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x744, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x744, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x746, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x746, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x747, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x747, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x74F, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x74F, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x750, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x750, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x753, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x753, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x757, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x757, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x75A, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x75A, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x760, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x760, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x761, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x761, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x764, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x764, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x780, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x780, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x787, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x787, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x791, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x791, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x797, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x797, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A2, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A2, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A3, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A3, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B0, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B0, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B3, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B3, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B7, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B7, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C4, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C4, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C6, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C6, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D0, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D0, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D2, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D2, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D4, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D4, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7DF, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7DF, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E0, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E0, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E2, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E2, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E4, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E4, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA0BF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA0BF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA10F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA10F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA18F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA18F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA1EF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA1EF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA28F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA28F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA2BF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA2BF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA30F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA30F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA53F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA53F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA60F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA60F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA61F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA61F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB0F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB0F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB5F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB5F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAC0F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAC0F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAD0F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAD0F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAEFF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAEFF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DB33F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DB33F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
 
   };
 
@@ -568,6 +758,134 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x2BF, 0, 8, .check_relay = false},  // DAS_longControl
     {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
+    {0x700, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x700, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x701, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x701, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x706, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x706, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x707, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x707, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x712, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x712, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x715, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x715, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x720, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x720, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x721, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x721, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x730, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x730, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x732, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x732, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x733, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x733, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x734, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x734, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x740, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x740, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x742, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x742, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x743, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x743, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x744, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x744, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x746, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x746, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x747, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x747, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x74F, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x74F, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x750, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x750, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x753, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x753, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x757, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x757, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x75A, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x75A, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x760, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x760, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x761, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x761, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x764, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x764, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x780, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x780, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x787, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x787, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x791, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x791, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x797, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x797, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A2, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A2, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A3, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7A3, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B0, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B0, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B3, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B3, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B7, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7B7, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C4, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C4, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C6, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7C6, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D0, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D0, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D2, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D2, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D4, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7D4, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7DF, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7DF, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E0, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E0, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E2, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E2, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E4, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x7E4, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA0BF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA0BF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA10F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA10F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA18F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA18F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA1EF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA1EF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA28F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA28F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA2BF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA2BF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA30F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA30F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA53F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA53F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA60F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA60F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA61F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DA61F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB0F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB0F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB5F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAB5F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAC0F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAC0F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAD0F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAD0F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAEFF1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DAEFF1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DB33F1, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
+    {0x18DB33F1, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
 
   };
 
@@ -610,9 +928,10 @@ static safety_config tesla_legacy_init(uint16_t param) {
     ? BUILD_SAFETY_CFG(tesla_legacy_rx_checks_external, TESLA_LEGACY_TX_MSGS_LONG)
     : BUILD_SAFETY_CFG(tesla_legacy_rx_checks_main, TESLA_LEGACY_TX_MSGS_LATERAL);
 
-  // Critical for XNOR: external panda must NOT forward.
-  // Main panda forwards only when AP HW exists.
-  ret.disable_forwarding = tesla_legacy_external_panda || !tesla_legacy_has_ap_hw;
+  // XNOR_V139_UNITY_AEB_SAFETY_PARITY:
+  // Keep forwarding enabled so fwd_msg can apply Unity-style stock AEB handling.
+  // External panda still blocks all non-0x2BF traffic in fwd_msg.
+  ret.disable_forwarding = !tesla_legacy_has_ap_hw;
   return ret;
 }
 

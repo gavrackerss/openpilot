@@ -63,6 +63,7 @@ public:
   // Panda functionality
   cereal::PandaState::PandaType get_hw_type();
   void set_safety_model(cereal::CarParams::SafetyModel safety_model, uint16_t safety_param=0U);
+  void set_obd_multiplexing(bool enabled);
   void set_alternative_experience(uint16_t alternative_experience);
   std::string serial_read(int port_number = 0);
   void set_uart_baud(int uart, int rate);
