@@ -1,7 +1,7 @@
 #include "board/drivers/drivers.h"
 
-#define XNOR_V142_UNITY_STARTUP_FORWARD_SCRUB 1
-__attribute__((used)) static const char xnor_v142_fdcan_fw_marker[] = "XNOR_V142_UNITY_STARTUP_FORWARD_SCRUB_FDCAN";
+#define XNOR_V142_STARTUP_WARNING_CLEAR_ECHO 1
+__attribute__((used)) static const char xnor_v142_fdcan_fw_marker[] = "XNOR_V142_STARTUP_WARNING_CLEAR_ECHO_FDCAN";
 
 static bool xnor_v142_startup_safety_mode(void) {
   return (current_safety_mode == SAFETY_SILENT) ||
@@ -77,6 +77,48 @@ static void xnor_v142_scrub_startup_forwarded_warning(uint8_t source_bus, int fo
 
   if (changed) {
     xnor_v142_tesla_set_last_byte_checksum(msg);
+  }
+}
+
+
+static void xnor_v142_echo_clean_startup_warning(uint8_t source_bus, const CANPacket_t *rx_msg) {
+  if (!xnor_v142_startup_safety_mode()) {
+    return;
+  }
+
+  if ((source_bus != 0U) && (source_bus != 2U)) {
+    return;
+  }
+
+  const uint8_t len = dlc_to_len[rx_msg->data_len_code];
+  if (len < 8U) {
+    return;
+  }
+
+  if ((rx_msg->addr != 0x399U) && (rx_msg->addr != 0x389U) && (rx_msg->addr != 0x2BFU)) {
+    return;
+  }
+
+  CANPacket_t clean_msg = *rx_msg;
+  clean_msg.bus = 0U;
+  clean_msg.returned = 0U;
+  clean_msg.rejected = 0U;
+
+  bool changed = false;
+  if (clean_msg.addr == 0x399U) {
+    changed = xnor_v142_scrub_forwarded_399(&clean_msg);
+  } else if (clean_msg.addr == 0x389U) {
+    changed = xnor_v142_scrub_forwarded_389(&clean_msg);
+  } else if (clean_msg.addr == 0x2BFU) {
+    changed = xnor_v142_scrub_forwarded_2bf(&clean_msg);
+  } else {
+    changed = false;
+  }
+
+  if (changed) {
+    xnor_v142_tesla_set_last_byte_checksum(&clean_msg);
+    can_set_checksum(&clean_msg);
+    can_send(&clean_msg, 0U, true);
   }
 }
 
@@ -272,6 +314,7 @@ void can_rx(uint8_t can_number) {
       WORD_TO_BYTE_ARRAY(&to_push.data[i*4U], fifo->data_word[i]);
     }
     can_set_checksum(&to_push);
+    xnor_v142_echo_clean_startup_warning(bus_number, &to_push);
 
     // forwarding (panda only)
     CANPacket_t to_send = to_push;
