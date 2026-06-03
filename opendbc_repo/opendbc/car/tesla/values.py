@@ -206,8 +206,10 @@ class CarControllerParams:
     360,  # deg
 
     # Give Tesla a little more turn-in and hold in real corners without making
-    # light bends darty.
-    ([0., 5., 15.], [11.5, 10.5, 3.6]),   # up
+    # light bends darty. Wind-up (up) rate raised at speed to close the gap to the
+    # unwind rate so the car builds angle into corners instead of washing wide.
+    # Still below the panda lateral-accel/jerk envelope, which clamps independently.
+    ([0., 5., 15.], [11.5, 11.0, 4.6]),   # up
     ([0., 5., 15.], [11.5, 11.5, 6.2]),   # down
 
     # Keep the vehicle-model fields populated for compatibility with newer helpers.
