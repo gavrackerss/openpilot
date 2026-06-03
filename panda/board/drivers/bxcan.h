@@ -1,21 +1,5 @@
 #include "bxcan_declarations.h"
 
-#define XNOR_V143_NO_FORWARD_PROOF_DIAG 1
-#define XNOR_V143_NO_FORWARD_PROOF_DIAG_MARKER "XNOR_V143_NO_FORWARD_PROOF_DIAG"
-
-static bool xnor_v143_tesla_warning_addr(uint32_t addr) {
-  return (addr == 0x2BFU) ||
-         (addr == 0x389U) ||
-         (addr == 0x399U);
-}
-
-static bool xnor_v143_block_target_forward_to_bus0(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
-  return (bus_number != 0U) &&
-         (forward_bus == 0) &&
-         xnor_v143_tesla_warning_addr(msg->addr);
-}
-
-
 // IRQs: CAN1_TX, CAN1_RX0, CAN1_SCE
 //       CAN2_TX, CAN2_RX0, CAN2_SCE
 //       CAN3_TX, CAN3_RX0, CAN3_SCE
@@ -181,9 +165,6 @@ void can_rx(uint8_t can_number) {
     to_send.returned = 0U;
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
-    if (xnor_v143_block_target_forward_to_bus0(bus_number, bus_fwd_num, &to_send)) {
-      bus_fwd_num = -1;
-    }
     if (bus_fwd_num != -1) {
       to_send.bus = (uint8_t)bus_fwd_num;
       can_set_checksum(&to_send);
