@@ -18,6 +18,15 @@ from cereal import messaging
 
 RUNNING = True
 
+MPH_PER_MPS = 2.2369362920544
+STEER_ANGLE_SATURATION_THRESHOLD_DEG = 2.5
+TESLA_LEGACY_STEER_RATIO = 16.5
+TESLA_LEGACY_WHEELBASE_M = 2.96
+TESLA_LEGACY_SLIP_FACTOR = -0.00075
+TESLA_LEGACY_STEER_COMMAND_HZ = 50.0
+PANDA_VM_MAX_LATERAL_ACCEL = 3.0 + (9.81 * 0.06)
+PANDA_VM_MAX_LATERAL_JERK = 3.0 + (9.81 * 0.06)
+
 CRUISE_SYNC_RE = re.compile(
   r"\[XNOR_CRUISE_SYNC\]\s+"
   r"src=(?P<src>.*?)\s+"
@@ -184,6 +193,162 @@ def _lead_summary(lead: Any) -> dict[str, Any]:
   }
 
 
+def _actuators_summary(actuators: Any) -> dict[str, Any]:
+  if actuators is None:
+    return {}
+  return {
+    "steeringAngleDeg": _safe_float(_maybe_attr(actuators, "steeringAngleDeg", 0.0)),
+    "curvature": _safe_float(_maybe_attr(actuators, "curvature", 0.0)),
+    "torque": _safe_float(_maybe_attr(actuators, "torque", 0.0)),
+    "accel": _safe_float(_maybe_attr(actuators, "accel", 0.0)),
+    "gas": _safe_float(_maybe_attr(actuators, "gas", 0.0)),
+    "brake": _safe_float(_maybe_attr(actuators, "brake", 0.0)),
+    "torqueOutputCan": _safe_float(_maybe_attr(actuators, "torqueOutputCan", 0.0)),
+    "speed": _safe_float(_maybe_attr(actuators, "speed", 0.0)),
+    "longControlState": _safe_str(_maybe_attr(actuators, "longControlState", "")),
+  }
+
+
+def _car_control_summary(cc: Any) -> dict[str, Any]:
+  if cc is None:
+    return {}
+  return {
+    "enabled": _safe_bool(_maybe_attr(cc, "enabled", False)),
+    "latActive": _safe_bool(_maybe_attr(cc, "latActive", False)),
+    "longActive": _safe_bool(_maybe_attr(cc, "longActive", False)),
+    "currentCurvature": _safe_float(_maybe_attr(cc, "currentCurvature", 0.0)),
+    "actuators": _actuators_summary(_maybe_attr(cc, "actuators", None)),
+  }
+
+
+def _car_output_summary(co: Any) -> dict[str, Any]:
+  if co is None:
+    return {}
+  return {
+    "actuatorsOutput": _actuators_summary(_maybe_attr(co, "actuatorsOutput", None)),
+  }
+
+
+def _live_parameters_summary(lp: Any) -> dict[str, Any]:
+  if lp is None:
+    return {}
+  return {
+    "valid": _safe_bool(_maybe_attr(lp, "valid", False)),
+    "steerRatio": _safe_float(_maybe_attr(lp, "steerRatio", 0.0)),
+    "stiffnessFactor": _safe_float(_maybe_attr(lp, "stiffnessFactor", 0.0)),
+    "angleOffsetDeg": _safe_float(_maybe_attr(lp, "angleOffsetDeg", 0.0)),
+    "angleOffsetAverageDeg": _safe_float(_maybe_attr(lp, "angleOffsetAverageDeg", 0.0)),
+    "roll": _safe_float(_maybe_attr(lp, "roll", 0.0)),
+  }
+
+
+def _tesla_legacy_panda_vm_limits(v_ego: float) -> dict[str, float]:
+  speed = max(_safe_float(v_ego, 0.0) - 1.0, 1.0)
+  curvature_factor = 1.0 / (1.0 - (TESLA_LEGACY_SLIP_FACTOR * speed * speed)) / TESLA_LEGACY_WHEELBASE_M
+
+  max_curvature = PANDA_VM_MAX_LATERAL_ACCEL / (speed * speed)
+  max_angle = math.degrees(max_curvature * TESLA_LEGACY_STEER_RATIO / curvature_factor)
+
+  max_curvature_rate_sec = PANDA_VM_MAX_LATERAL_JERK / (speed * speed)
+  max_angle_rate_sec = math.degrees(max_curvature_rate_sec * TESLA_LEGACY_STEER_RATIO / curvature_factor)
+  max_angle_delta = max_angle_rate_sec / TESLA_LEGACY_STEER_COMMAND_HZ
+
+  return {
+    "speedForLimit": speed,
+    "maxAngleDeg": float(max_angle),
+    "maxDeltaDeg": float(max_angle_delta),
+    "maxLateralAccel": PANDA_VM_MAX_LATERAL_ACCEL,
+    "maxLateralJerk": PANDA_VM_MAX_LATERAL_JERK,
+  }
+
+
+def _steer_diag_summary(
+  car: dict[str, Any],
+  controls: dict[str, Any],
+  car_control: dict[str, Any],
+  car_output: dict[str, Any],
+  live_parameters: dict[str, Any],
+  previous_output_angle: float | None,
+) -> dict[str, Any]:
+  actuators = car_control.get("actuators", {}) if isinstance(car_control.get("actuators"), dict) else {}
+  output_actuators = car_output.get("actuatorsOutput", {}) if isinstance(car_output.get("actuatorsOutput"), dict) else {}
+  lateral = controls.get("lateralState", {}) if isinstance(controls.get("lateralState"), dict) else {}
+
+  v_ego = _safe_float(car.get("vEgo"), 0.0)
+  desired_angle = _safe_float(actuators.get("steeringAngleDeg"), 0.0)
+  output_angle = _safe_float(output_actuators.get("steeringAngleDeg"), 0.0)
+  actual_angle = _safe_float(car.get("steeringAngleDeg"), 0.0)
+  previous_angle = output_angle if previous_output_angle is None else float(previous_output_angle)
+
+  desired_curvature = _first_nonzero_float(
+    controls.get("desiredCurvature"),
+    lateral.get("desiredCurvature"),
+    actuators.get("curvature"),
+  )
+  actual_curvature = _first_nonzero_float(
+    controls.get("curvature"),
+    lateral.get("actualCurvature"),
+    car_control.get("currentCurvature"),
+  )
+
+  clipped_speed = max(v_ego, 0.3)
+  desired_lateral_accel = desired_curvature * clipped_speed * clipped_speed
+  actual_lateral_accel = actual_curvature * clipped_speed * clipped_speed
+  lateral_accel_ratio = abs(desired_lateral_accel) / max(abs(actual_lateral_accel), 1e-3)
+
+  desired_minus_output = desired_angle - output_angle
+  output_minus_actual = output_angle - actual_angle
+  desired_minus_actual = desired_angle - actual_angle
+  output_step = output_angle - previous_angle
+
+  panda = _tesla_legacy_panda_vm_limits(v_ego)
+  steer_limited_by_safety = abs(desired_minus_output) > STEER_ANGLE_SATURATION_THRESHOLD_DEG
+  angle_state_saturated = _safe_bool(lateral.get("saturated", False))
+  turning = abs(desired_lateral_accel) > 1.0
+  undershooting = lateral_accel_ratio > 1.2
+
+  reasons: list[str] = []
+  if steer_limited_by_safety:
+    reasons.append("desired_output_mismatch")
+  if angle_state_saturated:
+    reasons.append("lat_saturated")
+  if undershooting and turning:
+    reasons.append("lat_accel_undershoot")
+  if abs(output_step) > (_safe_float(panda.get("maxDeltaDeg"), 0.0) + 0.2):
+    reasons.append("panda_vm_delta_risk")
+  if abs(output_angle) > (_safe_float(panda.get("maxAngleDeg"), 0.0) + 0.5):
+    reasons.append("panda_vm_angle_risk")
+  if abs(output_minus_actual) > STEER_ANGLE_SATURATION_THRESHOLD_DEG:
+    reasons.append("actual_angle_lag")
+
+  return {
+    "active": _safe_bool(car_control.get("latActive", False)) or _safe_bool(lateral.get("active", False)),
+    "vEgo": v_ego,
+    "mph": v_ego * MPH_PER_MPS,
+    "desiredAngleDeg": desired_angle,
+    "outputAngleDeg": output_angle,
+    "actualAngleDeg": actual_angle,
+    "previousOutputAngleDeg": previous_angle,
+    "desiredMinusOutputDeg": desired_minus_output,
+    "outputMinusActualDeg": output_minus_actual,
+    "desiredMinusActualDeg": desired_minus_actual,
+    "outputStepDeg": output_step,
+    "actualSteeringRateDeg": _safe_float(car.get("steeringRateDeg"), 0.0),
+    "desiredCurvature": desired_curvature,
+    "actualCurvature": actual_curvature,
+    "desiredLateralAccel": desired_lateral_accel,
+    "actualLateralAccel": actual_lateral_accel,
+    "lateralAccelRatioAbs": lateral_accel_ratio,
+    "turning": turning,
+    "undershooting": undershooting,
+    "steerLimitedBySafety": steer_limited_by_safety,
+    "lateralSaturated": angle_state_saturated,
+    "pandaLegacyVm": panda,
+    "liveParameters": live_parameters,
+    "reason": ",".join(reasons) if reasons else "-",
+  }
+
+
 def _car_state_summary(cs: Any) -> dict[str, Any]:
   cruise = _maybe_attr(cs, "cruiseState", None)
   out = {
@@ -272,6 +437,8 @@ def _controls_state_summary(cs: Any) -> dict[str, Any]:
     "forceDecel",
     "alertSize",
     "alertStatus",
+    "curvature",
+    "desiredCurvature",
   ):
     value = _maybe_attr(cs, name, None)
     if isinstance(value, (bool, int, str)):
@@ -501,7 +668,7 @@ def _model_summary(model: Any) -> dict[str, Any]:
   return out
 
 
-def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str, Any], lead2: dict[str, Any], mapd: dict[str, Any], long_log: dict[str, Any] | None) -> dict[str, Any]:
+def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str, Any], lead2: dict[str, Any], mapd: dict[str, Any], long_log: dict[str, Any] | None, steer_diag: dict[str, Any] | None = None) -> dict[str, Any]:
   cruise = car.get("cruiseState", {}) if isinstance(car.get("cruiseState"), dict) else {}
   current_set = _safe_float(cruise.get("speed"), 0.0)
   v_ego = _safe_float(car.get("vEgo"), 0.0)
@@ -555,6 +722,10 @@ def _derive_flags(*, car: dict[str, Any], plan: dict[str, Any], lead1: dict[str,
     "followGap": follow_gap,
     "closingLead": bool((lead1.get("status") or lead2.get("status")) and (primary_vrel < -0.5 or a_target < -0.15)),
     "steeringBusy": bool(abs(_safe_float(car.get("steeringAngleDeg"), 0.0)) > 8.0 or abs(_safe_float(car.get("steeringRateDeg"), 0.0)) > 25.0),
+    "steerLimited": _safe_bool((steer_diag or {}).get("steerLimitedBySafety", False)),
+    "latSaturated": _safe_bool((steer_diag or {}).get("lateralSaturated", False)),
+    "latUndershooting": _safe_bool((steer_diag or {}).get("undershooting", False)) and _safe_bool((steer_diag or {}).get("turning", False)),
+    "steerDiagReason": _safe_str((steer_diag or {}).get("reason", "-")),
     "gasPressed": _safe_bool(car.get("gasPressed", False)),
     "brakePressed": _safe_bool(car.get("brakePressed", False)),
     "pedalOverride": _safe_bool(car.get("pedalOverride", False)) or _safe_bool(car.get("gasPressed", False)) or _safe_bool(car.get("brakePressed", False)),
@@ -609,6 +780,10 @@ class SwaglogTail:
   KEYWORDS = (
     "[XNOR_CRUISE_SYNC]",
     "[XNOR_CC_DIAG]",
+    "TESLA_STEER_DIAG",
+    "STEER_SAT_DIAG",
+    "turn exceeds",
+    "steerSaturated",
     "lead_guard",
     "lead_stuck_cancel",
     "lead_approach_force",
@@ -746,7 +921,14 @@ class SwaglogTail:
     except Exception:
       pass
 
-    kind = "long_decision" if "[XNOR_CRUISE_SYNC]" in msg_s else ("cc_diag" if "[XNOR_CC_DIAG]" in msg_s else "event")
+    if "[XNOR_CRUISE_SYNC]" in msg_s:
+      kind = "long_decision"
+    elif "[XNOR_CC_DIAG]" in msg_s:
+      kind = "cc_diag"
+    elif "TESLA_STEER_DIAG" in msg_s or "STEER_SAT_DIAG" in msg_s:
+      kind = "steer_diag"
+    else:
+      kind = "event"
     record = {
       "created": created,
       "filename": filename,
@@ -840,6 +1022,8 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
   flap = record.get("leadState", {})
   follow = flags.get("followGap", {}) if isinstance(flags.get("followGap"), dict) else {}
   mapd = flags.get("mapd", {}) if isinstance(flags.get("mapd"), dict) else {}
+  steer = record.get("steerDiag", {}) if isinstance(record.get("steerDiag"), dict) else {}
+  panda = steer.get("pandaLegacyVm", {}) if isinstance(steer.get("pandaLegacyVm"), dict) else {}
   line = (
     f"{record['wall_time']} "
     f"vEgo={flags['vEgo']:.2f} "
@@ -848,6 +1032,20 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"plannerDrop={int(flags['plannerDropVsSet'])} "
     f"closing={int(flags['closingLead'])} "
     f"steerBusy={int(flags['steeringBusy'])} "
+    f"steerLim={int(flags.get('steerLimited', False))} "
+    f"latSat={int(flags.get('latSaturated', False))} "
+    f"latUnder={int(flags.get('latUndershooting', False))} "
+    f"steerReason={_safe_str(flags.get('steerDiagReason'), '-') or '-'} "
+    f"desAng={_safe_float(steer.get('desiredAngleDeg'), 0.0):.2f} "
+    f"outAng={_safe_float(steer.get('outputAngleDeg'), 0.0):.2f} "
+    f"actAng={_safe_float(steer.get('actualAngleDeg'), 0.0):.2f} "
+    f"dOut={_safe_float(steer.get('desiredMinusOutputDeg'), 0.0):.2f} "
+    f"oAct={_safe_float(steer.get('outputMinusActualDeg'), 0.0):.2f} "
+    f"step={_safe_float(steer.get('outputStepDeg'), 0.0):.2f} "
+    f"pMax={_safe_float(panda.get('maxAngleDeg'), 0.0):.1f} "
+    f"pDelta={_safe_float(panda.get('maxDeltaDeg'), 0.0):.2f} "
+    f"latA={_safe_float(steer.get('actualLateralAccel'), 0.0):.2f} "
+    f"desLatA={_safe_float(steer.get('desiredLateralAccel'), 0.0):.2f} "
     f"gas={int(flags.get('gasPressed', False))} "
     f"brake={int(flags.get('brakePressed', False))} "
     f"pedal={int(flags.get('pedalOverride', False))} "
@@ -904,11 +1102,14 @@ def main() -> int:
 
   sm = messaging.SubMaster([
     "carState",
+    "carControl",
+    "carOutput",
     "controlsState",
     "radarState",
     "longitudinalPlan",
     "modelV2",
     "mapdOut",
+    "liveParameters",
   ])
 
   tail = SwaglogTail()
@@ -922,6 +1123,7 @@ def main() -> int:
 
   started = _now_ms()
   next_sample_ms = started
+  previous_output_angle: float | None = None
 
   with jsonl_path.open("w", encoding="utf-8") as jsonl_f, txt_path.open("w", encoding="utf-8") as txt_f:
     txt_f.write("# clear_path_watch\n")
@@ -936,7 +1138,12 @@ def main() -> int:
       next_sample_ms = now_ms + int(args.interval_ms)
 
       car = _car_state_summary(sm["carState"]) if sm.seen["carState"] else {}
+      car_control = _car_control_summary(sm["carControl"]) if sm.seen["carControl"] else {}
+      car_output = _car_output_summary(sm["carOutput"]) if sm.seen["carOutput"] else {}
       controls = _controls_state_summary(sm["controlsState"]) if sm.seen["controlsState"] else {}
+      live_parameters = _live_parameters_summary(sm["liveParameters"]) if sm.seen["liveParameters"] else {}
+      steer_diag = _steer_diag_summary(car, controls, car_control, car_output, live_parameters, previous_output_angle)
+      previous_output_angle = _safe_float(steer_diag.get("outputAngleDeg"), previous_output_angle or 0.0)
       radar = {
         "leadOne": _lead_summary(_maybe_attr(sm["radarState"], "leadOne", None)) if sm.seen["radarState"] else {"status": False},
         "leadTwo": _lead_summary(_maybe_attr(sm["radarState"], "leadTwo", None)) if sm.seen["radarState"] else {"status": False},
@@ -992,7 +1199,11 @@ def main() -> int:
         "valid": {k: _safe_bool(v) for k, v in sm.valid.items()},
         "alive": {k: _safe_bool(v) for k, v in sm.alive.items()},
         "carState": car,
+        "carControl": car_control,
+        "carOutput": car_output,
         "controlsState": controls,
+        "liveParameters": live_parameters,
+        "steerDiag": steer_diag,
         "radarState": radar,
         "longitudinalPlan": plan,
         "modelV2": model,
@@ -1016,6 +1227,7 @@ def main() -> int:
         lead2=radar["leadTwo"],
         mapd=mapd,
         long_log=long_log,
+        steer_diag=steer_diag,
       )
       record["decisionClassification"] = _diag_classification(record)
 
@@ -1033,6 +1245,10 @@ def main() -> int:
       if d["closingLead"] and d["plannerDropVsSet"]:
         interesting = True
       if _safe_str(record.get("decisionClassification"), "no_recent_long_or_cc_log") != "no_recent_long_or_cc_log":
+        interesting = True
+      if d.get("steerLimited") or d.get("latSaturated") or d.get("latUndershooting"):
+        interesting = True
+      if abs(_safe_float(steer_diag.get("desiredMinusOutputDeg"), 0.0)) > STEER_ANGLE_SATURATION_THRESHOLD_DEG:
         interesting = True
       if any(
         marker in d["longSource"]
