@@ -1068,15 +1068,6 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"mapHas={int(_safe_bool(mapd.get('hasCurveInputs', False)))} "
     f"map={_safe_float(mapd.get('mapCurveSpeed'), 0.0):.2f} "
     f"vis={_safe_float(mapd.get('visionCurveSpeed'), 0.0):.2f} "
-    f"csaOk={int(_safe_bool((record.get('csa') or {}).get('ok', False)))} "
-    f"csaBus={_safe_int((record.get('csa') or {}).get('bus'), -1)} "
-    f"csaState={_safe_float((record.get('csa') or {}).get('csaState'), 0.0):.0f} "
-    f"csaC2={_safe_float((record.get('csa') or {}).get('roadC2'), 0.0):.6f} "
-    f"csaRange={_safe_float((record.get('csa') or {}).get('roadRange'), 0.0):.0f} "
-    f"csaCtr={_safe_float((record.get('csa') or {}).get('roadCtr'), 0.0):.0f} "
-    f"csaOffRange={_safe_float((record.get('csa') or {}).get('offrampRange'), 0.0):.0f} "
-    f"navExp={_safe_float((record.get('csa') or {}).get('navExpSpeed'), 0.0):.0f} "
-    f"navAct={_safe_float((record.get('csa') or {}).get('navRouteActive'), 0.0):.0f} "
     f"road={_safe_str((mapd.get('rawRoadFields') or {}).get('roadName', (mapd.get('rawRoadFields') or {}).get('wayName', '-'))).replace(' ', '_')[:32] or '-'} "
     f"ctx={_safe_str((mapd.get('rawRoadFields') or {}).get('roadContext', '-')) or '-'} "
     f"sel={_safe_str((mapd.get('rawRoadFields') or {}).get('waySelectionType', '-')) or '-'} "
@@ -1098,130 +1089,6 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
   )
   txt_f.write(line + "\n")
   txt_f.flush()
-
-
-class CsaCanReader:
-  """Decode Tesla CSA / nav curvature signals from raw CAN, alongside mapd.
-
-  CSA (Curve Speed Adaptation) on legacy Tesla (tesla_can.dbc) is route-independent
-  (map-matched GPS), so it is the strongest pre-emptive roundabout/curve signal we
-  have. None of it is on cereal, so we decode it straight off the 'can' socket with
-  a CANParser. We don't know which bus carries it on this car, so we run one parser
-  per candidate bus and report whichever is live (Counter advancing).
-
-  Fail-safe by design: if cereal/CANParser/the DBC/the 'can' socket is unavailable,
-  self.ok stays False, every field reads as missing, and the rest of the watcher is
-  completely unaffected. tesla_can has no checksum/counter state registered, so the
-  parser never gates rows on checksum/counter -- the *Counter signals come through
-  as plain incrementing values, which is exactly what we want for liveness.
-  """
-  DBC_NAME = "tesla_can"
-  BUSES = (0, 1, 2)
-  MESSAGES = [
-    ("UI_csaRoadCurvature", 0),     # 744: road-ahead curvature + lookahead Range (m)
-    ("UI_csaOfframpCurvature", 0),  # 728: offramp curvature + Range
-    ("AutopilotStatus", 0),         # 921: DAS_csaState gate (0 unavail/1 avail/2 enable/3 hold)
-    ("MCU_locationStatus2", 0),     # 104: MCU_navigonExpectedSpeed (route-tied, mph)
-    ("UI_driverAssistMapData", 0),  # 968: UI_navRouteActive
-  ]
-
-  def __init__(self) -> None:
-    self.ok = False
-    self.err = ""
-    self.buses_built: list[int] = []
-    self._parsers: dict[int, Any] = {}
-    self._sock = None
-    self._capnp_to_list = None
-    self._last_counter: dict[int, int] = {}
-    try:
-      from opendbc.can.parser import CANParser
-      try:
-        from openpilot.selfdrive.pandad import can_capnp_to_list
-      except Exception:
-        from selfdrive.pandad import can_capnp_to_list  # type: ignore
-      self._capnp_to_list = can_capnp_to_list
-      for bus in self.BUSES:
-        try:
-          self._parsers[bus] = CANParser(self.DBC_NAME, list(self.MESSAGES), bus)
-          self.buses_built.append(bus)
-        except Exception as exc:
-          self.err = f"{self.err} bus{bus}:{exc!r}".strip()
-      self._sock = messaging.sub_sock("can", conflate=False)
-      self.ok = bool(self._parsers) and self._sock is not None
-    except Exception as exc:
-      self.err = repr(exc)
-      self.ok = False
-
-  def update(self) -> None:
-    if not self.ok or self._sock is None or self._capnp_to_list is None:
-      return
-    try:
-      raw = messaging.drain_sock_raw(self._sock)
-      if not raw:
-        return
-      can_list = self._capnp_to_list(raw)
-      for cp in self._parsers.values():
-        try:
-          cp.update(can_list)
-        except Exception:
-          pass
-    except Exception:
-      pass
-
-  def _read(self, cp: Any, msg: str, sig: str) -> float | None:
-    try:
-      v = float(cp.vl[msg][sig])
-    except Exception:
-      return None
-    return v if math.isfinite(v) else None
-
-  def _bus_counter(self, bus: int) -> int:
-    cp = self._parsers.get(bus)
-    if cp is None:
-      return -1
-    v = self._read(cp, "UI_csaRoadCurvature", "UI_csaRoadCurvCounter")
-    return int(v) if v is not None else -1
-
-  def _live_bus(self) -> int:
-    advancing = -1
-    nonzero = -1
-    for bus in self.BUSES:
-      ctr = self._bus_counter(bus)
-      last = self._last_counter.get(bus, -1)
-      if ctr >= 0:
-        if last >= 0 and ctr != last and advancing < 0:
-          advancing = bus
-        if ctr > 0 and nonzero < 0:
-          nonzero = bus
-        self._last_counter[bus] = ctr
-    return advancing if advancing >= 0 else nonzero
-
-  def summary(self) -> dict[str, Any]:
-    out: dict[str, Any] = {
-      "ok": bool(self.ok),
-      "err": self.err,
-      "busesBuilt": list(self.buses_built),
-      "busCtr": {str(b): self._bus_counter(b) for b in self.BUSES},
-    }
-    if not self.ok:
-      out["bus"] = -1
-      return out
-    bus = self._live_bus()
-    out["bus"] = bus
-    cp = self._parsers.get(bus) if bus >= 0 else self._parsers.get(self.buses_built[0] if self.buses_built else -1)
-    if cp is None:
-      return out
-    out["csaState"] = self._read(cp, "AutopilotStatus", "DAS_csaState")
-    out["roadC2"] = self._read(cp, "UI_csaRoadCurvature", "UI_csaRoadCurvC2")
-    out["roadC3"] = self._read(cp, "UI_csaRoadCurvature", "UI_csaRoadCurvC3")
-    out["roadRange"] = self._read(cp, "UI_csaRoadCurvature", "UI_csaRoadCurvRange")
-    out["roadCtr"] = self._read(cp, "UI_csaRoadCurvature", "UI_csaRoadCurvCounter")
-    out["offrampC2"] = self._read(cp, "UI_csaOfframpCurvature", "UI_csaOfframpCurvC2")
-    out["offrampRange"] = self._read(cp, "UI_csaOfframpCurvature", "UI_csaOfframpCurvRange")
-    out["offrampCtr"] = self._read(cp, "UI_csaOfframpCurvature", "UI_csaOfframpCurvCounter")
-    out["navExpSpeed"] = self._read(cp, "MCU_locationStatus2", "MCU_navigonExpectedSpeed")
-    out["navRouteActive"] = self._read(cp, "UI_driverAssistMapData", "UI_navRouteActive")
-    return out
 
 
 def main() -> int:
@@ -1248,7 +1115,6 @@ def main() -> int:
   tail = SwaglogTail()
   tail.start()
   flap_tracker = FlapTracker()
-  csa_reader = CsaCanReader()
 
   ts = datetime.now().strftime("%Y%m%d_%H%M%S")
   out_dir = Path("/data")
@@ -1262,15 +1128,9 @@ def main() -> int:
   with jsonl_path.open("w", encoding="utf-8") as jsonl_f, txt_path.open("w", encoding="utf-8") as txt_f:
     txt_f.write("# clear_path_watch\n")
     txt_f.write(f"# started { _wall_iso() }\n")
-    txt_f.write(
-      f"# csa_reader ok={int(bool(csa_reader.ok))} "
-      f"buses={','.join(str(b) for b in csa_reader.buses_built) or '-'} "
-      f"err={(csa_reader.err or '-')[:160]}\n"
-    )
 
     while RUNNING and (_now_ms() - started) < (int(args.duration_s) * 1000):
       sm.update(0)
-      csa_reader.update()
       now_ms = _now_ms()
       if now_ms < next_sample_ms:
         time.sleep(0.01)
@@ -1332,14 +1192,12 @@ def main() -> int:
       decision_stale = cc_diag_stale if decision_raw is cc_diag_raw else long_log_stale
       long_log = {} if decision_stale else decision_raw
       lead_state = flap_tracker.update(now_ms, radar["leadOne"], radar["leadTwo"])
-      csa = csa_reader.summary()
 
       record = {
         "wall_time": _wall_iso(),
         "mono_ms": now_ms,
         "valid": {k: _safe_bool(v) for k, v in sm.valid.items()},
         "alive": {k: _safe_bool(v) for k, v in sm.alive.items()},
-        "csa": csa,
         "carState": car,
         "carControl": car_control,
         "carOutput": car_output,
@@ -1391,9 +1249,6 @@ def main() -> int:
       if d.get("steerLimited") or d.get("latSaturated") or d.get("latUndershooting"):
         interesting = True
       if abs(_safe_float(steer_diag.get("desiredMinusOutputDeg"), 0.0)) > STEER_ANGLE_SATURATION_THRESHOLD_DEG:
-        interesting = True
-      _csa = record.get("csa") or {}
-      if _safe_int(_csa.get("bus"), -1) >= 0 or _safe_float(_csa.get("csaState"), 0.0) > 0.0:
         interesting = True
       if any(
         marker in d["longSource"]

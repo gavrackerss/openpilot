@@ -186,15 +186,6 @@ class LongController:
   _MAP_ONLY_EARLY_ENTRY_MAX_DROP_MS = 8.0 * CV.MPH_TO_MS
   _MAP_ONLY_EARLY_ENTRY_TARGET_OFFSET_MS = 12.0 * CV.MPH_TO_MS
   _MAP_ONLY_EARLY_ENTRY_PERSIST_MS = 520
-  # Low-speed (sub-45mph) map-only curve entry: at roundabout / junction speeds vision
-  # stays blind until the apex and steering is still near-zero on entry, so the >=45mph
-  # early-entry hint can never fire. A strong, sustained map-only drop is allowed to cap
-  # below that floor, with a larger drop margin and longer dwell to offset the missing
-  # vision/steer confirmation. Bounded to low speed where an unwanted single SET nudge is
-  # low-consequence and driver-overridable.
-  _MAP_ONLY_LOW_SPEED_ENTRY_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
-  _MAP_ONLY_LOW_SPEED_ENTRY_EGO_DROP_MS = 3.0 * CV.MPH_TO_MS
-  _MAP_ONLY_LOW_SPEED_ENTRY_PERSIST_MS = 700
   _PLANNER_ONLY_CURVE_RELEASE_STEER_DEG = 7.0
   _PLANNER_ONLY_CURVE_RELEASE_RATE_DEG = 8.0
   _PLANNER_ONLY_CURVE_RELEASE_VISION_MARGIN_MS = 7.0 * CV.MPH_TO_MS
@@ -1900,32 +1891,16 @@ class LongController:
         and float(raw_map_ms) <= (float(reference_ms) - float(self._MAP_ONLY_EARLY_ENTRY_MIN_DROP_MS))
         and float(raw_map_ms) <= (float(v_ego_ms) - float(self._CURVE_FORCE_ENTRY_EGO_DROP_MS))
       )
-      # Below the 45mph early-entry floor (roundabouts, junctions) vision is typically
-      # blind on entry, so allow a strong, sustained map-only drop to cap. Requires a
-      # larger drop margin and longer dwell than the function-level meaningful_drop to
-      # offset the missing vision/steer confirmation.
-      low_speed_map_only_hint = bool(
-        raw_map_ms is not None
-        and float(v_ego_ms) < float(self._MAP_ONLY_EARLY_ENTRY_MIN_SPEED_MS)
-        and float(raw_map_ms) <= (float(reference_ms) - float(self._MAP_ONLY_LOW_SPEED_ENTRY_MIN_DROP_MS))
-        and float(raw_map_ms) <= (float(v_ego_ms) - float(self._MAP_ONLY_LOW_SPEED_ENTRY_EGO_DROP_MS))
-      )
-      if not (strong_map_only_hint or low_speed_map_only_hint):
+      if not strong_map_only_hint:
         self._curve_force_entry_candidate_since_ms = 0
         return None, ""
-
-      persist_target_ms = int(self._MAP_ONLY_EARLY_ENTRY_PERSIST_MS)
-      map_only_state = "mapd_map_only_early_cap"
-      if low_speed_map_only_hint and not strong_map_only_hint:
-        persist_target_ms = int(self._MAP_ONLY_LOW_SPEED_ENTRY_PERSIST_MS)
-        map_only_state = "mapd_map_only_low_speed_cap"
 
       if int(self._curve_force_entry_candidate_since_ms) == 0:
         self._curve_force_entry_candidate_since_ms = int(now_ms)
         return None, ""
 
       elapsed_ms = int(now_ms) - int(self._curve_force_entry_candidate_since_ms)
-      if elapsed_ms < int(persist_target_ms):
+      if elapsed_ms < int(self._MAP_ONLY_EARLY_ENTRY_PERSIST_MS):
         return None, ""
 
       shallow_cap_ms = max(
@@ -1940,7 +1915,7 @@ class LongController:
       )
       if float(shallow_cap_ms) >= (float(desired_ms) - (0.25 * CV.MPH_TO_MS)):
         return None, ""
-      return float(shallow_cap_ms), map_only_state
+      return float(shallow_cap_ms), "mapd_map_only_early_cap"
 
     allowed_context = bool(lead_context or steer_busy or vision_supports or bool(self._lat_limit_saturated))
     if not allowed_context:
@@ -3726,15 +3701,6 @@ class LongController:
       if curve_force_cap_ms is not None and float(curve_force_cap_ms) < (float(desired_ms) - (0.10 * CV.MPH_TO_MS)):
         desired_ms = min(float(desired_ms), float(curve_force_cap_ms))
         src = f"{src}+{curve_force_state}"
-      elif int(self._curve_force_entry_candidate_since_ms) > 0:
-        # A curve-entry cap is being confirmed (dwell window before it latches). Hold the
-        # line so ACC does not pulse RES_ACCEL into the upcoming curve before the cap
-        # applies. Only reached when meaningful_drop + ego_too_fast already passed, so it
-        # cannot fire on straight open road.
-        curve_entry_hold_ms = max(float(current_set_ms), float(v_ego_ms))
-        if float(desired_ms) > (float(curve_entry_hold_ms) + 0.01):
-          desired_ms = float(curve_entry_hold_ms)
-          src = f"{src}+curve_entry_accel_hold[pending]"
 
       desired_ms, curve_accel_blocked = self._curve_accel_block_target(
         now_ns=int(now_ns),
