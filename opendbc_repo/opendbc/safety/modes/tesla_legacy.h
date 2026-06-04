@@ -4,11 +4,23 @@
 #define XNOR_V139_UNITY_AEB_SAFETY_PARITY 1
 #define XNOR_V146_EARLY_TESLA_DIAGNOSTIC_SAFE 1
 #define XNOR_V147_ENGAGE_HUD_TAKEOVER_SCRUB 1
+#define XNOR_V148_UNITY_HUD_CACHE_REPLACE 1
+#define XNOR_V149_USERSPACE_HUD_OWNER_CACHE 1
+#define XNOR_V150_HUD_CACHE_TX_SAFE 1
+#define XNOR_V151_HUD_WARNING_HARD_CLEAN 1
 
 static const char xnor_v146_early_tesla_diag_safe_marker[] __attribute__((used)) =
     "XNOR_V146_EARLY_TESLA_DIAGNOSTIC_SAFE";
 static const char xnor_v147_engage_hud_takeover_scrub_marker[] __attribute__((used)) =
     "XNOR_V147_ENGAGE_HUD_TAKEOVER_SCRUB";
+static const char xnor_v148_unity_hud_cache_replace_marker[] __attribute__((used)) =
+    "XNOR_V148_UNITY_HUD_CACHE_REPLACE";
+static const char xnor_v149_userspace_hud_owner_cache_marker[] __attribute__((used)) =
+    "XNOR_V149_USERSPACE_HUD_OWNER_CACHE";
+static const char xnor_v150_hud_cache_tx_safe_marker[] __attribute__((used)) =
+    "XNOR_V150_HUD_CACHE_TX_SAFE";
+static const char xnor_v151_hud_warning_hard_clean_marker[] __attribute__((used)) =
+    "XNOR_V151_HUD_WARNING_HARD_CLEAN";
 
 #include "opendbc/safety/declarations.h"
 
@@ -17,6 +29,10 @@ static const char xnor_v147_engage_hud_takeover_scrub_marker[] __attribute__((us
 // Unity parity implemented:
 //  - Stalk (0x45) gated by op_autopilot_disabled from internal 0x659 (byte5 bit7)
 //  - Forwarding mods (HUD hiding + EPAS eacStatus workaround) with additive last-byte checksum
+//  - OP HUD owner-stream cache/replacement for 0x399, 0x389, and warning matrices
+//  - v149 expects userspace to continuously feed the clean owner HUD cache while AP-disabled
+//  - v150 makes the userspace HUD cache feed non-fatal if a DBC/helper mismatch occurs
+  - v151 hard-cleans cached HUD warning/hands-on fields and preserves only benign stock timing/speed fields
 //  - No relay faults: all TX allowlist entries use check_relay=false
 //
 // XNOR contract:
@@ -37,6 +53,8 @@ static const char xnor_v147_engage_hud_takeover_scrub_marker[] __attribute__((us
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
 static const uint32_t TESLA_LEGACY_ENGAGE_HUD_TAKEOVER_US = 8000000U;
+static const uint32_t TESLA_LEGACY_HUD_STATUS_CACHE_US = 1000000U;
+static const uint32_t TESLA_LEGACY_HUD_WARNING_CACHE_US = 1500000U;
 
 // --- runtime state (namespaced; safety.h includes tesla.h too) ---
 static bool tesla_legacy_external_panda = false;
@@ -70,6 +88,28 @@ static uint32_t tesla_legacy_last_controls_allowed_us = 0U;
 static bool tesla_legacy_controls_allowed_prev = false;
 static bool tesla_legacy_hide_errors_armed = false;
 
+// Unity-style OP HUD owner-stream cache. OP TX is consumed by safety and never put on CAN.
+typedef struct {
+  uint32_t data_l;
+  uint32_t data_h;
+  uint32_t last_rx_us;
+  bool valid;
+} TeslaLegacyHudCache;
+
+static TeslaLegacyHudCache tesla_legacy_hud_cache_399;
+static TeslaLegacyHudCache tesla_legacy_hud_cache_389;
+static TeslaLegacyHudCache tesla_legacy_hud_cache_329;
+static TeslaLegacyHudCache tesla_legacy_hud_cache_349;
+static TeslaLegacyHudCache tesla_legacy_hud_cache_369;
+
+static void tesla_legacy_reset_hud_cache(void) {
+  tesla_legacy_hud_cache_399 = (TeslaLegacyHudCache){0};
+  tesla_legacy_hud_cache_389 = (TeslaLegacyHudCache){0};
+  tesla_legacy_hud_cache_329 = (TeslaLegacyHudCache){0};
+  tesla_legacy_hud_cache_349 = (TeslaLegacyHudCache){0};
+  tesla_legacy_hud_cache_369 = (TeslaLegacyHudCache){0};
+}
+
 // gear tracking for reverse -> drive re-arm
 static bool tesla_legacy_in_reverse = false;
 static uint8_t tesla_legacy_last_gear = 0U;
@@ -94,6 +134,7 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_last_controls_allowed_us = 0U;
   tesla_legacy_controls_allowed_prev = false;
   tesla_legacy_hide_errors_armed = false;
+  tesla_legacy_reset_hud_cache();
 }
 
 
@@ -154,10 +195,10 @@ static bool tesla_legacy_engage_hud_takeover_active(void) {
   const uint32_t now = microsecond_timer_get();
   const bool recent_stalk_engage =
       (tesla_legacy_last_op_stalk_engage_us != 0U) &&
-      (get_ts_elapsed(now, tesla_legacy_last_op_stalk_engage_us) <= TESLA_LEGACY_ENGAGE_HUD_TAKEOVER_US);
+      (safety_get_ts_elapsed(now, tesla_legacy_last_op_stalk_engage_us) <= TESLA_LEGACY_ENGAGE_HUD_TAKEOVER_US);
   const bool recent_controls_allowed =
       (tesla_legacy_last_controls_allowed_us != 0U) &&
-      (get_ts_elapsed(now, tesla_legacy_last_controls_allowed_us) <= TESLA_LEGACY_ENGAGE_HUD_TAKEOVER_US);
+      (safety_get_ts_elapsed(now, tesla_legacy_last_controls_allowed_us) <= TESLA_LEGACY_ENGAGE_HUD_TAKEOVER_US);
 
   return controls_allowed || recent_stalk_engage || recent_controls_allowed;
 }
@@ -228,6 +269,7 @@ static void tesla_legacy_scrub_status_warnings(CANPacket_t *msg, uint8_t autopil
   msg->data[2] &= 0x3FU;  // DAS_forwardCollisionWarning = 0
   msg->data[3] &= 0x3FU;  // DAS_sideCollisionAvoid = 0
   msg->data[4] = 0U;      // DAS_sideCollisionWarning/Inhibit/CSA/LDW = 0
+  msg->data[5] &= 0xC3U;  // DAS_autopilotHandsOnState = 0
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
@@ -236,7 +278,117 @@ static void tesla_legacy_clear_warning_matrix(CANPacket_t *msg) {
   for (int i = 0; i < GET_LEN(msg); i++) {
     msg->data[i] = 0U;
   }
+}
+
+static bool tesla_legacy_is_hud_cache_addr(int addr) {
+  return (addr == 0x399) || (addr == 0x389) ||
+         (addr == 0x329) || (addr == 0x349) || (addr == 0x369);
+}
+
+static TeslaLegacyHudCache *tesla_legacy_get_hud_cache(int addr) {
+  TeslaLegacyHudCache *cache = NULL;
+  switch (addr) {
+    case 0x399:
+      cache = &tesla_legacy_hud_cache_399;
+      break;
+    case 0x389:
+      cache = &tesla_legacy_hud_cache_389;
+      break;
+    case 0x329:
+      cache = &tesla_legacy_hud_cache_329;
+      break;
+    case 0x349:
+      cache = &tesla_legacy_hud_cache_349;
+      break;
+    case 0x369:
+      cache = &tesla_legacy_hud_cache_369;
+      break;
+    default:
+      break;
+  }
+  return cache;
+}
+
+static void tesla_legacy_set_data_word(CANPacket_t *msg, int start, uint32_t value) {
+  msg->data[start] = (uint8_t)(value & 0xFFU);
+  msg->data[start + 1] = (uint8_t)((value >> 8) & 0xFFU);
+  msg->data[start + 2] = (uint8_t)((value >> 16) & 0xFFU);
+  msg->data[start + 3] = (uint8_t)((value >> 24) & 0xFFU);
+}
+
+static void tesla_legacy_store_hud_cache(TeslaLegacyHudCache *cache, const CANPacket_t *msg) {
+  cache->data_l = (uint32_t)GET_BYTES(msg, 0, 4);
+  cache->data_h = (uint32_t)GET_BYTES(msg, 4, 4);
+  cache->last_rx_us = microsecond_timer_get();
+  cache->valid = true;
+}
+
+static void tesla_legacy_cache_clean_op_hud(CANPacket_t *msg) {
+  const int addr = (int)msg->addr;
+  TeslaLegacyHudCache *cache = tesla_legacy_get_hud_cache(addr);
+
+  if ((cache == NULL) || (GET_LEN(msg) != 8)) {
+    return;
+  }
+
+  if (addr == 0x399) {
+    tesla_legacy_scrub_status_warnings(msg, msg->data[0] & 0x0FU);
+  } else if (addr == 0x389) {
+    tesla_legacy_scrub_status2_warnings(msg);
+  } else {
+    tesla_legacy_clear_warning_matrix(msg);
+  }
+
+  tesla_legacy_store_hud_cache(cache, msg);
+}
+
+static bool tesla_legacy_hud_cache_fresh(const TeslaLegacyHudCache *cache, uint32_t timeout_us) {
+  return cache->valid &&
+         (safety_get_ts_elapsed(microsecond_timer_get(), cache->last_rx_us) <= timeout_us);
+}
+
+static bool tesla_legacy_apply_masked_hud_cache(CANPacket_t *msg, const TeslaLegacyHudCache *cache,
+                                                uint32_t preserve_l, uint32_t preserve_h) {
+  const uint32_t stock_l = (uint32_t)GET_BYTES(msg, 0, 4);
+  const uint32_t stock_h = (uint32_t)GET_BYTES(msg, 4, 4);
+  const uint32_t data_l = (cache->data_l & ~preserve_l) | (stock_l & preserve_l);
+  const uint32_t data_h = (cache->data_h & ~preserve_h) | (stock_h & preserve_h);
+
+  tesla_legacy_set_data_word(msg, 0, data_l);
+  tesla_legacy_set_data_word(msg, 4, data_h);
   tesla_legacy_set_last_byte_checksum(msg);
+  return true;
+}
+
+static bool tesla_legacy_apply_hud_cache(CANPacket_t *msg) {
+  const int addr = (int)msg->addr;
+  const TeslaLegacyHudCache *cache = tesla_legacy_get_hud_cache(addr);
+
+  if ((cache == NULL) || (GET_LEN(msg) != 8)) {
+    return false;
+  }
+
+  if (addr == 0x399) {
+    if (!tesla_legacy_hud_cache_fresh(cache, TESLA_LEGACY_HUD_STATUS_CACHE_US)) {
+      return false;
+    }
+    return tesla_legacy_apply_masked_hud_cache(msg, cache, 0x003FFFF0U, 0x00F00000U);
+  }
+
+  if (addr == 0x389) {
+    if (!tesla_legacy_hud_cache_fresh(cache, TESLA_LEGACY_HUD_STATUS_CACHE_US)) {
+      return false;
+    }
+    return tesla_legacy_apply_masked_hud_cache(msg, cache, 0x000003FFU, 0x00F0FF00U);
+  }
+
+  if (!tesla_legacy_hud_cache_fresh(cache, TESLA_LEGACY_HUD_WARNING_CACHE_US)) {
+    return false;
+  }
+
+  tesla_legacy_set_data_word(msg, 0, cache->data_l);
+  tesla_legacy_set_data_word(msg, 4, cache->data_h);
+  return true;
 }
 
 
@@ -304,7 +456,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (tesla_legacy_hands_on) {
       tesla_legacy_hands_on_last_signal = microsecond_timer_get();
     } else {
-      const uint32_t dt = get_ts_elapsed(microsecond_timer_get(), tesla_legacy_hands_on_last_signal);
+      const uint32_t dt = safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_hands_on_last_signal);
       tesla_legacy_hands_on = dt <= TESLA_LEGACY_TIME_FOR_HANDS_ON_US;
     }
 
@@ -321,8 +473,11 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if ((!tesla_legacy_has_ap_hw) || tesla_legacy_op_autopilot_disabled) {
       const int ap_lever_position = (int)(msg->data[0] & 0x3F);
       if (ap_lever_position == 2) {
+        tesla_legacy_last_op_stalk_engage_us = microsecond_timer_get();
         pcm_cruise_check(true);
       } else if (ap_lever_position == 1) {
+        tesla_legacy_last_op_stalk_engage_us = 0U;
+        tesla_legacy_last_controls_allowed_us = 0U;
         pcm_cruise_check(false);
       } else {
       }
@@ -404,7 +559,7 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
       tesla_legacy_last_op_stalk_engage_us = 0U;
       tesla_legacy_last_controls_allowed_us = 0U;
     }
-        if (tesla_legacy_op_stalk_enable && (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
+    if (tesla_legacy_op_stalk_enable && (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
       if (tesla_legacy_op_stalk_main_edge) {
         pcm_cruise_check(true);
       }
@@ -412,6 +567,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
         pcm_cruise_check(false);
       }
     }
+    return false;
+  }
+
+  if (!tesla_legacy_external_panda && tesla_legacy_is_hud_cache_addr(addr)) {
+    CANPacket_t clean_msg = *msg;
+    tesla_legacy_cache_clean_op_hud(&clean_msg);
     return false;
   }
 
@@ -584,7 +745,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 
   // Unity mods only on main panda with AP HW
   if (!tesla_legacy_has_ap_hw) {
-        if (tesla_legacy_op_stalk_enable && (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
+    if (tesla_legacy_op_stalk_enable && (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
       if (tesla_legacy_op_stalk_main_edge) {
         pcm_cruise_check(true);
       }
@@ -626,12 +787,19 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (should_scrub_hud) {
       if (addr == 0x2BF) {
         tesla_legacy_scrub_das_control_aeb(to_fwd);
-      } else if (addr == 0x389) {
-        tesla_legacy_scrub_status2_warnings(to_fwd);
-      } else if (addr == 0x399) {
-        const uint8_t status = (controls_allowed || engage_hud_owner) ? 0x05U : (to_fwd->data[0] & 0x0FU);
-        tesla_legacy_scrub_status_warnings(to_fwd, status);
-      } else if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
+      } else if ((addr == 0x389) || (addr == 0x399) ||
+                 (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
+        if (!tesla_legacy_apply_hud_cache(to_fwd)) {
+          if (addr == 0x389) {
+            tesla_legacy_scrub_status2_warnings(to_fwd);
+          } else if (addr == 0x399) {
+            const uint8_t status = (controls_allowed || engage_hud_owner) ? 0x05U : (to_fwd->data[0] & 0x0FU);
+            tesla_legacy_scrub_status_warnings(to_fwd, status);
+          } else {
+            tesla_legacy_clear_warning_matrix(to_fwd);
+          }
+        }
+      } else if (addr == 0x309) {
         tesla_legacy_clear_warning_matrix(to_fwd);
       } else {
       }
@@ -670,6 +838,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_hide_errors_armed = false;
   tesla_legacy_in_reverse = false;
   tesla_legacy_last_gear = 0U;
+  tesla_legacy_reset_hud_cache();
 
   cruise_engaged_prev = false;
 
@@ -678,6 +847,11 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x27D, 0, 3, .check_relay = false},  // APS_eacMonitor
     {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
+    {0x399, 0, 8, .check_relay = false},  // XNOR_V148 OP HUD cache only
+    {0x389, 0, 8, .check_relay = false},  // XNOR_V148 OP HUD cache only
+    {0x329, 0, 8, .check_relay = false},  // XNOR_V148 OP warning matrix cache only
+    {0x349, 0, 8, .check_relay = false},  // XNOR_V148 OP warning matrix cache only
+    {0x369, 0, 8, .check_relay = false},  // XNOR_V148 OP warning matrix cache only
     {0x700, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
     {0x700, 1, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
     {0x701, 0, 8, .check_relay = false},  // XNOR_V146 diagnostic VIN/FW
