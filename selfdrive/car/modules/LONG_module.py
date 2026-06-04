@@ -418,13 +418,16 @@ class LongController:
 
   # --- Live CSA (Curve Speed Adaptation) raw-CAN curve cap ------------------
   # Tesla CSA road curvature is map-matched, route-independent, and arrives ~8s /
-  # ~110m ahead of a bend on this car. It is decoded straight off the raw 'can'
-  # socket because none of it is on cereal. This is the pre-emptive curve owner
-  # that fires even when planner/map/vision are still blind. Fail-safe: if the
-  # reader can't build, every gate below sees an unavailable sample and CSA does
-  # nothing. We gate on counter-advancing (freshness) + |C2| + lookahead, never
+  # ~110m ahead of a bend on this car. This is the pre-emptive curve owner that
+  # fires even when planner/map/vision are still blind. Option 1: CSA is decoded
+  # in CarState off the party-bus CANParser we already deserialize each frame
+  # (UI_csaRoadCurvature added to its check list) and stashed as xnor_csa_* instance
+  # attributes on the CarStateBase passed in as CS -- so there is NO second 'can'
+  # socket and no extra deserialize inside this control process (that was the lag
+  # source). Fail-safe: when CSA is absent the attrs read xnor_csa_ok=False and CSA
+  # does nothing. We gate on counter-advancing (freshness) + |C2| + lookahead, never
   # on DAS_csaState (that signal is always 0 / dead on this car).
-  _CSA_ENABLE = True
+  _CSA_ENABLE = True                       # safe now: CSA is decoded in CarState off the party parser, no 2nd 'can' sub
   _CSA_A_LAT_MS2 = 2.0                      # comfort lateral accel: v_cap = sqrt(a_lat/|C2|)
   _CSA_MIN_ABS_C2 = 0.0045                  # 1/m; below this the bend is too gentle to act (R>~220m)
   _CSA_MAX_LEAD_TIME_S = 9.0               # only act once the bend is within this many seconds ahead
@@ -451,13 +454,16 @@ class LongController:
 
     self._sm = messaging.SubMaster(services)
 
-    # Live CSA raw-CAN curve reader (fail-safe; never disturbs the rest of LONG).
-    self._csa_reader = _CsaCanReader()
+    # Option 1: CSA is decoded in CarState off the party parser and read from CS via
+    # getattr(CS, "xnor_csa_*"). No second 'can' socket is opened here (that was the lag
+    # source). The legacy _CsaCanReader pump is retired; _csa_last_sample is kept only as
+    # a fallback default for any code path that still references it.
+    self._csa_reader = None
     self._csa_last_sample: dict = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
-    if self._csa_reader.ok:
-      cloudlog.info("Tesla LONG_module: CSA raw-CAN curve reader online")
+    if self._CSA_ENABLE:
+      cloudlog.info("Tesla LONG_module: CSA enabled (decoded in CarState off party parser, Option 1)")
     else:
-      cloudlog.warning(f"Tesla LONG_module: CSA reader unavailable ({self._csa_reader.err or 'no parsers/socket'})")
+      cloudlog.info("Tesla LONG_module: CSA disabled")
 
     self._lp_target_last_ms: Optional[float] = None
     self._lp_target_near_ms: Optional[float] = None
@@ -1620,13 +1626,8 @@ class LongController:
     except Exception:
       return
 
-    # Pump the live CSA raw-CAN curve reader (fail-safe; a failure here must never
-    # disturb plan/lead polling, so on any error we fall back to an unavailable sample).
-    try:
-      self._csa_reader.update()
-      self._csa_last_sample = self._csa_reader.sample()
-    except Exception:
-      self._csa_last_sample = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
+    # Option 1: nothing to pump here. CSA is decoded in CarState off the party parser and
+    # read directly from CS in _csa_curve_target_ms -- no second 'can' socket, no drain.
 
     try:
       lp = self._sm["longitudinalPlan"]
@@ -2821,8 +2822,10 @@ class LongController:
 
 
   def _csa_curve_target_ms(self, *, reference_ms: float, v_ego_ms: float) -> tuple[Optional[float], str]:
-    """Live Tesla CSA raw-CAN curve cap (route-independent, map-matched curvature).
+    """Live Tesla CSA curve cap (route-independent, map-matched curvature).
 
+    Option 1: the sample in self._csa_last_sample is mirrored each frame from CarState's
+    xnor_csa_* attrs (decoded off the party parser -- no 2nd 'can' socket in this process).
     v_cap = sqrt(a_lat / |C2|), gated on counter-advancing freshness + |C2| + lookahead.
     CSA arrives ~8s / ~110m ahead of a bend on this car, so it can own a curve cap even
     when planner / mapd / vision are still blind. DAS_csaState is dead (always 0) on this
@@ -3432,6 +3435,22 @@ class LongController:
     cruise_buttons = int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0)
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
+
+    # Option 1: snapshot CSA from CarState (decoded off the party parser, no 2nd 'can' sock).
+    # _csa_curve_target_ms reads self._csa_last_sample, so we mirror the xnor_csa_* attrs into
+    # that dict here. Fail-safe: missing attrs collapse to an unavailable sample and CSA no-ops.
+    try:
+      self._csa_last_sample = {
+        "ok": bool(getattr(CS, "xnor_csa_ok", False)),
+        "advancing": bool(getattr(CS, "xnor_csa_advancing", False)),
+        "bus": 0,
+        "c2": float(getattr(CS, "xnor_csa_c2", 0.0) or 0.0),
+        "range_m": float(getattr(CS, "xnor_csa_range_m", 0.0) or 0.0),
+        "counter": int(getattr(CS, "xnor_csa_counter", -1)),
+      }
+    except Exception:
+      self._csa_last_sample = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
+
     lp_fresh = (
       (self._lp_target_last_ms is not None)
       and (int(self._lp_last_ns) > 0)

@@ -90,16 +90,6 @@ class CarState(CarStateBase):
     self._xnor_last_virtual_turn = 0
     self._xnor_last_virtual_turn_ms = 0
 
-    # XNOR CSA (Curve Speed Adaptation) decoded off the party-bus parser (Option 1).
-    # No second 'can' socket: signals come from the already-deserialized party CAN list.
-    self.xnor_csa_ok = False           # party parser carried a CSA frame this run
-    self.xnor_csa_c2 = 0.0             # UI_csaRoadCurvC2: road-ahead curvature kappa (1/m)
-    self.xnor_csa_range_m = 0.0        # UI_csaRoadCurvRange: lookahead distance (m)
-    self.xnor_csa_counter = -1         # UI_csaRoadCurvCounter: 0..255 liveness
-    self.xnor_csa_advancing = False    # counter changed within the liveness window
-    self._xnor_csa_last_counter = -1
-    self._xnor_csa_last_change_ms = 0
-
     self.turnSignalStalkState = 0
     self.speed_units = "MPH"
     self.speed_limit_ms = 0.0
@@ -223,54 +213,6 @@ class CarState(CarStateBase):
 
   def _now_ms(self) -> int:
     return int(time.monotonic() * 1000.0)
-
-  def _decode_csa(self, cp_party) -> None:
-    """Option 1: decode Tesla CSA (Curve Speed Adaptation) off the party-bus parser.
-
-    No second 'can' socket and no extra deserialize: UI_csaRoadCurvature is added to the
-    party parser's check list, so it arrives already decoded in cp_party.vl. We stash the
-    curvature/lookahead/liveness as instance attributes for LONG_module to read via getattr.
-
-    Fail-safe: any missing message/signal leaves xnor_csa_ok=False and never raises, so the
-    rest of CarState/LONG is undisturbed when CSA is absent (off-route / unsupported car).
-    """
-    try:
-      csa = cp_party.vl.get("UI_csaRoadCurvature", None)
-    except Exception:
-      csa = None
-
-    if not csa:
-      self.xnor_csa_ok = False
-      self.xnor_csa_advancing = False
-      return
-
-    try:
-      c2 = float(csa.get("UI_csaRoadCurvC2", 0.0) or 0.0)
-    except Exception:
-      c2 = 0.0
-    try:
-      range_m = float(csa.get("UI_csaRoadCurvRange", 0.0) or 0.0)
-    except Exception:
-      range_m = 0.0
-    try:
-      counter = int(csa.get("UI_csaRoadCurvCounter", -1))
-    except Exception:
-      counter = -1
-
-    now_ms = int(self._now_ms())
-    # Counter-advancing liveness: DAS_csaState is always 0 and must NOT be used to gate.
-    # The 0..255 counter ticks while CSA is publishing; hold "advancing" for ~500ms after
-    # the last observed change so a slow/just-wrapped counter doesn't flap the gate.
-    if counter != int(getattr(self, "_xnor_csa_last_counter", -1)):
-      self._xnor_csa_last_counter = counter
-      self._xnor_csa_last_change_ms = now_ms
-    advancing = (0 <= (now_ms - int(getattr(self, "_xnor_csa_last_change_ms", 0))) <= 500)
-
-    self.xnor_csa_c2 = c2
-    self.xnor_csa_range_m = range_m
-    self.xnor_csa_counter = counter
-    self.xnor_csa_advancing = bool(advancing)
-    self.xnor_csa_ok = True
 
   def _filter_virtual_turn_stalk(self, raw_ts: int) -> int:
     """Ignore our own virtual STW turn-hold frames so they do not look like a real held stalk."""
@@ -763,9 +705,6 @@ class CarState(CarStateBase):
     # Speed limit best-effort (needed for speed-limit matching)
     self._update_speed_limit(can_parsers)
 
-    # XNOR Option 1: decode CSA curvature off the party parser (zero extra socket/deserialize).
-    self._decode_csa(cp_party)
-
 
     # AEB
     ret.stockAeb = cp_ap_party.vl["DAS_control"]["DAS_aebEvent"] == 1
@@ -1015,9 +954,6 @@ class CarState(CarStateBase):
     # Speed limit best-effort (needed for speed-limit matching)
     self._update_speed_limit(can_parsers)
 
-    # XNOR Option 1: decode CSA curvature off the party parser (zero extra socket/deserialize).
-    self._decode_csa(cp_party)
-
     stw = None
     stw_bus = None
     for bk in (Bus.party, Bus.chassis, Bus.pt, Bus.ap_party, Bus.ap_pt):
@@ -1166,9 +1102,6 @@ class CarState(CarStateBase):
       ("DI_state", 10),
       ("UI_gpsVehicleSpeed", math.nan),
       ("EPAS_sysStatus", 25),
-      # XNOR: decode Tesla CSA road curvature off the party bus we already parse.
-      # nan Hz so it never gates canValid (CSA can be absent off-route / on some cars).
-      ("UI_csaRoadCurvature", math.nan),
     ]
 
     mirrored_party_checks = [
