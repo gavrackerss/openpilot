@@ -57,6 +57,121 @@ class LongDecision:
   log: str = ""
 
 
+class _CsaCanReader:
+  """Fail-safe Tesla CSA (Curve Speed Adaptation) road-curvature decoder.
+
+  Decodes UI_csaRoadCurvature off the raw 'can' socket using tesla_can.dbc. CSA
+  is route-independent (map-matched GPS) so it works without an active nav route.
+  tesla_can registers no checksum/counter state, so UI_csaRoadCurvCounter passes
+  through as a plain incrementing value -- ideal for liveness. We don't know which
+  bus carries it, so we build one parser per candidate bus and report whichever is
+  live (counter advancing). If cereal / CANParser / the DBC / the 'can' socket is
+  unavailable, ok stays False and every field reads as missing -- the rest of LONG
+  is completely unaffected.
+  """
+  DBC_NAME = "tesla_can"
+  BUSES = (0, 1, 2)
+  MESSAGES = [("UI_csaRoadCurvature", 0)]
+
+  def __init__(self) -> None:
+    self.ok = False
+    self.err = ""
+    self._parsers: dict = {}
+    self._sock = None
+    self._capnp_to_list = None
+    self._last_counter: dict = {}
+    try:
+      from opendbc.can.parser import CANParser
+      try:
+        from openpilot.selfdrive.pandad import can_capnp_to_list
+      except Exception:
+        from selfdrive.pandad import can_capnp_to_list  # type: ignore
+      self._capnp_to_list = can_capnp_to_list
+      for bus in self.BUSES:
+        try:
+          self._parsers[bus] = CANParser(self.DBC_NAME, list(self.MESSAGES), bus)
+        except Exception as exc:
+          self.err = f"{self.err} bus{bus}:{exc!r}".strip()
+      self._sock = messaging.sub_sock("can", conflate=False)
+      self.ok = bool(self._parsers) and self._sock is not None
+    except Exception as exc:
+      self.err = repr(exc)
+      self.ok = False
+
+  def update(self) -> None:
+    if not self.ok or self._sock is None or self._capnp_to_list is None:
+      return
+    try:
+      raw = messaging.drain_sock_raw(self._sock)
+      if not raw:
+        return
+      can_list = self._capnp_to_list(raw)
+      for cp in self._parsers.values():
+        try:
+          cp.update(can_list)
+        except Exception:
+          pass
+    except Exception:
+      pass
+
+  def _read(self, cp, sig: str) -> Optional[float]:
+    try:
+      v = float(cp.vl["UI_csaRoadCurvature"][sig])
+    except Exception:
+      return None
+    return v if math.isfinite(v) else None
+
+  def _bus_counter(self, bus: int) -> int:
+    cp = self._parsers.get(bus)
+    if cp is None:
+      return -1
+    v = self._read(cp, "UI_csaRoadCurvCounter")
+    return int(v) if v is not None else -1
+
+  def sample(self) -> dict:
+    """Pick the live bus and return {ok, advancing, bus, c2, range_m, counter}.
+
+    advancing is True only when a bus counter changed since the previous sample,
+    which is the freshness gate the LONG arbitration relies on.
+    """
+    out = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
+    if not self.ok:
+      return out
+    out["ok"] = True
+
+    best_bus = -1
+    best_advancing = False
+    nonzero_bus = -1
+    for bus in self.BUSES:
+      ctr = self._bus_counter(bus)
+      last = self._last_counter.get(bus, -1)
+      if ctr >= 0:
+        if last >= 0 and ctr != last and best_bus < 0:
+          best_bus = bus
+          best_advancing = True
+        if ctr > 0 and nonzero_bus < 0:
+          nonzero_bus = bus
+        self._last_counter[bus] = ctr
+    if best_bus < 0:
+      best_bus = nonzero_bus
+      best_advancing = False
+    if best_bus < 0:
+      return out
+
+    cp = self._parsers.get(best_bus)
+    if cp is None:
+      return out
+    c2 = self._read(cp, "UI_csaRoadCurvC2")
+    rng = self._read(cp, "UI_csaRoadCurvRange")
+    ctr = self._read(cp, "UI_csaRoadCurvCounter")
+    out["bus"] = int(best_bus)
+    out["advancing"] = bool(best_advancing)
+    out["c2"] = float(c2) if c2 is not None else 0.0
+    out["range_m"] = float(rng) if rng is not None else 0.0
+    out["counter"] = int(ctr) if ctr is not None else -1
+    return out
+
+
 class LongController:
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
@@ -301,6 +416,20 @@ class LongController:
   _CURVE_ACTIVE_ACCEL_BLOCK_MARGIN_MS = 0.35 * CV.MPH_TO_MS
   _CURVE_ACTIVE_ACCEL_BLOCK_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
 
+  # --- Live CSA (Curve Speed Adaptation) raw-CAN curve cap ------------------
+  # Tesla CSA road curvature is map-matched, route-independent, and arrives ~8s /
+  # ~110m ahead of a bend on this car. It is decoded straight off the raw 'can'
+  # socket because none of it is on cereal. This is the pre-emptive curve owner
+  # that fires even when planner/map/vision are still blind. Fail-safe: if the
+  # reader can't build, every gate below sees an unavailable sample and CSA does
+  # nothing. We gate on counter-advancing (freshness) + |C2| + lookahead, never
+  # on DAS_csaState (that signal is always 0 / dead on this car).
+  _CSA_ENABLE = True
+  _CSA_A_LAT_MS2 = 2.0                      # comfort lateral accel: v_cap = sqrt(a_lat/|C2|)
+  _CSA_MIN_ABS_C2 = 0.0045                  # 1/m; below this the bend is too gentle to act (R>~220m)
+  _CSA_MAX_LEAD_TIME_S = 9.0               # only act once the bend is within this many seconds ahead
+  _CSA_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS    # v_cap must be at least this far below reference
+
 
   _LEAD_CLOSE_CANCEL_MIN_SPEED_MS = 5.0 * CV.MPH_TO_MS
   _LEAD_CLOSE_CANCEL_MAX_SPEED_MS = 32.0 * CV.MPH_TO_MS
@@ -321,6 +450,14 @@ class LongController:
       cloudlog.warning("Tesla LONG_module: mapdOut not present, disabling map-based speed inputs")
 
     self._sm = messaging.SubMaster(services)
+
+    # Live CSA raw-CAN curve reader (fail-safe; never disturbs the rest of LONG).
+    self._csa_reader = _CsaCanReader()
+    self._csa_last_sample: dict = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
+    if self._csa_reader.ok:
+      cloudlog.info("Tesla LONG_module: CSA raw-CAN curve reader online")
+    else:
+      cloudlog.warning(f"Tesla LONG_module: CSA reader unavailable ({self._csa_reader.err or 'no parsers/socket'})")
 
     self._lp_target_last_ms: Optional[float] = None
     self._lp_target_near_ms: Optional[float] = None
@@ -1482,6 +1619,14 @@ class LongController:
       self._sm.update(0)
     except Exception:
       return
+
+    # Pump the live CSA raw-CAN curve reader (fail-safe; a failure here must never
+    # disturb plan/lead polling, so on any error we fall back to an unavailable sample).
+    try:
+      self._csa_reader.update()
+      self._csa_last_sample = self._csa_reader.sample()
+    except Exception:
+      self._csa_last_sample = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
 
     try:
       lp = self._sm["longitudinalPlan"]
@@ -2675,6 +2820,53 @@ class LongController:
     self._arbitration_curve_target_ms = 0.0
 
 
+  def _csa_curve_target_ms(self, *, reference_ms: float, v_ego_ms: float) -> tuple[Optional[float], str]:
+    """Live Tesla CSA raw-CAN curve cap (route-independent, map-matched curvature).
+
+    v_cap = sqrt(a_lat / |C2|), gated on counter-advancing freshness + |C2| + lookahead.
+    CSA arrives ~8s / ~110m ahead of a bend on this car, so it can own a curve cap even
+    when planner / mapd / vision are still blind. DAS_csaState is dead (always 0) on this
+    car, so it is never used as a gate -- counter advancing is the freshness signal.
+    Fail-safe: any missing / unavailable / non-finite sample returns (None, reason) and
+    the rest of LONG arbitration is completely unaffected.
+    """
+    if not bool(self._CSA_ENABLE):
+      return None, "csa_disabled"
+
+    sample = self._csa_last_sample
+    if not isinstance(sample, dict):
+      return None, "csa_no_sample"
+    if not bool(sample.get("ok", False)):
+      return None, "csa_unavailable"
+    # Freshness gate: only act when a bus counter advanced since the previous sample.
+    if not bool(sample.get("advancing", False)):
+      return None, "csa_stale"
+
+    c2 = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0))
+    if c2 < float(self._CSA_MIN_ABS_C2):
+      return None, "csa_too_gentle"
+
+    range_m = self._safe_finite_float(sample.get("range_m", 0.0), 0.0)
+    if range_m <= 0.0:
+      return None, "csa_no_range"
+    lead_time_s = float(range_m) / max(float(v_ego_ms), 0.1)
+    if lead_time_s > float(self._CSA_MAX_LEAD_TIME_S):
+      return None, "csa_too_far"
+
+    try:
+      v_cap_ms = math.sqrt(float(self._CSA_A_LAT_MS2) / float(c2))
+    except Exception:
+      return None, "csa_math_error"
+    if not math.isfinite(v_cap_ms):
+      return None, "csa_math_error"
+
+    if float(v_cap_ms) > (float(reference_ms) - float(self._CSA_MIN_DROP_MS)):
+      return None, "csa_drop_too_small"
+
+    v_cap_ms = max(float(v_cap_ms), float(self.MIN_CRUISE_SPEED_MS))
+    return float(v_cap_ms), "csa"
+
+
   def _arbitration_curve_candidate(
     self,
     *,
@@ -2709,7 +2901,17 @@ class LongController:
       steering_rate_deg=float(steering_rate_deg),
     )
 
-    if not (planner_curve_active or map_supports or vision_supports):
+    # Live Tesla CSA raw-CAN curve cap. Route-independent, map-matched curvature that
+    # arrives ~8s / ~110m ahead of a bend on this car, so it can own a curve even when
+    # planner / mapd-map / mapd-vision are all still blind. Fail-safe: an unavailable /
+    # stale / too-gentle / too-far sample returns (None, reason) and CSA does nothing.
+    csa_target_ms, csa_reason = self._csa_curve_target_ms(
+      reference_ms=float(reference_ms),
+      v_ego_ms=float(v_ego_ms),
+    )
+    csa_supports = csa_target_ms is not None
+
+    if not (planner_curve_active or map_supports or vision_supports or csa_supports):
       if bool(self._lat_limit_saturated) and float(v_ego_ms) > float(self._LAT_SAT_HARD_MIN_SPEED_MS):
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -2744,7 +2946,7 @@ class LongController:
       )
     )
 
-    if map_only_low and not (planner_curve_active or steer_busy or bool(self._lat_limit_saturated) or bool(live_lead_context)):
+    if map_only_low and not (planner_curve_active or steer_busy or bool(self._lat_limit_saturated) or bool(live_lead_context) or csa_supports):
       return None, "map_only_unconfirmed"
 
     curve_candidates: list[float] = []
@@ -2766,6 +2968,13 @@ class LongController:
       owner_parts.append("mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd")
 
     if not curve_candidates:
+      if csa_supports:
+        csa_only_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(csa_target_ms))
+        if float(csa_only_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
+          return None, "curve_too_small"
+        if float(csa_only_ms) > (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS)) and not steer_busy:
+          return None, "curve_not_urgent"
+        return float(csa_only_ms), "csa"
       return None, "no_curve_target"
 
     target_ms = float(min(curve_candidates))
@@ -2777,6 +2986,9 @@ class LongController:
     ):
       comfort_bias_ms += float(self._CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS)
     target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
+    if csa_supports:
+      target_ms = min(float(target_ms), float(csa_target_ms))
+      owner_parts.append("csa")
     if float(target_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
       return None, "curve_too_small"
     if float(target_ms) > (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS)) and not steer_busy:
