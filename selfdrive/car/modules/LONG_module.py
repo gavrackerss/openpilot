@@ -313,7 +313,7 @@ class LongController:
   _PLANNER_ONLY_CURVE_RELEASE_STEER_DEG = 7.0
   _PLANNER_ONLY_CURVE_RELEASE_RATE_DEG = 8.0
   _PLANNER_ONLY_CURVE_RELEASE_VISION_MARGIN_MS = 7.0 * CV.MPH_TO_MS
-  _CURVE_ACCEL_BLOCK_STEER_DEG = 2.8
+  _CURVE_ACCEL_BLOCK_STEER_DEG = 5.0       # raised from 2.8: gentle lane-keeping/shallow bends no longer count as "steer busy" and pin SET down until the wheel is dead straight (revert to 2.8 to restore)
   _CURVE_ACCEL_BLOCK_STEER_RATE_DEG = 9.0
   _CURVE_ACCEL_BLOCK_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _CURVE_ACCEL_BLOCK_EGO_MARGIN_MS = 0.5 * CV.MPH_TO_MS
@@ -385,9 +385,9 @@ class LongController:
   _ARBITRATION_CURVE_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EGO_DROP_MS = 1.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EXIT_RELEASE_MS = 650
+  _ARBITRATION_CURVE_EXIT_RELEASE_MS = 350   # lowered from 650: jump to CRUISE_SYNC (SET restored to max(set,v_ego)) sooner after a curve/roundabout exit (revert to 650 to restore)
   _ARBITRATION_CURVE_ENTRY_STEP_MS = 4.0 * CV.MPH_TO_MS
-  _ARBITRATION_CURVE_EXIT_STEP_MS = 3.6 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_EXIT_STEP_MS = 4.5 * CV.MPH_TO_MS   # raised from 3.6: quicker ramp-back of the curve target toward reference on exit (revert to 3.6 to restore)
   _FOLLOW_GAP_DEFAULT_S = 2.35
   _FOLLOW_GAP_MIN_S = 1.25
   _FOLLOW_GAP_MAX_S = 3.35
@@ -432,6 +432,44 @@ class LongController:
   _CSA_MIN_ABS_C2 = 0.0045                  # 1/m; below this the bend is too gentle to act (R>~220m)
   _CSA_MAX_LEAD_TIME_S = 9.0               # only act once the bend is within this many seconds ahead
   _CSA_MIN_DROP_MS = 3.0 * CV.MPH_TO_MS    # v_cap must be at least this far below reference
+
+  # Vision-off CSA cross-check (point 2). With mapd vision disabled, mapd-map is a trusted
+  # standalone authority and the map_only_unconfirmed veto is skipped, so a bogus mapd-map
+  # reading can slow us on a genuinely straight road. CSA (independent map-matched curvature)
+  # now plays the disagreement role vision used to: a CONFIDENTLY FLAT CSA reading releases a
+  # standalone mapd-map cap. Strictly asymmetric -- CSA may only veto when it is fresh+advancing,
+  # FAR-SIGHTED (range >= _CSA_CONFIDENT_FLAT_MIN_RANGE_M), and reads an unambiguously straight
+  # road (|C2| < _CSA_CONFIDENT_FLAT_C2). A short-range / silent / stale / not-advancing CSA
+  # returns False from _csa_confidently_flat and NEVER vetoes, so a late CSA (the 15:56 case:
+  # roadRange 30-38m vs ~110m design) cannot release a map cap that is correctly catching a bend
+  # CSA has not locked yet. Fail-safe + trivial revert: set _CSA_MAP_DISAGREE_VETO False.
+  _CSA_MAP_DISAGREE_VETO = True
+  _CSA_CONFIDENT_FLAT_C2 = 0.00225          # 1/m; 0.5 * _CSA_MIN_ABS_C2 (R > ~440m = unambiguously straight)
+  _CSA_CONFIDENT_FLAT_MIN_RANGE_M = 100.0   # CSA must be far-sighted (near design lookahead) before "flat" is trusted to veto
+
+  # Named-road roundabout cap. The Tesla posts NO native roundabout/junction flag over CAN
+  # when the nav route is inactive (the UI_csaOfframpCurvature channel stays zero and
+  # DAS_csaState is dead on this car), but the offline OSM map (mapdOut) names the way it has
+  # matched - e.g. "Cornaway Lane Roundabout". This is a map-derived backstop to CSA: while a
+  # roundabout-named way is published it holds the cruise SET near roundabout speed so a
+  # momentary near-zero CSA curvature reading at an apex transition cannot let speed creep up
+  # mid-circulation. Fail-safe: no mapd / stale mapd / no roundabout name => no cap.
+  _ROUNDABOUT_ENABLE = True
+  _ROUNDABOUT_CAP_MS = 20.0 * CV.MPH_TO_MS   # circulation cap (floored at MIN_CRUISE_SPEED_MS ~17.1 mph)
+  _ROUNDABOUT_NAME_TOKEN = "roundabout"      # case-insensitive substring matched in mapd wayName / roadName
+
+  # --- mapd vision curve source disable -------------------------------------
+  # When False, the mapd visionCurveSpeed channel is dropped at ingestion and never
+  # reaches arbitration, so curve pre-emption runs on CSA + mapd-map only. On this car
+  # vision repeatedly disagreed with mapd-map on real bends (map saw the curve, vision
+  # read open road), which either softened the cap upward via comfort blending or tripped
+  # the map_only_unconfirmed veto -- releasing the slowdown. With vision off, mapd-map
+  # becomes a TRUSTED standalone curve authority: _arbitration_curve_candidate skips the
+  # map_only_unconfirmed veto and the comfort-bias upward softening (both keyed on a
+  # disagreeing vision source that no longer exists). CSA still leads via min() whenever it
+  # confirms; mapd-map only wins when its speed is lower (tight curve). Fail-safe + trivial
+  # revert: set True to restore the previous map+vision dual-source behavior unchanged.
+  _MAPD_VISION_ENABLE = False
 
 
   _LEAD_CLOSE_CANCEL_MIN_SPEED_MS = 5.0 * CV.MPH_TO_MS
@@ -483,6 +521,7 @@ class LongController:
     self._mapd_last_ns: int = 0
     self._posted_limit_drop_block_until_ms: int = 0
     self._mapd_comfort_bias_active: bool = False
+    self._roundabout_active: bool = False
 
     self._last_info_log_ms: int = 0
     self._enabled_since_ms: int = 0
@@ -1752,8 +1791,21 @@ class LongController:
           self._mapd_suggested_ms = suggested_ms if (math.isfinite(suggested_ms) and suggested_ms > 0.1) else None
           self._mapd_speed_limit_ms = fresh_speed_limit_ms if fresh_speed_limit_ms > 0.1 else None
           self._mapd_map_curve_ms = map_curve_ms if (math.isfinite(map_curve_ms) and map_curve_ms > 0.1) else None
-          self._mapd_vision_curve_ms = vision_curve_ms if (math.isfinite(vision_curve_ms) and vision_curve_ms > 0.1) else None
+          self._mapd_vision_curve_ms = vision_curve_ms if (bool(self._MAPD_VISION_ENABLE) and math.isfinite(vision_curve_ms) and vision_curve_ms > 0.1) else None
           self._mapd_last_ns = mono_ns
+
+          # Roundabout detection from the map-matched way name. mapd names the current way
+          # (wayName/roadName) even when the nav route is inactive; a "roundabout" token there
+          # is the only available roundabout identifier on this car. Re-evaluated every fresh
+          # packet, so leaving the roundabout clears it on the next non-roundabout name; mapd
+          # going stale is handled by the freshness check in _roundabout_curve_target_ms.
+          try:
+            _name_blob = ""
+            for _attr in ("wayName", "roadName"):
+              _name_blob += " " + str(getattr(mo, _attr, "") or "")
+            self._roundabout_active = bool(self._ROUNDABOUT_NAME_TOKEN in _name_blob.lower())
+          except Exception:
+            self._roundabout_active = False
     except Exception:
       pass
 
@@ -2040,6 +2092,14 @@ class LongController:
     steer_busy = self._steer_busy_for_curve(current_angle_deg=current_angle_deg, steering_rate_deg=steering_rate_deg)
     map_only_without_confirmation = bool(map_owned_low and not (vision_supports or steer_busy or bool(self._lat_limit_saturated)))
     if map_only_without_confirmation:
+      # Vision-off CSA cross-check (point 2): force-entry runs ahead of the arbitration veto,
+      # so without this guard it would re-apply the very map-only cap _arbitration_curve_candidate
+      # released on a confidently-flat road. A fresh+advancing+far-sighted CSA reading that sees a
+      # straight road vetoes the map-only force-entry too. Same strict asymmetry: short-range /
+      # silent / stale CSA returns False and never blocks force-entry (late-CSA tight curves stand).
+      if (not self._MAPD_VISION_ENABLE) and self._csa_confidently_flat():
+        self._curve_force_entry_candidate_since_ms = 0
+        return None, ""
       strong_map_only_hint = bool(
         raw_map_ms is not None
         and float(v_ego_ms) >= float(self._MAP_ONLY_EARLY_ENTRY_MIN_SPEED_MS)
@@ -2863,11 +2923,71 @@ class LongController:
     if not math.isfinite(v_cap_ms):
       return None, "csa_math_error"
 
-    if float(v_cap_ms) > (float(reference_ms) - float(self._CSA_MIN_DROP_MS)):
+    effective_ms = max(float(reference_ms), float(v_ego_ms))
+    if float(v_cap_ms) > (float(effective_ms) - float(self._CSA_MIN_DROP_MS)):
       return None, "csa_drop_too_small"
 
     v_cap_ms = max(float(v_cap_ms), float(self.MIN_CRUISE_SPEED_MS))
     return float(v_cap_ms), "csa"
+
+
+  def _csa_confidently_flat(self) -> bool:
+    """True only when a FRESH, advancing, FAR-SIGHTED CSA sample reads the road ahead as
+    unambiguously straight. Used as the vision-style disagreement cross-check (point 2): when
+    mapd vision is disabled and mapd-map alone wants a cap, a confidently-flat CSA reading
+    releases the (likely bogus) cap.
+
+    Strictly asymmetric by design -- a CSA sample that is unavailable / stale / not-advancing /
+    short-range / non-finite returns False and NEVER vetoes. The range gate is the key guard:
+    a short-range CSA (e.g. the 15:56 failure, roadRange 30-38m vs ~110m design) is only
+    looking a few car-lengths ahead, so its "flat" reading says nothing about a bend further on
+    -- in that state we must keep trusting mapd-map, not release its cap."""
+    if not bool(self._CSA_ENABLE):
+      return False
+    if not bool(self._CSA_MAP_DISAGREE_VETO):
+      return False
+    sample = self._csa_last_sample
+    if not isinstance(sample, dict):
+      return False
+    if not bool(sample.get("ok", False)):
+      return False
+    if not bool(sample.get("advancing", False)):
+      return False
+    range_m = self._safe_finite_float(sample.get("range_m", 0.0), 0.0)
+    if not math.isfinite(range_m) or float(range_m) < float(self._CSA_CONFIDENT_FLAT_MIN_RANGE_M):
+      return False
+    c2 = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0))
+    if not math.isfinite(c2):
+      return False
+    return bool(c2 < float(self._CSA_CONFIDENT_FLAT_C2))
+
+
+  def _roundabout_curve_target_ms(
+    self,
+    *,
+    now_ns: int,
+    reference_ms: float,
+    v_ego_ms: float,
+  ) -> tuple[Optional[float], str]:
+    """Map-derived roundabout cap. Active only while a fresh mapd packet names the matched way
+    a roundabout. Auto-releases when mapd goes stale (same freshness window the curve sources
+    use) or publishes a non-roundabout name. Behaves like CSA: pre-emptive (not vetoed by the
+    v_ego urgency gate) and never softened upward, but it can only LOWER the curve target via
+    min(). Fail-safe: any missing prerequisite returns (None, reason) and the cap does nothing."""
+    if not self._ROUNDABOUT_ENABLE:
+      return None, "roundabout_disabled"
+    if not bool(self._roundabout_active):
+      return None, "roundabout_none"
+    if int(self._mapd_last_ns) <= 0:
+      return None, "roundabout_no_mapd"
+    if (int(now_ns) - int(self._mapd_last_ns)) >= int(self._MAPD_FRESH_NS):
+      return None, "roundabout_stale"
+
+    cap_ms = max(float(self._ROUNDABOUT_CAP_MS), float(self.MIN_CRUISE_SPEED_MS))
+    effective_ms = max(float(reference_ms), float(v_ego_ms))
+    if float(cap_ms) > (float(effective_ms) - float(self._CSA_MIN_DROP_MS)):
+      return None, "roundabout_drop_too_small"
+    return float(cap_ms), "roundabout"
 
 
   def _arbitration_curve_candidate(
@@ -2914,7 +3034,17 @@ class LongController:
     )
     csa_supports = csa_target_ms is not None
 
-    if not (planner_curve_active or map_supports or vision_supports or csa_supports):
+    # Map-derived roundabout backstop. Independent of CSA/map/vision/planner: a named roundabout
+    # can open and hold a curve cap on its own (e.g. when CSA momentarily reads near-zero
+    # curvature at an apex transition). Fail-safe: no mapd / stale / no name => (None, reason).
+    roundabout_target_ms, roundabout_reason = self._roundabout_curve_target_ms(
+      now_ns=int(now_ns),
+      reference_ms=float(reference_ms),
+      v_ego_ms=float(v_ego_ms),
+    )
+    roundabout_supports = roundabout_target_ms is not None
+
+    if not (planner_curve_active or map_supports or vision_supports or csa_supports or roundabout_supports):
       if bool(self._lat_limit_saturated) and float(v_ego_ms) > float(self._LAT_SAT_HARD_MIN_SPEED_MS):
         lat_target_ms = max(
           float(self.MIN_CRUISE_SPEED_MS),
@@ -2937,7 +3067,7 @@ class LongController:
         and abs(float(steering_rate_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_RATE_DEG)
       )
       generic_plan_source = str(self._lp_source or "").lower() in ("", "cruise", "e2e")
-      if generic_plan_source and vision_clear and straightish and not bool(self._lat_limit_saturated):
+      if generic_plan_source and vision_clear and straightish and not bool(self._lat_limit_saturated) and not csa_supports and not roundabout_supports:
         return None, "planner_suggested_unconfirmed"
 
     map_only_low = bool(
@@ -2949,11 +3079,42 @@ class LongController:
       )
     )
 
-    if map_only_low and not (planner_curve_active or steer_busy or bool(self._lat_limit_saturated) or bool(live_lead_context) or csa_supports):
+    if self._MAPD_VISION_ENABLE and map_only_low and not (planner_curve_active or steer_busy or bool(self._lat_limit_saturated) or bool(live_lead_context) or csa_supports or roundabout_supports):
       return None, "map_only_unconfirmed"
+
+    # Vision-off CSA cross-check (point 2): with mapd vision disabled the map_only_unconfirmed
+    # veto above is skipped, so mapd-map flows unchecked. To stop a bogus mapd-map cap from
+    # slowing us on a genuinely straight road, let a confidently-flat, far-sighted CSA reading
+    # play the disagreement role vision used to. Only fires when mapd-map alone wants the cap,
+    # nothing else confirms it, and CSA (csa_supports False here -- it sees no bend) is
+    # confidently flat. _csa_confidently_flat is strictly asymmetric: a short-range / silent /
+    # stale CSA returns False and never releases, preserving the late-CSA tight-curve case.
+    if (
+      not self._MAPD_VISION_ENABLE
+      and map_only_low
+      and self._csa_confidently_flat()
+      and not (planner_curve_active or steer_busy or bool(self._lat_limit_saturated) or bool(live_lead_context) or csa_supports or roundabout_supports)
+    ):
+      return None, "map_only_csa_disagrees"
 
     curve_candidates: list[float] = []
     owner_parts: list[str] = []
+
+    # Option A: CSA is the primary curve authority. When CSA confirms a bend it leads the
+    # candidate set; planner / mapd-map / mapd-vision can only LOWER the target via min().
+    # CSA is route-independent and arrives ~8s/~110m ahead, so it must not be out-voted or
+    # vetoed by the v_ego-relative urgency gate that suppressed pre-emptive caps.
+    csa_primary = bool(csa_supports)
+    if csa_primary:
+      curve_candidates.append(float(csa_target_ms))
+      owner_parts.append("csa")
+
+    # Roundabout cap rides alongside CSA as a geometric authority: it only LOWERS via min(),
+    # is never softened upward, and is exempt from the v_ego urgency veto (slowing for a
+    # roundabout must be pre-emptive, before circulation).
+    if roundabout_supports:
+      curve_candidates.append(float(roundabout_target_ms))
+      owner_parts.append("roundabout")
 
     if planner_curve_active:
       curve_candidates.append(float(planner_near_ms))
@@ -2971,30 +3132,33 @@ class LongController:
       owner_parts.append("mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd")
 
     if not curve_candidates:
-      if csa_supports:
-        csa_only_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(csa_target_ms))
-        if float(csa_only_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
-          return None, "curve_too_small"
-        if float(csa_only_ms) > (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS)) and not steer_busy:
-          return None, "curve_not_urgent"
-        return float(csa_only_ms), "csa"
       return None, "no_curve_target"
 
     target_ms = float(min(curve_candidates))
-    comfort_bias_ms = float(self._CURVE_CONFIRMED_COMFORT_BIAS_MS)
-    if (
-      raw_map_ms is not None
-      and raw_vision_ms is not None
-      and float(raw_vision_ms) > (float(raw_map_ms) + float(self._ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS))
-    ):
-      comfort_bias_ms += float(self._CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS)
-    target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
-    if csa_supports:
-      target_ms = min(float(target_ms), float(csa_target_ms))
-      owner_parts.append("csa")
+    # Comfort bias only applies to map/vision-led curves. A CSA-owned curve already encodes
+    # its own comfort lateral-accel margin via v_cap = sqrt(a_lat/|C2|), and a roundabout cap is
+    # already a deliberate circulation speed, so neither is softened upward. With mapd vision
+    # disabled (_MAPD_VISION_ENABLE False) mapd-map is a trusted standalone curve authority, so
+    # the upward comfort softening -- which only existed to hedge a disagreeing vision source --
+    # is skipped too; otherwise it would loosen every map-only cap and re-open the released-cap bug.
+    if not (csa_primary or roundabout_supports or not self._MAPD_VISION_ENABLE):
+      comfort_bias_ms = float(self._CURVE_CONFIRMED_COMFORT_BIAS_MS)
+      if (
+        raw_map_ms is not None
+        and raw_vision_ms is not None
+        and float(raw_vision_ms) > (float(raw_map_ms) + float(self._ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS))
+      ):
+        comfort_bias_ms += float(self._CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS)
+      target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
+
+    target_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(target_ms))
+
     if float(target_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
       return None, "curve_too_small"
-    if float(target_ms) > (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS)) and not steer_busy:
+    # The v_ego-relative urgency veto only applies to map/vision/planner-led curves. A
+    # CSA-owned cap is intentionally pre-emptive (acts while still fast and approaching the
+    # bend), so it must not be suppressed just because v_ego has not dropped yet.
+    if (not csa_primary) and (not roundabout_supports) and float(target_ms) > (float(v_ego_ms) - float(self._ARBITRATION_CURVE_EGO_DROP_MS)) and not steer_busy:
       return None, "curve_not_urgent"
 
     return float(target_ms), "+".join(owner_parts) if owner_parts else "curve"

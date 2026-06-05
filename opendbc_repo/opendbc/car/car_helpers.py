@@ -80,6 +80,22 @@ def can_fingerprint(can_recv: CanRecvCallable) -> tuple[str | None, dict[int, di
   return car_fingerprint, finger
 
 
+def _xnor_fingerprint_log_summary(finger: dict[int, dict], max_preview: int = 24) -> dict:
+  """XNOR_V155_LOG_CAP_WAKE_GATE: keep fingerprint logs below msgq limits."""
+  summary = {}
+  for bus, msgs in sorted(finger.items()):
+    try:
+      addrs = sorted(int(addr) for addr in msgs.keys())
+    except Exception:
+      addrs = []
+    summary[int(bus)] = {
+      "count": len(addrs),
+      "preview": [hex(addr) for addr in addrs[:max_preview]],
+      "truncated": len(addrs) > max_preview,
+    }
+  return summary
+
+
 # **** for use live only ****
 def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback,
                 cached_params: CarParamsT | None) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
@@ -143,7 +159,7 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
 
   carlog.error({"event": "fingerprinted", "car_fingerprint": str(car_fingerprint), "source": source, "fuzzy": not exact_match,
                 "cached": cached, "fw_count": len(car_fw), "ecu_responses": list(ecu_rx_addrs), "vin_rx_addr": vin_rx_addr,
-                "vin_rx_bus": vin_rx_bus, "fingerprints": repr(finger), "fw_query_time": fw_query_time})
+                "vin_rx_bus": vin_rx_bus, "fingerprint_summary": _xnor_fingerprint_log_summary(finger), "fw_query_time": fw_query_time})
 
   return car_fingerprint, finger, vin, car_fw, source, exact_match
 
@@ -153,7 +169,7 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
   candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(can_recv, can_send, set_obd_multiplexing, cached_params)
 
   if candidate is None:
-    carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
+    carlog.error({"event": "car doesn't match any fingerprints", "fingerprint_summary": _xnor_fingerprint_log_summary(fingerprints)})
     candidate = "MOCK"
 
   CarInterface = interfaces[candidate]

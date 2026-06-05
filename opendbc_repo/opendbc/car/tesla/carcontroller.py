@@ -388,38 +388,11 @@ class CarController(CarControllerBase):
     return max(0.0, limit_ms * (CV.MS_TO_KPH if units == "KPH" else CV.MS_TO_MPH))
 
   def _process_hud_status(self, CC, CS, can_sends, human_control: bool) -> None:
-    enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    owner_enabled = bool(self._cached_autopilot_disabled)
-    engage_edge = enabled and not bool(getattr(self, "_hud_prev_enabled", False))
-    self._hud_prev_enabled = bool(enabled)
-
-    if (not owner_enabled) or ((self.frame % 10) != 0 and not engage_edge):
-      return
-
-    bus = int(CANBUS.party)
-    counter = (int(self.frame) // 10) % 16
-    speed_limit_uom = self._hud_speed_limit_uom(CS)
-    hands_on_state = 0
-    alca_state = self._hud_alca_state(CS) if enabled else 1
-    cs_out = getattr(CS, "out", None)
-
-    try:
-      can_sends.append(self._body_controls_can.create_legacy_hud_status(
-        enabled,
-        speed_limit_uom,
-        bus,
-        counter,
-        hands_on_state=hands_on_state,
-        alca_state=alca_state,
-        blind_spot_left=bool(getattr(cs_out, "leftBlindspot", False)),
-        blind_spot_right=bool(getattr(cs_out, "rightBlindspot", False)),
-      ))
-      can_sends.append(self._body_controls_can.create_legacy_hud_status2(speed_limit_uom, bus, counter))
-      can_sends.append(self._body_controls_can.create_legacy_hud_warning_matrix0(bus))
-      can_sends.append(self._body_controls_can.create_legacy_hud_warning_matrix3(bus))
-      can_sends.append(self._body_controls_can.create_legacy_hud_warning_matrix1(bus))
-    except Exception as exc:
-      self._diag_log(f"[XNOR_CC_DIAG] hud_cache_feed_failed err={type(exc).__name__}:{exc}")
+    # Do not emit partial Tesla HUD status from userspace.
+    # This tree already forwards stock 0x399/0x389 from AP-side, and dual ownership causes
+    # IC oscillation (blue/white D), flashing speed-limit icons, and startup availability alerts.
+    self._hud_prev_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    return
 
 
 
