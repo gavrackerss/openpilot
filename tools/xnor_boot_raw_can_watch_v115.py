@@ -428,6 +428,44 @@ def compact_counts(counter: Counter[str], limit: int = 12) -> str:
   return ";".join(f"{k}:{v}" for k, v in counter.most_common(limit)) or "-"
 
 
+def warning_signature(item: dict[str, Any]) -> str:
+  decoded = item.get("decoded") or {}
+  interesting = {
+    key: decoded.get(key)
+    for key in (
+      "das_aeb_event",
+      "fcw",
+      "side_collision_avoid",
+      "side_collision_warning",
+      "long_collision_warning",
+      "pmm_obstacle_severity",
+      "pmm_radar_fault",
+      "pmm_sys_fault",
+      "pmm_camera_fault",
+      "activation_failure",
+      "stock_aeb",
+      "steer_temp",
+      "steer_perm",
+    )
+    if key in decoded
+  }
+  if item.get("type") == "carState":
+    interesting = {
+      key: item.get(key)
+      for key in ("stock_aeb", "steer_temp", "steer_perm", "cruise_available", "gear")
+      if key in item
+    }
+  return f"{item.get('type')}:{item.get('addr_hex', '')}:{item.get('src', '')}:{json.dumps(interesting, sort_keys=True)}"
+
+
+def should_emit_rate_limited(last_emit: dict[str, float], key: str, now_t: float, interval_sec: float) -> bool:
+  previous = last_emit.get(key)
+  if previous is None or (now_t - previous) >= interval_sec:
+    last_emit[key] = now_t
+    return True
+  return False
+
+
 def should_log_can(addr: int, args: argparse.Namespace, targets: dict[int, str]) -> bool:
   if args.raw_can_mode == "all":
     return True
@@ -488,8 +526,10 @@ def run(args: argparse.Namespace) -> int:
   txblk_events = 0
   warning_events = 0
   first_fault_temp_t: float | None = None
+  last_text_emit: dict[str, float] = {}
 
   text.write("# xnor boot raw CAN watcher v115")
+  text.write("# XNOR_V161_QUIET_BOOT_WATCHER active")
   text.write(f"# started={datetime.now(timezone.utc).isoformat()}")
   text.write(f"# duration={args.duration}s raw_can_mode={args.raw_can_mode} all_sendcan=True")
   text.write(f"# caps=jsonl_uncompressed<{args.max_jsonl_mb}MiB txt<{args.max_txt_kb}KiB keep_runs={args.keep_runs}")
@@ -502,7 +542,7 @@ def run(args: argparse.Namespace) -> int:
 
   jsonl.write({
     "type": "header",
-    "version": "v115",
+    "version": "v115-v161-quiet",
     "started": datetime.now(timezone.utc).isoformat(),
     "args": vars(args),
     "targets": {f"0x{k:X}": v for k, v in sorted(targets.items())},
@@ -540,10 +580,12 @@ def run(args: argparse.Namespace) -> int:
             if service == "sendcan":
               recent_sendcan.append(item)
               counts[f"sendcan:{item['addr_hex']}@{item['src']}"] += 1
-              jsonl.write(item)
+              if args.log_sendcan_records or (item.get("warning_like") and args.log_warning_records):
+                jsonl.write(item)
             elif should_log_can(addr, args, targets):
               counts[f"can:{item['addr_hex']}@{item['src']}"] += 1
-              jsonl.write(item)
+              if args.log_can_records:
+                jsonl.write(item)
             else:
               dropped_summary["can_not_target"] += 1
               continue
@@ -551,10 +593,14 @@ def run(args: argparse.Namespace) -> int:
             if item.get("warning_like"):
               warning_events += 1
               warning_counts[f"{service}:{item['addr_hex']}@{item['src']}"] += 1
-              text.write(
-                f"{service.upper()}_WARNING t={rel_t:.3f} src={item['src']} addr={item['addr_hex']} "
-                f"dat={item['dat']} name={item.get('name','')} decoded={item.get('decoded',{})}"
-              )
+              sig = f"{service}:{warning_signature(item)}"
+              if should_emit_rate_limited(last_text_emit, sig, rel_t, float(args.text_warning_rate_sec)):
+                if args.log_warning_records:
+                  jsonl.write(item)
+                text.write(
+                  f"{service.upper()}_WARNING t={rel_t:.3f} src={item['src']} addr={item['addr_hex']} "
+                  f"dat={item['dat']} name={item.get('name','')} decoded={item.get('decoded',{})}"
+                )
 
         elif service == "pandaStates":
           for idx, ps in enumerate(list(getattr(evt, "pandaStates", []))):
@@ -603,8 +649,11 @@ def run(args: argparse.Namespace) -> int:
             if is_warning_like(last_car):
               warning_events += 1
               warning_counts["carState"] += 1
-              text.write(f"CARSTATE_WARNING t={rel_t:.3f} data={last_car}")
-              jsonl.write(last_car)
+              sig = warning_signature(last_car)
+              if should_emit_rate_limited(last_text_emit, sig, rel_t, float(args.text_carstate_rate_sec)):
+                if args.log_warning_records:
+                  jsonl.write(last_car)
+                text.write(f"CARSTATE_WARNING t={rel_t:.3f} data={last_car}")
 
         elif service == "controlsState":
           ctrl = getattr(evt, "controlsState", None)
@@ -637,7 +686,7 @@ def run(args: argparse.Namespace) -> int:
       time.sleep(float(args.idle_sleep))
 
   summary = {
-    "version": "v115",
+    "version": "v115-v161-quiet",
     "finished": datetime.now(timezone.utc).isoformat(),
     "duration_sec": round(time.monotonic() - start, 3),
     "txt": str(files.txt),
@@ -683,9 +732,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--raw-can-mode", choices=("targeted", "all"), default="targeted",
                       help="targeted logs only AEB/HUD/EPAS incoming CAN; all logs every incoming CAN frame.")
   parser.add_argument("--extra-addr", default="", help="Comma-separated extra incoming CAN addresses, e.g. 0x123,0x456.")
-  parser.add_argument("--max-jsonl-mb", type=float, default=32.0,
+  parser.add_argument("--max-jsonl-mb", type=float, default=8.0,
                       help="Maximum uncompressed JSONL payload before dropping additional raw records.")
-  parser.add_argument("--max-txt-kb", type=float, default=768.0)
+  parser.add_argument("--max-txt-kb", type=float, default=256.0)
   parser.add_argument("--keep-runs", type=int, default=6)
   parser.add_argument("--txblk-window-sec", type=float, default=0.45)
   parser.add_argument("--recent-sendcan-max", type=int, default=10000)
@@ -693,7 +742,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--state-interval", type=float, default=0.5)
   parser.add_argument("--idle-sleep", type=float, default=0.01)
   parser.add_argument("--log-all-panda", action="store_true")
-  parser.add_argument("--quiet", action="store_true")
+  parser.add_argument("--log-can-records", action="store_true",
+                      help="Write every targeted incoming CAN frame to JSONL. Default keeps only counters/rate-limited warnings.")
+  parser.add_argument("--log-sendcan-records", action="store_true",
+                      help="Write every outgoing sendcan frame to JSONL. Default keeps only counters/recent tx-block correlation.")
+  parser.add_argument("--log-warning-records", action="store_true", default=True,
+                      help="Write rate-limited warning records to JSONL.")
+  parser.add_argument("--text-warning-rate-sec", type=float, default=1.0,
+                      help="Minimum seconds between repeated identical CAN warning text lines.")
+  parser.add_argument("--text-carstate-rate-sec", type=float, default=2.0,
+                      help="Minimum seconds between repeated identical carState warning text lines.")
+  parser.add_argument("--quiet", action="store_true", default=True,
+                      help="Do not print capture lines to stdout/stderr; capture files still receive summaries.")
+  parser.add_argument("--verbose", dest="quiet", action="store_false",
+                      help="Print capture lines while also writing files.")
   return parser
 
 
