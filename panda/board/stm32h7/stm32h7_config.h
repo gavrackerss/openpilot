@@ -23,7 +23,8 @@ separate IRQs for RX and TX.
 
 1 / ((29 bits / 0.5Mbps) + (23 bits / 2Mbps)) = 14388Hz
 */
-#define CAN_INTERRUPT_RATE 16000U
+// XNOR_V163_WAKE_AEB_EPAS_PANDA_HEADROOM: HW2 dual-panda wake bursts can exceed upstream interrupt-rate headroom.
+#define CAN_INTERRUPT_RATE 32000U
 
 #define MAX_LED_FADE 10240U
 
