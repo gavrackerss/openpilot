@@ -16,8 +16,7 @@
 #define BOOTLOADER_ADDRESS 0x1FFF0004U
 
 // Around (1Mbps / 8 bits/byte / 12 bytes per message)
-// XNOR_V163_WAKE_AEB_EPAS_PANDA_HEADROOM: HW2 dual-panda wake bursts can exceed upstream interrupt-rate headroom.
-#define CAN_INTERRUPT_RATE 24000U
+#define CAN_INTERRUPT_RATE 12000U
 
 #define MAX_LED_FADE 8192U
 
