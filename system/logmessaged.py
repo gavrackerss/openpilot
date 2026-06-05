@@ -7,6 +7,20 @@ from openpilot.common.logging_extra import SwagLogFileFormatter
 from openpilot.system.hardware.hw import Paths
 from openpilot.common.swaglog import get_file_handler
 
+XNOR_V163_LOGMESSAGED_MSGQ_PUBLISH_CAP = True
+MAX_PUBLISHED_LOG_BYTES = 16 * 1024
+
+
+def cap_record_for_msgq(record: str) -> str:
+  raw = record.encode("utf-8", errors="replace")
+  if len(raw) <= MAX_PUBLISHED_LOG_BYTES:
+    return record
+
+  suffix = f"\n...[truncated by XNOR_V163_LOGMESSAGED_MSGQ_PUBLISH_CAP original_bytes={len(raw)}]"
+  suffix_raw = suffix.encode("utf-8", errors="replace")
+  keep = max(0, MAX_PUBLISHED_LOG_BYTES - len(suffix_raw))
+  return raw[:keep].decode("utf-8", errors="replace") + suffix
+
 
 def main() -> NoReturn:
   log_handler = get_file_handler()
@@ -29,17 +43,14 @@ def main() -> NoReturn:
       if level >= log_level:
         log_handler.emit(record)
 
-      if len(record) > 2*1024*1024:
-        print("WARNING: log too big to publish", len(record))
-        print(record[:100])
-        continue
+      publish_record = cap_record_for_msgq(record)
 
       # then we publish them
-      msg = messaging.new_message(None, valid=True, logMessage=record)
+      msg = messaging.new_message(None, valid=True, logMessage=publish_record)
       log_message_sock.send(msg.to_bytes())
 
       if level >= 40:  # logging.ERROR
-        msg = messaging.new_message(None, valid=True, errorLogMessage=record)
+        msg = messaging.new_message(None, valid=True, errorLogMessage=publish_record)
         error_log_message_sock.send(msg.to_bytes())
   finally:
     sock.close()

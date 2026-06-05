@@ -101,6 +101,8 @@ class CarController(CarControllerBase):
 
     self._roadworks_main_pulls_ms: list[int] = []
     self._roadworks_toggle_latch_until_ms = 0
+    self._xnor_epas_gate_prev = False
+    self._xnor_epas_gate_last_log_ms = 0
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
@@ -224,14 +226,37 @@ class CarController(CarControllerBase):
       self._human_cruise_action_time_ms = self._now_ms()
     self._prev_cruise_buttons = btn
 
+
+  def _xnor_epas_wake_gate_active(self, CS) -> bool:
+    return bool(getattr(CS, "xnor_epas_wake_inhibit", False))
+
+  def _reset_xnor_transmit_latches(self) -> None:
+    self._op659_prev_btn = 0
+    self._stw_release_frame = -1
+    self._stw_sequence = []
+    self._lat_active_prev = False
+    self._steer_warmup_until_frame = -1
+    self._virtual_turn_prev = 0
+    self._virtual_turn_last_send_frame = -100000
+
   def _emit_internal_0x659(self, CS, can_sends) -> None:
     stalk_btn = int(getattr(CS, "cruise_buttons", 0) or 0)
     prev_btn = int(self._op659_prev_btn)
 
     main_edge = (stalk_btn == BTN_MAIN) and (prev_btn != BTN_MAIN)
     cancel_edge = (stalk_btn == BTN_CANCEL) and (prev_btn != BTN_CANCEL)
+    epas_gate = self._xnor_epas_wake_gate_active(CS)
 
-    self._op659_prev_btn = stalk_btn
+    if epas_gate and main_edge:
+      now_ms = int(self._now_ms())
+      if (now_ms - int(getattr(self, "_xnor_epas_gate_last_log_ms", 0))) >= 2000:
+        self._xnor_epas_gate_last_log_ms = now_ms
+        self._diag_log(
+          f"[XNOR_V164_EPAS_WAKE_RECOVERY] delayed_stalk_main reason={getattr(CS, 'xnor_epas_wake_block_reason', 'unknown')}"
+        )
+      main_edge = False
+    else:
+      self._op659_prev_btn = stalk_btn
 
     if (self.frame % 10 == 0) or main_edge or cancel_edge:
       buses = {int(CANBUS.party)}
@@ -516,6 +541,9 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
+    epas_wake_gate = self._xnor_epas_wake_gate_active(CS)
+    if epas_wake_gate:
+      self._reset_xnor_transmit_latches()
     self._emit_internal_0x659(CS, can_sends)
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)
@@ -539,18 +567,19 @@ class CarController(CarControllerBase):
         pass
     self._op_enabled_prev = bool(op_enabled)
 
-    self._process_stalk_actions(CS, can_sends)
-    self._process_body_controls(CS, can_sends)
+    if not epas_wake_gate:
+      self._process_stalk_actions(CS, can_sends)
+      self._process_body_controls(CS, can_sends)
+      self._speed_limit_sync(CC, CS, can_sends)
     self._process_hud_status(CC, CS, can_sends, human_control)
-
-    self._speed_limit_sync(CC, CS, can_sends)
 
     lat_active = (
       bool(CC.latActive) and
       autopilot_disabled and
       (not CS.out.cruiseState.standstill) and
       (not human_control) and
-      (not steer_inhibit)
+      (not steer_inhibit) and
+      (not epas_wake_gate)
     )
 
     # Steering warm-up: for a short window after lateral becomes active, command current wheel angle.
@@ -560,7 +589,7 @@ class CarController(CarControllerBase):
     self._lat_active_prev = bool(lat_active)
 
     # Steering (50Hz)
-    if self.frame % 2 == 0:
+    if (not epas_wake_gate) and (self.frame % 2 == 0):
       if (not lat_active) or human_control or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
         apply_angle = float(CS.out.steeringAngleDeg)
       else:
@@ -603,12 +632,12 @@ class CarController(CarControllerBase):
         )
 
     # EPS allow (legacy)
-    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
+    if (not epas_wake_gate) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
       counter = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
     # Longitudinal (optional)
-    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
+    if (not epas_wake_gate) and self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),

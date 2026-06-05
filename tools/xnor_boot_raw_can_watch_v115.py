@@ -4,10 +4,13 @@
 Bounded boot CAN/sendcan watcher for Tesla AEB HUD warning diagnosis.
 
 Runs early at boot, captures the first boot window, then exits.
+XNOR_V162_DIAGNOSTIC_ONLY_BOOT_WATCHER adds a disk-only, transition-focused diagnostic mode.
+
 Default capture policy is intentionally bounded:
   - all outgoing sendcan attempts
   - targeted incoming CAN frames for Tesla AEB/HUD/EPAS/ACC addresses
   - panda safety txBlk deltas with recent outgoing sendcan correlation
+  - EPAS/stalk/forward-path transition diagnostics
   - car/controls state snapshots
 """
 
@@ -81,6 +84,47 @@ WARNING_KEYS = {
 }
 
 
+XNOR_V162_DIAG_VERSION = "XNOR_V162_DIAGNOSTIC_ONLY_BOOT_WATCHER"
+XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY = "XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY"
+
+
+EPAS_EAC_STATUS_NAMES = {
+  0: "EAC_INHIBITED",
+  1: "EAC_AVAILABLE",
+  2: "EAC_ACTIVE",
+  3: "EAC_FAULT",
+  4: "SNA",
+  5: "EAC_LKA_ACTIVE_OR_RESERVED",
+  6: "EAC_ELK_AVAILABLE_OR_RESERVED",
+  7: "EAC_ELK_ACTIVE_OR_SNA",
+}
+
+EPAS_EAC_ERROR_NAMES = {
+  0: "EAC_ERROR_IDLE",
+  1: "EAC_ERROR_MIN_SPEED",
+  2: "EAC_ERROR_MAX_SPEED",
+  3: "EAC_ERROR_HANDS_ON",
+  4: "EAC_ERROR_TMP_FAULT",
+  5: "EAR_ERROR_MAX_STEER_DELTA",
+  6: "EAC_ERROR_HIGH_ANGLE_REQ",
+  7: "EAC_ERROR_HIGH_ANGLE_RATE_REQ",
+  8: "EAC_ERROR_HIGH_ANGLE_SAFETY",
+  9: "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY",
+  10: "EAC_ERROR_HIGH_MMOT_SAFETY",
+  11: "EAC_ERROR_HIGH_TORSION_SAFETY",
+  12: "EAC_ERROR_LOW_ASSIST",
+  13: "EAC_ERROR_PINION_VEL_DIFF",
+  14: "EAC_ERROR_EPB_OR_EXTERNAL_MONITOR_INHIBIT",
+  15: "SNA",
+}
+
+FORWARD_DIAG_ADDRS = {0x2BF, 0x389, 0x399, 0x329, 0x349, 0x369}
+STALK_DIAG_ADDRS = {0x45, 0x659}
+KEY_SENDCAN_ADDRS = {0x488, 0x2BF, 0x659, 0x27D, 0x389, 0x399, 0x329, 0x349, 0x369}
+EPAS_DIAG_ADDR = 0x370
+
+
+
 @dataclass(frozen=True)
 class OutputFiles:
   txt: Path
@@ -111,6 +155,14 @@ def enum_str(value: Any) -> str:
     return str(value).split(".")[-1]
   except Exception:
     return "-"
+
+
+def epas_eac_status_name(code: int) -> str:
+  return EPAS_EAC_STATUS_NAMES.get(code, f"UNKNOWN_{code}")
+
+
+def epas_eac_error_name(code: int) -> str:
+  return EPAS_EAC_ERROR_NAMES.get(code, f"UNKNOWN_{code}")
 
 
 def hex_bytes(dat: bytes) -> str:
@@ -211,11 +263,23 @@ def decode_frame(addr: int, dat: bytes) -> dict[str, Any]:
 
   elif addr == 0x370 and len(dat) >= 8:
     angle_raw = (((int(dat[4]) & 0x3F) << 8) | int(dat[5])) - 8192
+    eac_error_code = int(dat[2]) >> 4
+    eac_status = int(dat[6]) >> 5
+    steering_fault = (int(dat[0]) >> 5) & 0x01
+    steering_reduced = (int(dat[0]) >> 4) & 0x01
     d.update({
       "epas_internal_sas_deg": round(angle_raw * 0.1, 2),
       "hands_on_level": int(dat[4]) >> 6,
-      "eac_error_code": int(dat[2]) >> 4,
-      "eac_status": int(dat[6]) >> 5,
+      "eac_error_code": eac_error_code,
+      "eac_error_name": epas_eac_error_name(eac_error_code),
+      "eac_status": eac_status,
+      "eac_status_name": epas_eac_status_name(eac_status),
+      "epas_steering_fault_raw": steering_fault,
+      "epas_steering_reduced_raw": steering_reduced,
+      "raw_b0": int(dat[0]),
+      "raw_b2": int(dat[2]),
+      "raw_b4": int(dat[4]),
+      "raw_b6": int(dat[6]),
       "counter": int(dat[6]) & 0x0F,
       "checksum": int(dat[7]),
     })
@@ -424,6 +488,102 @@ def recent_sendcan_summary(recent: deque[dict[str, Any]], now_t: float, window_s
   }
 
 
+def key_sendcan_summary(recent: deque[dict[str, Any]], now_t: float, window_sec: float) -> dict[str, Any]:
+  raw = recent_sendcan_summary(recent, now_t, window_sec)
+  raw_counts = raw.get("counts", {})
+  raw_last = raw.get("last", {})
+  wanted = {f"0x{addr:X}" for addr in KEY_SENDCAN_ADDRS}
+  return {
+    "window_sec": window_sec,
+    "count": sum(v for k, v in raw_counts.items() if k.split("@", 1)[0] in wanted),
+    "counts": {k: v for k, v in raw_counts.items() if k.split("@", 1)[0] in wanted},
+    "last": {k: v for k, v in raw_last.items() if k.split("@", 1)[0] in wanted},
+  }
+
+
+def bus_counts_from_recent_can(recent_can: deque[dict[str, Any]], now_t: float, window_sec: float) -> dict[str, Any]:
+  cutoff = now_t - window_sec
+  rows = [r for r in recent_can if safe_float(r.get("t"), 0.0) >= cutoff]
+  counts = Counter(f"{r.get('addr_hex')}@{r.get('src')}" for r in rows)
+  buses = Counter(str(r.get("src")) for r in rows)
+  return {
+    "window_sec": window_sec,
+    "count": len(rows),
+    "counts": dict(counts),
+    "buses": dict(buses),
+  }
+
+
+def stable_can_signature(item: dict[str, Any]) -> str:
+  decoded = dict(item.get("decoded") or {})
+  decoded.pop("counter", None)
+  decoded.pop("checksum", None)
+  decoded.pop("das_counter", None)
+  return json.dumps({
+    "addr": item.get("addr"),
+    "src": item.get("src"),
+    "dat": item.get("dat"),
+    "decoded": decoded,
+  }, sort_keys=True, separators=(",", ":"))
+
+
+def epas_semantic_signature(item: dict[str, Any]) -> str:
+  decoded = item.get("decoded") or {}
+  return json.dumps({
+    "src": item.get("src"),
+    "status": decoded.get("eac_status"),
+    "error": decoded.get("eac_error_code"),
+    "hands": decoded.get("hands_on_level"),
+    "fault": decoded.get("epas_steering_fault_raw"),
+    "reduced": decoded.get("epas_steering_reduced_raw"),
+  }, sort_keys=True, separators=(",", ":"))
+
+
+def recent_related_frames(
+    recent_can: deque[dict[str, Any]],
+    item: dict[str, Any],
+    window_sec: float,
+    max_rows: int = 8,
+) -> list[dict[str, Any]]:
+  now_t = safe_float(item.get("t"), 0.0)
+  addr = item.get("addr")
+  rows = [
+    r for r in recent_can
+    if r.get("addr") == addr and abs(safe_float(r.get("t"), 0.0) - now_t) <= window_sec
+  ]
+  rows = rows[-max_rows:]
+  return [
+    {
+      "t": r.get("t"),
+      "src": r.get("src"),
+      "dat": r.get("dat"),
+      "decoded": r.get("decoded", {}),
+      "warning_like": int(bool(r.get("warning_like"))),
+    }
+    for r in rows
+  ]
+
+
+def make_diag_snapshot(
+    rel_t: float,
+    last_car: dict[str, Any],
+    last_ctrl: dict[str, Any],
+    last_pandas: dict[int, dict[str, Any]],
+    last_epas: dict[int, dict[str, Any]],
+    recent_sendcan: deque[dict[str, Any]],
+    recent_can: deque[dict[str, Any]],
+) -> dict[str, Any]:
+  return {
+    "t": round(rel_t, 6),
+    "carState": last_car,
+    "controlsState": last_ctrl,
+    "pandaStates": last_pandas,
+    "lastEpasBySrc": last_epas,
+    "recentKeySendcan": key_sendcan_summary(recent_sendcan, rel_t, 1.0),
+    "recentCanRates": bus_counts_from_recent_can(recent_can, rel_t, 1.0),
+  }
+
+
 def compact_counts(counter: Counter[str], limit: int = 12) -> str:
   return ";".join(f"{k}:{v}" for k, v in counter.most_common(limit)) or "-"
 
@@ -527,9 +687,19 @@ def run(args: argparse.Namespace) -> int:
   warning_events = 0
   first_fault_temp_t: float | None = None
   last_text_emit: dict[str, float] = {}
+  last_epas_by_src: dict[int, dict[str, Any]] = {}
+  last_epas_sig_by_src: dict[int, str] = {}
+  last_stalk_sig_by_addr_src: dict[tuple[int, int], str] = {}
+  last_car_diag_sig = ""
+  last_ctrl_diag_sig = ""
+  last_panda_fault_sig: dict[int, str] = {}
+  recent_can: deque[dict[str, Any]] = deque(maxlen=int(args.recent_can_max))
+  diag_events = 0
 
   text.write("# xnor boot raw CAN watcher v115")
   text.write("# XNOR_V161_QUIET_BOOT_WATCHER active")
+  text.write(f"# {XNOR_V162_DIAG_VERSION} active")
+  text.write(f"# {XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY} active")
   text.write(f"# started={datetime.now(timezone.utc).isoformat()}")
   text.write(f"# duration={args.duration}s raw_can_mode={args.raw_can_mode} all_sendcan=True")
   text.write(f"# caps=jsonl_uncompressed<{args.max_jsonl_mb}MiB txt<{args.max_txt_kb}KiB keep_runs={args.keep_runs}")
@@ -542,7 +712,7 @@ def run(args: argparse.Namespace) -> int:
 
   jsonl.write({
     "type": "header",
-    "version": "v115-v161-quiet",
+    "version": "v115-v163-semantic-diagnostic",
     "started": datetime.now(timezone.utc).isoformat(),
     "args": vars(args),
     "targets": {f"0x{k:X}": v for k, v in sorted(targets.items())},
@@ -576,6 +746,8 @@ def run(args: argparse.Namespace) -> int:
           for msg in list(getattr(evt, service, [])):
             addr = safe_int(getattr(msg, "address", 0))
             item = can_item(service, rel_t, msg, targets)
+            if service == "can" and addr in targets:
+              recent_can.append(item)
 
             if service == "sendcan":
               recent_sendcan.append(item)
@@ -602,6 +774,64 @@ def run(args: argparse.Namespace) -> int:
                   f"dat={item['dat']} name={item.get('name','')} decoded={item.get('decoded',{})}"
                 )
 
+            if service == "can" and addr == EPAS_DIAG_ADDR:
+              src = safe_int(item.get("src"), -1)
+              sig = epas_semantic_signature(item)
+              if sig != last_epas_sig_by_src.get(src) or args.log_all_epas:
+                prev = last_epas_by_src.get(src, {})
+                last_epas_by_src[src] = item
+                last_epas_sig_by_src[src] = sig
+                diag_events += 1
+                event = {
+                  "type": "diag_epas_transition",
+                  "event_version": XNOR_V162_DIAG_VERSION,
+                  "frame": item,
+                  "previous": prev,
+                  "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
+                }
+                jsonl.write(event)
+                dec = item.get("decoded", {})
+                text.write(
+                  f"DIAG_EPAS t={rel_t:.3f} src={src} status={dec.get('eac_status_name')}({dec.get('eac_status')}) "
+                  f"err={dec.get('eac_error_name')}({dec.get('eac_error_code')}) hands={dec.get('hands_on_level')} "
+                  f"faultRaw={dec.get('epas_steering_fault_raw')} reducedRaw={dec.get('epas_steering_reduced_raw')} dat={item.get('dat')} "
+                  f"steerTmp={last_car.get('steer_temp','-')} ctrlAllowed={','.join(str(p.get('controls_allowed')) for p in last_pandas.values()) or '-'}"
+                )
+
+            elif service == "can" and addr in STALK_DIAG_ADDRS:
+              src = safe_int(item.get("src"), -1)
+              sig = stable_can_signature(item)
+              decoded = item.get("decoded", {})
+              interesting = bool(decoded.get("stalk_main_edge_bit") or decoded.get("stalk_cancel_edge_bit") or decoded.get("stalk_button"))
+              key = (addr, src)
+              if interesting or sig != last_stalk_sig_by_addr_src.get(key):
+                last_stalk_sig_by_addr_src[key] = sig
+                diag_events += 1
+                event = {
+                  "type": "diag_stalk_or_internal_edge",
+                  "event_version": XNOR_V162_DIAG_VERSION,
+                  "frame": item,
+                  "interesting": int(interesting),
+                  "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
+                }
+                jsonl.write(event)
+                text.write(
+                  f"DIAG_STALK t={rel_t:.3f} src={src} addr={item.get('addr_hex')} dat={item.get('dat')} decoded={decoded} "
+                  f"ctrl={last_ctrl.get('enabled','-')}/{last_ctrl.get('active','-')} "
+                  f"pandas={';'.join(f'p{k}:allowed={v.get('controls_allowed')},fault={v.get('fault_status')}' for k,v in sorted(last_pandas.items())) or '-'}"
+                )
+
+            elif service == "can" and addr in FORWARD_DIAG_ADDRS and item.get("warning_like"):
+              diag_events += 1
+              event = {
+                "type": "diag_aeb_hud_warning_frame",
+                "event_version": XNOR_V162_DIAG_VERSION,
+                "frame": item,
+                "relatedSameAddr": recent_related_frames(recent_can, item, float(args.forward_probe_window_sec)),
+                "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
+              }
+              jsonl.write(event)
+
         elif service == "pandaStates":
           for idx, ps in enumerate(list(getattr(evt, "pandaStates", []))):
             pd = panda_item(idx, rel_t, ps)
@@ -611,33 +841,59 @@ def run(args: argparse.Namespace) -> int:
             last_txblk[idx] = txblk
             delta = txblk - prev if prev is not None else 0
 
+            fault_sig = json.dumps({
+              "fault_status": pd.get("fault_status"),
+              "faults": pd.get("faults", []),
+              "txBlk": txblk,
+              "allowed": pd.get("controls_allowed"),
+            }, sort_keys=True)
+            if fault_sig != last_panda_fault_sig.get(idx):
+              last_panda_fault_sig[idx] = fault_sig
+              diag_events += 1
+              jsonl.write({
+                "type": "diag_panda_fault_or_state_transition",
+                "event_version": XNOR_V162_DIAG_VERSION,
+                "panda": idx,
+                "panda_state": pd,
+                "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
+              })
+
             if pd.get("fault_status") == "faultTemp" and first_fault_temp_t is None:
               first_fault_temp_t = rel_t
               text.write(
                 f"FIRST_FAULT_TEMP t={rel_t:.3f} panda={idx} "
-                f"model={pd['safety_model']} allowed={pd['controls_allowed']} txBlk={txblk}"
+                f"model={pd['safety_model']} allowed={pd['controls_allowed']} txBlk={txblk} faults={','.join(pd.get('faults', []))}"
               )
 
             if delta > 0:
               txblk_events += 1
-              recent = recent_sendcan_summary(recent_sendcan, rel_t, float(args.txblk_window_sec))
-              event = {
-                "type": "txblk_delta",
-                "t": round(rel_t, 6),
-                "panda": idx,
-                "delta": delta,
-                "panda_state": pd,
-                "recent_sendcan": recent,
-                "carState": last_car,
-                "controlsState": last_ctrl,
-              }
-              jsonl.write(event)
               counts[f"txblk:p{idx}"] += delta
-              text.write(
-                f"TXBLK_DELTA t={rel_t:.3f} panda={idx} delta={delta} "
-                f"model={pd['safety_model']} allowed={pd['controls_allowed']} fault={pd['fault_status']} "
-                f"recent={compact_counts(Counter(recent['counts']))}"
+              txblk_sig = f"txblk:p{idx}"
+              emit_txblk = args.log_all_txblk_deltas or should_emit_rate_limited(
+                last_text_emit, txblk_sig, rel_t, float(args.txblk_text_rate_sec)
               )
+              if emit_txblk:
+                recent = recent_sendcan_summary(recent_sendcan, rel_t, float(args.txblk_window_sec))
+                event = {
+                  "type": "txblk_delta",
+                  "event_version": XNOR_V162_DIAG_VERSION,
+                  "t": round(rel_t, 6),
+                  "panda": idx,
+                  "delta": delta,
+                  "panda_state": pd,
+                  "recent_sendcan": recent,
+                  "key_recent_sendcan_1s": key_sendcan_summary(recent_sendcan, rel_t, 1.0),
+                  "recent_can_rates_1s": bus_counts_from_recent_can(recent_can, rel_t, 1.0),
+                  "carState": last_car,
+                  "controlsState": last_ctrl,
+                  "lastEpasBySrc": last_epas_by_src,
+                }
+                jsonl.write(event)
+                text.write(
+                  f"TXBLK_DELTA t={rel_t:.3f} panda={idx} delta={delta} "
+                  f"model={pd['safety_model']} allowed={pd['controls_allowed']} fault={pd['fault_status']} "
+                  f"faults={','.join(pd.get('faults', []))} recent={compact_counts(Counter(recent['counts']))}"
+                )
 
             if delta > 0 or args.log_all_panda:
               jsonl.write(pd)
@@ -646,6 +902,28 @@ def run(args: argparse.Namespace) -> int:
           cs = getattr(evt, "carState", None)
           if cs is not None:
             last_car = car_state_item(rel_t, cs)
+            car_diag_sig = json.dumps({
+              "steer_temp": last_car.get("steer_temp"),
+              "steer_perm": last_car.get("steer_perm"),
+              "stock_aeb": last_car.get("stock_aeb"),
+              "cruise_available": last_car.get("cruise_available"),
+              "cruise_enabled": last_car.get("cruise_enabled"),
+              "gear": last_car.get("gear"),
+            }, sort_keys=True)
+            if car_diag_sig != last_car_diag_sig:
+              last_car_diag_sig = car_diag_sig
+              diag_events += 1
+              jsonl.write({
+                "type": "diag_carstate_transition",
+                "event_version": XNOR_V162_DIAG_VERSION,
+                "carState": last_car,
+                "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
+              })
+              text.write(
+                f"DIAG_CARSTATE t={rel_t:.3f} steerTmp={last_car.get('steer_temp')} stockAeb={last_car.get('stock_aeb')} "
+                f"cruiseAvail={last_car.get('cruise_available')} gear={last_car.get('gear')} "
+                f"lastEpas={ {src: ep.get('decoded', {}) for src, ep in last_epas_by_src.items()} }"
+              )
             if is_warning_like(last_car):
               warning_events += 1
               warning_counts["carState"] += 1
@@ -659,6 +937,20 @@ def run(args: argparse.Namespace) -> int:
           ctrl = getattr(evt, "controlsState", None)
           if ctrl is not None:
             last_ctrl = controls_item(rel_t, ctrl)
+            ctrl_diag_sig = json.dumps({
+              "enabled": last_ctrl.get("enabled"),
+              "active": last_ctrl.get("active"),
+              "long_control_state": last_ctrl.get("long_control_state"),
+            }, sort_keys=True)
+            if ctrl_diag_sig != last_ctrl_diag_sig:
+              last_ctrl_diag_sig = ctrl_diag_sig
+              diag_events += 1
+              jsonl.write({
+                "type": "diag_controls_transition",
+                "event_version": XNOR_V162_DIAG_VERSION,
+                "controlsState": last_ctrl,
+                "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
+              })
 
     now = time.monotonic()
     rel_t = now - start
@@ -678,7 +970,7 @@ def run(args: argparse.Namespace) -> int:
     if now - last_summary >= float(args.summary_interval):
       last_summary = now
       text.write(
-        f"SUMMARY t={rel_t:.1f} txblk_events={txblk_events} warnings={warning_events} "
+        f"SUMMARY t={rel_t:.1f} txblk_events={txblk_events} warnings={warning_events} diag={diag_events} "
         f"top={compact_counts(counts, 10)} jsonl_drop={jsonl.dropped_records}"
       )
 
@@ -686,7 +978,7 @@ def run(args: argparse.Namespace) -> int:
       time.sleep(float(args.idle_sleep))
 
   summary = {
-    "version": "v115-v161-quiet",
+    "version": "v115-v163-semantic-diagnostic",
     "finished": datetime.now(timezone.utc).isoformat(),
     "duration_sec": round(time.monotonic() - start, 3),
     "txt": str(files.txt),
@@ -704,6 +996,7 @@ def run(args: argparse.Namespace) -> int:
     "first_fault_temp_t": first_fault_temp_t,
     "txblk_events": txblk_events,
     "warning_events": warning_events,
+    "diag_events": diag_events,
     "counts": dict(counts),
     "warning_counts": dict(warning_counts),
     "dropped_summary": dict(dropped_summary),
@@ -737,9 +1030,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--max-txt-kb", type=float, default=256.0)
   parser.add_argument("--keep-runs", type=int, default=6)
   parser.add_argument("--txblk-window-sec", type=float, default=0.45)
+  parser.add_argument("--txblk-text-rate-sec", type=float, default=1.0)
+  parser.add_argument("--log-all-txblk-deltas", action="store_true")
   parser.add_argument("--recent-sendcan-max", type=int, default=10000)
+  parser.add_argument("--recent-can-max", type=int, default=6000)
+  parser.add_argument("--forward-probe-window-sec", type=float, default=0.18)
+  parser.add_argument("--log-all-epas", action="store_true")
   parser.add_argument("--summary-interval", type=float, default=1.0)
-  parser.add_argument("--state-interval", type=float, default=0.5)
+  parser.add_argument("--state-interval", type=float, default=1.0)
   parser.add_argument("--idle-sleep", type=float, default=0.01)
   parser.add_argument("--log-all-panda", action="store_true")
   parser.add_argument("--log-can-records", action="store_true",
