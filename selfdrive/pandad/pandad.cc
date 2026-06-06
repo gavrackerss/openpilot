@@ -244,9 +244,46 @@ std::optional<bool> send_panda_states(PubMaster *pm, const std::vector<Panda *> 
     pandaStates.push_back(health);
   }
 
+  // XNOR auto-recover: persistent debounce per panda for a latched CAN2 interrupt fault.
+  static std::vector<uint32_t> xnor_can2_fault_streak;
+  static std::vector<uint32_t> xnor_can2_recover_cooldown;
+  if (xnor_can2_fault_streak.size() < pandas_cnt) {
+    xnor_can2_fault_streak.resize(pandas_cnt, 0);
+    xnor_can2_recover_cooldown.resize(pandas_cnt, 0);
+  }
+
   for (uint32_t i = 0; i < pandas_cnt; i++) {
     auto panda = pandas[i];
     const auto &health = pandaStates[i];
+
+    // XNOR auto-recover: clear a latched interruptRateCan2 fault without a manual power cycle.
+    // When the main panda storms CAN2 during the ELM327/diagnostic window it latches
+    // faultTemp + interruptRateCan2 and forces controls_allowed=0, which blocks engage
+    // (controls mismatch) AND blocks HUD transmit-ownership so stock AEB stays lit -- today
+    // only a power cycle clears it. We act ONLY in the safe window: ignition on, this panda
+    // faulted with the CAN2 interrupt-rate bit, and NOT in control (controls_allowed=0), so
+    // a soft CAN-core reset (can_reset_communications, control 0xc0) never interrupts active
+    // OP control. Debounced over ~0.5s (loop is 10 Hz) and rate-limited via a cooldown.
+    const uint64_t can2_fault_bit = 1ULL << (int)cereal::PandaState::FaultType::INTERRUPT_RATE_CAN2;
+    const bool latched_can2 =
+        ignition_local &&
+        (health.fault_status_pkt == (uint8_t)cereal::PandaState::FaultStatus::FAULT_TEMP) &&
+        ((health.faults_pkt & can2_fault_bit) != 0) &&
+        (health.controls_allowed_pkt == 0);
+
+    if (xnor_can2_recover_cooldown[i] > 0) {
+      xnor_can2_recover_cooldown[i]--;
+      xnor_can2_fault_streak[i] = 0;
+    } else if (latched_can2) {
+      if (++xnor_can2_fault_streak[i] >= 5) {
+        LOGE("XNOR: panda %u latched interruptRateCan2 (faults=0x%x), resetting CAN comms to recover", i, health.faults_pkt);
+        panda->can_reset_communications();
+        xnor_can2_fault_streak[i] = 0;
+        xnor_can2_recover_cooldown[i] = 20;  // ~2s before another attempt
+      }
+    } else {
+      xnor_can2_fault_streak[i] = 0;
+    }
 
     // Make sure CAN buses are live: safety_setter_thread does not work if Panda CAN are silent and there is only one other CAN node
     if (health.safety_mode_pkt == (uint8_t)(cereal::CarParams::SafetyModel::SILENT)) {
