@@ -213,6 +213,15 @@ static void tesla_legacy_clear_warning_matrix(CANPacket_t *msg) {
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
+// Surgical 0x399 scrub: zero ONLY DAS_forwardCollisionWarning (22|2 -> data[2] top 2 bits).
+// Used on the bus2->bus0 forward even before OP owns the HUD, so the stock AP's boot-time
+// FCW=3 frame can't flash AEB on the IC during the pre-engage window. Display-only: leaves
+// autopilot_status/blind-spot/LDW untouched and does NOT affect AEB braking (0x2BF, PT bus).
+static void tesla_legacy_scrub_fcw_only(CANPacket_t *msg) {
+  msg->data[2] &= 0x3FU;
+  tesla_legacy_set_last_byte_checksum(msg);
+}
+
 
 
 // --- RX hook ---
@@ -584,11 +593,18 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
         tesla_legacy_scrub_das_control_aeb(to_fwd);
       }
+    } else if (addr == 0x399) {
+      // Always neutralize the AEB/FCW display on the IC-bound copy. While OP owns the HUD,
+      // do the full clean (sets autopilot_status nibble + clears side/LDW); before engage,
+      // do the surgical FCW-only scrub so the stock AP's boot-time FCW=3 can't flash AEB.
+      if (scrub_hud_owner) {
+        tesla_legacy_scrub_status_warnings(to_fwd, status);
+      } else {
+        tesla_legacy_scrub_fcw_only(to_fwd);
+      }
     } else if (scrub_hud_owner) {
       if (addr == 0x389) {
         tesla_legacy_scrub_status2_warnings(to_fwd);
-      } else if (addr == 0x399) {
-        tesla_legacy_scrub_status_warnings(to_fwd, status);
       } else if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
         tesla_legacy_clear_warning_matrix(to_fwd);
       } else {

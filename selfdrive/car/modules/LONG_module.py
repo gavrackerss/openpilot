@@ -388,7 +388,17 @@ class LongController:
   _ARBITRATION_CURVE_EXIT_RELEASE_MS = 350   # lowered from 650: jump to CRUISE_SYNC (SET restored to max(set,v_ego)) sooner after a curve/roundabout exit (revert to 650 to restore)
   _ARBITRATION_CURVE_ENTRY_STEP_MS = 4.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EXIT_STEP_MS = 4.5 * CV.MPH_TO_MS   # raised from 3.6: quicker ramp-back of the curve target toward reference on exit (revert to 3.6 to restore)
-  _FOLLOW_GAP_DEFAULT_S = 2.35
+  # Q1-A (persistence): a mapd-map curve cap must hold this many consecutive ~5Hz arbitration
+  # cycles (~600 ms) before it may lower set speed. A real bend holds across frames; a single
+  # GPS/OSM blip does not. Revert to 1 to disable the debounce.
+  _ARBITRATION_MAP_PERSIST_FRAMES = 3
+  # Q1-B (near-straight weighting): when the wheel is essentially straight, require a larger
+  # mapd-map drop before a cap is allowed. Revert _ARBITRATION_CURVE_MIN_DROP_NEAR_STRAIGHT_MS
+  # to _ARBITRATION_CURVE_MIN_DROP_MS to disable.
+  _ARBITRATION_CURVE_NEAR_STRAIGHT_STEER_DEG = 3.0
+  _ARBITRATION_CURVE_NEAR_STRAIGHT_RATE_DEG = 4.0
+  _ARBITRATION_CURVE_MIN_DROP_NEAR_STRAIGHT_MS = 5.5 * CV.MPH_TO_MS
+  _FOLLOW_GAP_DEFAULT_S = 2.0   # lowered from 2.35: shorter fallback follow/release when the stalk gap isn't decoded from CarState (revert to 2.35 to restore)
   _FOLLOW_GAP_MIN_S = 1.25
   _FOLLOW_GAP_MAX_S = 3.35
   _FOLLOW_GAP_STALK_STEP_S = 0.35
@@ -519,6 +529,8 @@ class LongController:
     self._mapd_map_curve_ms: Optional[float] = None
     self._mapd_vision_curve_ms: Optional[float] = None
     self._mapd_last_ns: int = 0
+    self._map_curve_persist_count: int = 0   # Q1-A: consecutive fresh arbitration cycles mapd-map has asked for a cap
+    self._map_curve_persist_last_ns: int = 0
     self._posted_limit_drop_block_until_ms: int = 0
     self._mapd_comfort_bias_active: bool = False
     self._roundabout_active: bool = False
@@ -2881,6 +2893,50 @@ class LongController:
     self._arbitration_curve_target_ms = 0.0
 
 
+  def _reset_all_cached_state(self) -> None:
+    """Q3: hard flush of every cached/stored value on an on-road<->off-road / ignition
+    transition. Fail-safe by construction -- it only ever CLEARS caps and latches (never adds
+    a slowdown), so a spurious call just costs one clean cycle. Fixes the 'stale / dead after
+    re-entering the car' symptom (e.g. a monotonic-clock reset on reboot making an old mapd
+    sample read as fresh via a negative freshness delta, or hold / arbitration latches carried
+    across an off period)."""
+    # mapd map-stack cache
+    self._mapd_suggested_ms = None
+    self._mapd_speed_limit_ms = None
+    self._mapd_map_curve_ms = None
+    self._mapd_vision_curve_ms = None
+    self._mapd_last_ns = 0
+    self._mapd_comfort_bias_active = False
+    self._mapd_entry_candidate_since_ms = 0
+    self._mapd_stale_block_until_ms = 0
+    # longitudinal-plan / lead cache
+    self._lp_target_last_ms = None
+    self._lp_target_near_ms = None
+    self._lp_last_ns = 0
+    self._lp_has_lead = False
+    self._lp_a_target = 0.0
+    self._lp_source = ""
+    self._last_lp_seen_ns = 0
+    self._stable_plan_samples = 0
+    # live CSA snapshot -> unavailable
+    self._csa_last_sample = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
+    # Q1 mapd-map persistence debounce
+    self._map_curve_persist_count = 0
+    self._map_curve_persist_last_ns = 0
+    # curve-limit guard latch
+    self._curve_limit_guard_active = False
+    self._curve_limit_guard_candidate_since_ms = 0
+    self._curve_limit_guard_release_candidate_since_ms = 0
+    # hold + cancel + arbitration state
+    self._reset_curve_hold()
+    self._reset_lead_hold()
+    self._reset_lead_curve_hold()
+    self._reset_lead_stuck_cancel()
+    self._reset_lead_approach_cancel()
+    self._reset_lead_close_cancel()
+    self._reset_arbitration_state()
+
+
   def _csa_curve_target_ms(self, *, reference_ms: float, v_ego_ms: float) -> tuple[Optional[float], str]:
     """Live Tesla CSA curve cap (route-independent, map-matched curvature).
 
@@ -3009,10 +3065,42 @@ class LongController:
     )
 
     raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
-    map_supports = bool(
+
+    # Q1-B (near-straight weighting): a genuine bend already shows some steering by the time a
+    # mapd-map cap matters; on a straight road a lone map sample asking for a small drop is
+    # almost always a GPS/OSM false positive. So when the wheel is essentially straight, demand
+    # a larger map drop before the cap is allowed. Only raises the bar for the mapd-map source.
+    near_straight = bool(
+      abs(float(current_angle_deg)) <= float(self._ARBITRATION_CURVE_NEAR_STRAIGHT_STEER_DEG)
+      and abs(float(steering_rate_deg)) <= float(self._ARBITRATION_CURVE_NEAR_STRAIGHT_RATE_DEG)
+    )
+    map_min_drop_ms = (
+      float(self._ARBITRATION_CURVE_MIN_DROP_NEAR_STRAIGHT_MS)
+      if near_straight
+      else float(self._ARBITRATION_CURVE_MIN_DROP_MS)
+    )
+    map_supports_raw = bool(
       raw_map_ms is not None
       and float(raw_map_ms) > 0.1
-      and float(raw_map_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
+      and float(raw_map_ms) < (float(reference_ms) - float(map_min_drop_ms))
+    )
+
+    # Q1-A (persistence / debounce): the mapd-map cap must hold for N consecutive fresh ~5Hz
+    # arbitration cycles before it is allowed to lower set speed. Counted once per frame
+    # (guarded on now_ns) and reset the instant map stops asking. Fail-safe: this can only
+    # DELAY or REMOVE a map cap, never add one, and never touches CSA / roundabout / planner /
+    # vision. On this car CSA usually owns a real bend ~8s/~110m ahead, so a ~600ms debounce on
+    # a map-only cap is invisible on true curves but kills single-sample blips on straights.
+    if bool(map_supports_raw):
+      if int(now_ns) != int(self._map_curve_persist_last_ns):
+        self._map_curve_persist_count = int(self._map_curve_persist_count) + 1
+        self._map_curve_persist_last_ns = int(now_ns)
+    else:
+      self._map_curve_persist_count = 0
+      self._map_curve_persist_last_ns = int(now_ns)
+    map_supports = bool(
+      map_supports_raw
+      and int(self._map_curve_persist_count) >= int(self._ARBITRATION_MAP_PERSIST_FRAMES)
     )
     vision_supports = bool(
       raw_vision_ms is not None
@@ -3549,6 +3637,8 @@ class LongController:
 
     controller_enabled = bool(enabled) and bool(getattr(CS, "enable_adaptive_cruise", False) or getattr(CS, "enableACC", False))
     if not controller_enabled:
+      if self._last_active:
+        self._reset_all_cached_state()   # Q3: hard flush on the on-road -> off-road edge
       self._last_active = False
       self._enabled_since_ms = 0
       self._stable_plan_samples = 0
@@ -3570,6 +3660,8 @@ class LongController:
 
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "")
     if stock_state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
+      if self._last_active:
+        self._reset_all_cached_state()   # Q3: hard flush when leaving the active stock cruise state
       self._last_active = False
       self._reset_curve_hold()
       self._reset_lead_hold()
@@ -3583,6 +3675,7 @@ class LongController:
       return LongDecision(None, f"gated: stock_state={stock_state or 'UNKNOWN'}")
 
     if not self._last_active:
+      self._reset_all_cached_state()   # Q3: start every re-entry / re-activation from a clean cache
       self._enabled_since_ms = int(now)
       self._stable_plan_samples = 0
       self._last_lp_seen_ns = 0
