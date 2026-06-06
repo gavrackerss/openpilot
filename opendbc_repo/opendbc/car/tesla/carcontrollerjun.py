@@ -102,6 +102,8 @@ class CarController(CarControllerBase):
 
     self._roadworks_main_pulls_ms: list[int] = []
     self._roadworks_toggle_latch_until_ms = 0
+    self._xnor_epas_gate_prev = False
+    self._xnor_epas_gate_last_log_ms = 0
 
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
@@ -225,14 +227,37 @@ class CarController(CarControllerBase):
       self._human_cruise_action_time_ms = self._now_ms()
     self._prev_cruise_buttons = btn
 
+
+  def _xnor_epas_wake_gate_active(self, CS) -> bool:
+    return bool(getattr(CS, "xnor_epas_wake_inhibit", False))
+
+  def _reset_xnor_transmit_latches(self) -> None:
+    self._op659_prev_btn = 0
+    self._stw_release_frame = -1
+    self._stw_sequence = []
+    self._lat_active_prev = False
+    self._steer_warmup_until_frame = -1
+    self._virtual_turn_prev = 0
+    self._virtual_turn_last_send_frame = -100000
+
   def _emit_internal_0x659(self, CS, can_sends) -> None:
     stalk_btn = int(getattr(CS, "cruise_buttons", 0) or 0)
     prev_btn = int(self._op659_prev_btn)
 
     main_edge = (stalk_btn == BTN_MAIN) and (prev_btn != BTN_MAIN)
     cancel_edge = (stalk_btn == BTN_CANCEL) and (prev_btn != BTN_CANCEL)
+    epas_gate = self._xnor_epas_wake_gate_active(CS)
 
-    self._op659_prev_btn = stalk_btn
+    if epas_gate and main_edge:
+      now_ms = int(self._now_ms())
+      if (now_ms - int(getattr(self, "_xnor_epas_gate_last_log_ms", 0))) >= 2000:
+        self._xnor_epas_gate_last_log_ms = now_ms
+        self._diag_log(
+          f"[XNOR_V164_EPAS_WAKE_RECOVERY] delayed_stalk_main reason={getattr(CS, 'xnor_epas_wake_block_reason', 'unknown')}"
+        )
+      main_edge = False
+    else:
+      self._op659_prev_btn = stalk_btn
 
     if (self.frame % 10 == 0) or main_edge or cancel_edge:
       buses = {int(CANBUS.party)}
@@ -388,64 +413,11 @@ class CarController(CarControllerBase):
     return max(0.0, limit_ms * (CV.MS_TO_KPH if units == "KPH" else CV.MS_TO_MPH))
 
   def _process_hud_status(self, CC, CS, can_sends, human_control: bool) -> None:
-    # AEB/FCW HUD-flash suppression by transmit-ownership (legacy HW2, external panda).
-    #
-    # The factory AEB/FCW flash is the IC rendering the stock DAS_status (0x399) /
-    # DAS_status2 (0x389) warning fields. On an external panda those stock frames reach the
-    # IC without traversing the panda, so they can't be scrubbed in transit. Instead we
-    # transmit a complete, clean copy of BOTH frames from userspace every cycle so OP becomes
-    # the most-recent coherent source the IC latches: warning fields held at 0/clean, counter
-    # rolling 0-15, checksum computed in Python (external panda does not recompute on TX).
-    #
-    # Emit the WHOLE group together and ONLY while engaged to avoid the dual-ownership IC
-    # oscillation (blue/white D) that the prior no-op was guarding against. When disengaged we
-    # stop emitting and hand the HUD back to the factory computer.
-    enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    self._hud_prev_enabled = enabled
-
-    # Only the legacy builders own the clean DAS group; non-legacy path is unaffected.
-    if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
-      return
-
-    if not enabled:
-      return  # disengaged -> stock owns its own HUD; do not half-own it
-
-    # 50 Hz (every other frame) to meet/beat the ~25 Hz stock cadence so OP latches last.
-    if self.frame % 2 != 0:
-      return
-
-    counter = (self.frame // 2) % 16
-    op_status = 5  # engaged
-
-    cs_out = getattr(CS, "out", None)
-    blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
-    blind_right = bool(getattr(cs_out, "rightBlindspot", False)) if cs_out is not None else False
-    speed_limit = self._hud_speed_limit_uom(CS)
-
-    # Keep FCW wired to a genuine alert so a real collision warning still surfaces; suppress
-    # only the spurious AEB/activation flash. No genuine-FCW signal is plumbed here yet -> 0.
-    fcw = False
-
-    can_sends.append(self.tesla_can.create_das_status(
-      counter,
-      op_status,
-      fcw,
-      0,                              # DAS_laneDepartureWarning
-      self._hud_hands_on(CS),
-      self._hud_alca_state(CS),
-      blind_left,
-      blind_right,
-      speed_limit,
-      0,                              # DAS_fleetSpeedState
-    ))
-    can_sends.append(self.tesla_can.create_das_status2(
-      counter,
-      speed_limit,
-      fcw,
-    ))
-
-  def _hud_hands_on(self, CS) -> int:
-    return 0
+    # Do not emit partial Tesla HUD status from userspace.
+    # This tree already forwards stock 0x399/0x389 from AP-side, and dual ownership causes
+    # IC oscillation (blue/white D), flashing speed-limit icons, and startup availability alerts.
+    self._hud_prev_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    return
 
 
 
@@ -625,6 +597,9 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
+    epas_wake_gate = self._xnor_epas_wake_gate_active(CS)
+    if epas_wake_gate:
+      self._reset_xnor_transmit_latches()
     self._emit_internal_0x659(CS, can_sends)
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)
@@ -648,18 +623,19 @@ class CarController(CarControllerBase):
         pass
     self._op_enabled_prev = bool(op_enabled)
 
-    self._process_stalk_actions(CS, can_sends)
-    self._process_body_controls(CS, can_sends)
+    if not epas_wake_gate:
+      self._process_stalk_actions(CS, can_sends)
+      self._process_body_controls(CS, can_sends)
+      self._speed_limit_sync(CC, CS, can_sends)
     self._process_hud_status(CC, CS, can_sends, human_control)
-
-    self._speed_limit_sync(CC, CS, can_sends)
 
     lat_active = (
       bool(CC.latActive) and
       autopilot_disabled and
       (not CS.out.cruiseState.standstill) and
       (not human_control) and
-      (not steer_inhibit)
+      (not steer_inhibit) and
+      (not epas_wake_gate)
     )
 
     self._process_lane_telemetry(CS, can_sends, lat_active)
@@ -671,7 +647,7 @@ class CarController(CarControllerBase):
     self._lat_active_prev = bool(lat_active)
 
     # Steering (50Hz)
-    if self.frame % 2 == 0:
+    if (not epas_wake_gate) and (self.frame % 2 == 0):
       if (not lat_active) or human_control or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
         apply_angle = float(CS.out.steeringAngleDeg)
       else:
@@ -714,12 +690,12 @@ class CarController(CarControllerBase):
         )
 
     # EPS allow (legacy)
-    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
+    if (not epas_wake_gate) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
       counter = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
     # Longitudinal (optional)
-    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
+    if (not epas_wake_gate) and self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),

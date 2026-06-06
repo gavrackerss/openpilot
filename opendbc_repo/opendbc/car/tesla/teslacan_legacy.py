@@ -67,6 +67,54 @@ class TeslaCANRaven:
     values["APS_eacMonitorChecksum"] = self.checksum(0x27D, data[:2])
     return self.packers[CANBUS.party].make_can_msg("APS_eacMonitor", CANBUS.party, values)
 
+  # --- HUD ownership (AEB-flash suppression) ---
+  # DAS_status (0x399) and DAS_status2 (0x389) are the two frames the IC renders the
+  # factory AEB/FCW flash from. On an external panda the stock frames reach the IC without
+  # passing through the panda, so they can't be scrubbed in transit. Instead we transmit a
+  # complete, clean copy from userspace every cycle so OP becomes the most-recent coherent
+  # source the IC latches. Warning fields held at 0; counter rolls 0-15; checksum computed
+  # in Python (external panda does not recompute on TX). Emit the WHOLE group together and
+  # only while engaged (see carcontroller._process_hud_status) to avoid IC oscillation.
+  def create_das_status(self, counter, op_status, fcw, ldw, hands_on_state, alca_state,
+                        blind_left, blind_right, speed_limit, fleet_state):
+    # 0x399 on this chassis DBC is message "AutopilotStatus" with state field
+    # "autopilotStatus" (low nibble) — NOT "DAS_status"/"DAS_autopilotState".
+    # Wrong names make CANPacker fall back to addr 0x0, so the clean frame never
+    # overrides the stock 0x399 and the IC keeps flashing AEB/FCW.
+    values = {
+      "autopilotStatus": op_status,                          # 0-4 low nibble; 5 ~ engaged
+      "DAS_forwardCollisionWarning": 1 if fcw else 0,        # AEB/FCW HUD bit -> hold 0
+      "DAS_blindSpotRearLeft": 1 if blind_left else 0,
+      "DAS_blindSpotRearRight": 1 if blind_right else 0,
+      "DAS_fusedSpeedLimit": speed_limit,
+      "DAS_visionOnlySpeedLimit": speed_limit,
+      "DAS_laneDepartureWarning": ldw,
+      "DAS_autopilotHandsOnState": hands_on_state,
+      "DAS_autoLaneChangeState": alca_state,
+      "DAS_fleetSpeedState": fleet_state,
+      "DAS_sideCollisionWarning": 0,
+      "DAS_sideCollisionAvoid": 0,
+      "DAS_statusCounter": counter,
+      "DAS_statusChecksum": 0,
+    }
+    data = self.packers[CANBUS.party].make_can_msg("AutopilotStatus", CANBUS.party, values)[1]
+    values["DAS_statusChecksum"] = self.checksum(0x399, data[:7])
+    return self.packers[CANBUS.party].make_can_msg("AutopilotStatus", CANBUS.party, values)
+
+  def create_das_status2(self, counter, acc_speed_limit, fcw):
+    values = {
+      "DAS_accSpeedLimit": acc_speed_limit,
+      "DAS_activationFailureStatus": 0,                      # AEB/activation HUD trigger -> hold 0
+      "DAS_longCollisionWarning": 0x01 if fcw else 0x0F,     # 0x0F = no warning (Unity-parity)
+      "DAS_ACC_report": 1,
+      "DAS_robState": 2,                                     # active
+      "DAS_status2Counter": counter,
+      "DAS_status2Checksum": 0,
+    }
+    data = self.packers[CANBUS.party].make_can_msg("DAS_status2", CANBUS.party, values)[1]
+    values["DAS_status2Checksum"] = self.checksum(0x389, data[:7])
+    return self.packers[CANBUS.party].make_can_msg("DAS_status2", CANBUS.party, values)
+
 
 # Clarity alias: HW2 is "legacy"
 TeslaCANLegacy = TeslaCANRaven

@@ -220,15 +220,29 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   const int bus = (int)msg->bus;
   const int addr = (int)msg->addr;
 
+  // Vehicle state — bus-aware IDs.
+  // The chassis (tesla_can) and powertrain (tesla_powertrain) DBCs are separate ID
+  // namespaces: the SAME signal has a different message ID on each bus. The main panda
+  // sits on the chassis bus; the external panda sits on the powertrain bus. Keying these
+  // reads off the panda's role lets the external panda derive gas/brake/cruise/speed from
+  // the frames it actually sees on its bus, instead of relying solely on the 0x659 carrier
+  // — the prior source of the intermittent controls mismatch. Bit layouts are identical
+  // across both DBCs for these signals (verified against the uploaded DBCs), EXCEPT speed:
+  // chassis exposes it via ESP_B (0x155); PT exposes it via DI_torque2.DI_vehicleSpeed.
+  const int id_pedal   = tesla_legacy_external_panda ? 0x106 : 0x108;  // DI_torque1.DI_pedalPos 48|8 (0.4)
+  const int id_brake   = tesla_legacy_external_panda ? 0x1F8 : 0x20A;  // BrakeMessage.driverBrakeStatus 2|2
+  const int id_distate = tesla_legacy_external_panda ? 0x256 : 0x368;  // DI_state.DI_cruiseState 12|4
+  const int id_ditrq2  = tesla_legacy_external_panda ? 0x116 : 0x118;  // DI_torque2 (PT speed source)
+
   // Chassis state (HW3 uses bus1)
   if (bus == tesla_legacy_chassis_bus) {
-    if (addr == 0x108) {  // DI_torque1
+    if (addr == id_pedal) {  // DI_torque1
       const float pedal_pct = ((float)msg->data[6]) * 0.4f;  // DI_pedalPos
       gas_pressed = pedal_pct > 3.0f;
-    } else if (addr == 0x20A) {  // BrakeMessage
+    } else if (addr == id_brake) {  // BrakeMessage
       const uint8_t st = (msg->data[0] >> 2) & 0x3U;         // driverBrakeStatus
       brake_pressed = (st == 2U);
-    } else if (addr == 0x368) {  // DI_state
+    } else if (addr == id_distate) {  // DI_state
       const uint8_t cruise_state = (msg->data[1] >> 4) & 0x0FU;
       const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U);
       vehicle_moving = (cruise_state != 3U);
@@ -236,9 +250,14 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       if (!tesla_legacy_op_autopilot_disabled) {
         pcm_cruise_check(cruise_engaged);
       }
-    } else if (addr == 0x155) {  // ESP_B (vehicle speed)
+    } else if (!tesla_legacy_external_panda && (addr == 0x155)) {  // ESP_B (chassis-only vehicle speed)
       const uint16_t raw_kph = (uint16_t)((((uint16_t)msg->data[5]) << 8) | msg->data[4]);
       const float speed_ms = ((float)raw_kph) * 0.01f * (float)KPH_TO_MS;
+      UPDATE_VEHICLE_SPEED(speed_ms);
+    } else if (tesla_legacy_external_panda && (addr == id_ditrq2)) {  // PT: DI_torque2.DI_vehicleSpeed 16|12 (0.05,-25) MPH
+      const uint16_t raw_spd = (uint16_t)((((uint16_t)(msg->data[3] & 0x0FU)) << 8) | msg->data[2]);
+      const float speed_mph = ((float)raw_spd) * 0.05f - 25.0f;
+      const float speed_ms = (speed_mph > 0.0f) ? (speed_mph * 0.44704f) : 0.0f;
       UPDATE_VEHICLE_SPEED(speed_ms);
     } else {
     }
@@ -428,6 +447,11 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
   // External panda (longitudinal)
   if (tesla_legacy_external_panda) {
+    // HUD-ownership status frames carry no actuation; permit if a single-panda/rerouted
+    // build ever sends them here. Primary path is the main panda (CANBUS.party=0).
+    if ((addr == 0x399) || (addr == 0x389)) {
+      return true;
+    }
     if (addr != 0x2BF) {
       return false;
     }
@@ -611,6 +635,11 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x27D, 0, 3, .check_relay = false},  // APS_eacMonitor
     {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
+    // AEB/FCW HUD-flash suppression via transmit-ownership. These ride CANBUS.party (=0),
+    // so userspace emits them through THIS (main/internal) panda onto the chassis/IC bus.
+    // tx_hook main branch permits them via its fall-through return-true (no actuation fields).
+    {0x399, 0, 8, .check_relay = false},  // DAS_status  (clean copy: warning fields zeroed)
+    {0x389, 0, 8, .check_relay = false},  // DAS_status2 (clean copy: warning fields zeroed)
 
   };
 
@@ -618,6 +647,10 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x2BF, 0, 8, .check_relay = false},  // DAS_longControl
     {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
+    // Defensive only: HUD frames normally route to the main panda (CANBUS.party=0). Listed
+    // here so a single-panda/rerouted build can still TX them; permitted in tx_hook below.
+    {0x399, 0, 8, .check_relay = false},  // DAS_status
+    {0x389, 0, 8, .check_relay = false},  // DAS_status2
 
   };
 
