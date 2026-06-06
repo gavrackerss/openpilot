@@ -84,6 +84,12 @@ carlog.addHandler(ForwardingHandler(cloudlog))
 
 def obd_callback(params: Params) -> ObdCallback:
   def set_obd_multiplexing(obd_multiplexing: bool):
+    # XNOR: never enable OBD multiplexing. On the legacy Tesla 2-panda harness the main
+    # panda's CAN2 carries the live AP/DAS bus; toggling OBD multiplexing (elm327) during
+    # boot/wake fingerprinting storms CAN2 -> interruptRateCan2 faultTemp -> controls_allowed
+    # latches 0 (controls mismatch), cleared only by a full power cycle. The FW requests are
+    # all bus=0 so they don't need it, and passive CAN fingerprinting is unaffected.
+    obd_multiplexing = False
     if params.get_bool("ObdMultiplexingEnabled") != obd_multiplexing:
       cloudlog.warning(f"Setting OBD multiplexing to {obd_multiplexing}")
       params.remove("ObdMultiplexingChanged")
