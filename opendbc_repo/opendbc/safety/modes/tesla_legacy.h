@@ -213,12 +213,18 @@ static void tesla_legacy_clear_warning_matrix(CANPacket_t *msg) {
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
-// Surgical 0x399 scrub: zero ONLY DAS_forwardCollisionWarning (22|2 -> data[2] top 2 bits).
-// Used on the bus2->bus0 forward even before OP owns the HUD, so the stock AP's boot-time
-// FCW=3 frame can't flash AEB on the IC during the pre-engage window. Display-only: leaves
-// autopilot_status/blind-spot/LDW untouched and does NOT affect AEB braking (0x2BF, PT bus).
+// Unity-parity 0x399 benign-state scrub for the bus2->bus0 forward when OP does NOT own the
+// HUD (boot / disengaged). Zeroing fcw removes the trigger but does NOT clear an ALREADY
+// latched IC AEB warning -- which is why a boot-window latch persisted until a power cycle.
+// Unity's safety_tesla.h sets DAS_autopilotState=2 ("so we don't trigger warnings") on every
+// forwarded 0x399: a benign "AP active" state that makes the IC drop the warning. We replicate
+// it -- autopilotStatus(0|4)=2 + DAS_forwardCollisionWarning(22|2)=0 -- so the post-teslaLegacy
+// stream actively clears the IC latch without needing to engage. Display-only; does NOT affect
+// AEB braking (0x2BF, PT bus). NOTE: asserts a faint "AP available" state on the IC while
+// disengaged -- this is the same trade Unity makes.
 static void tesla_legacy_scrub_fcw_only(CANPacket_t *msg) {
-  msg->data[2] &= 0x3FU;
+  msg->data[0] = (uint8_t)((msg->data[0] & 0xF0U) | 0x02U);  // autopilotStatus = 2 (benign)
+  msg->data[2] &= 0x3FU;                                     // DAS_forwardCollisionWarning = 0
   tesla_legacy_set_last_byte_checksum(msg);
 }
 

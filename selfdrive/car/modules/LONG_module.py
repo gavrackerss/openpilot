@@ -398,6 +398,15 @@ class LongController:
   _ARBITRATION_CURVE_NEAR_STRAIGHT_STEER_DEG = 3.0
   _ARBITRATION_CURVE_NEAR_STRAIGHT_RATE_DEG = 4.0
   _ARBITRATION_CURVE_MIN_DROP_NEAR_STRAIGHT_MS = 5.5 * CV.MPH_TO_MS
+  # Point 2 (speed-limit flicker debounce): the CarState posted-limit target was oscillating
+  # 40<->30 (~1 Hz) across a transition zone, swinging the SET speed. If CarState changes again
+  # within _SPEED_LIMIT_FLICKER_WINDOW_MS, treat it as unstable and fall back to mapd's posted
+  # limit until CarState holds steady for _SPEED_LIMIT_SETTLE_MS. Isolated (non-rapid) changes
+  # are still applied immediately. (Revert: restore the simple body of _resolve_speed_limit_target_ms.)
+  _SPEED_LIMIT_SETTLE_MS = 1500
+  _SPEED_LIMIT_FLICKER_WINDOW_MS = 2500
+  _SPEED_LIMIT_MATCH_TOL_MS = 1.0 * CV.MPH_TO_MS
+  _SPEED_LIMIT_OFFSET_MAX_MS = 5.0 * CV.MPH_TO_MS
   _FOLLOW_GAP_DEFAULT_S = 2.0   # lowered from 2.35: shorter fallback follow/release when the stalk gap isn't decoded from CarState (revert to 2.35 to restore)
   _FOLLOW_GAP_MIN_S = 1.25
   _FOLLOW_GAP_MAX_S = 3.35
@@ -526,6 +535,12 @@ class LongController:
     self._lead_yrel: float = 0.0
     self._mapd_suggested_ms: Optional[float] = None
     self._mapd_speed_limit_ms: Optional[float] = None
+    # Point 2: speed-limit-target flicker debounce state
+    self._sl_stable_target_ms: float = 0.0
+    self._sl_last_raw_ms: float = 0.0
+    self._sl_last_change_ms: int = 0
+    self._sl_flicker_latch: bool = False
+    self._sl_carstate_mapd_offset_ms: float = 0.0
     self._mapd_map_curve_ms: Optional[float] = None
     self._mapd_vision_curve_ms: Optional[float] = None
     self._mapd_last_ns: int = 0
@@ -1195,6 +1210,18 @@ class LongController:
       self._curve_planner_release_candidate_since_ms = 0
       return False
 
+    # Point 3: curvature-drop early release. If the live CSA reads the road ahead as
+    # geometrically straight again (confidently flat + far-sighted = the bend is over),
+    # release the curve hold now instead of waiting for the planner to clear or the wheel to
+    # finish unwinding. _csa_confidently_flat is the same asymmetric, far-sighted signal used
+    # for the map-disagree veto: a short-range / silent / stale / still-curving CSA returns
+    # False and never triggers, so this only fires once the curve has genuinely opened out.
+    # Fail-safe: releasing only RESTORES speed -- if a real cap remains, mapd / planner / CSA
+    # re-open it via arbitration on the next cycle. (Revert: delete this block.)
+    if self._csa_confidently_flat():
+      self._curve_planner_release_candidate_since_ms = 0
+      return True
+
     release_margin_ms = float(self._CURVE_RELEASE_NEAR_TARGET_MARGIN_MS)
     planner_last_clear = float(planner_last_ms) >= (float(reference_ms) - release_margin_ms)
     planner_near_clear = float(planner_near_ms) >= (float(reference_ms) - (2.2 * release_margin_ms))
@@ -1821,7 +1848,7 @@ class LongController:
     except Exception:
       pass
 
-  def _resolve_speed_limit_target_ms(self, CS, *, speed_units: str) -> tuple[Optional[float], bool, str]:
+  def _resolve_speed_limit_target_ms(self, CS, *, speed_units: str, now_ms: int, now_ns: int) -> tuple[Optional[float], bool, str]:
     """
     Unity-style speed-limit ownership for ACC.
 
@@ -1839,15 +1866,55 @@ class LongController:
     if not use_speed_limit:
       return None, False, "config_disabled"
 
-    speed_limit_target_ms = 0.0
+    raw_ms = 0.0
     try:
-      speed_limit_target_ms = float(CS._calc_speed_limit_target_ms(speed_units))
+      raw_ms = float(CS._calc_speed_limit_target_ms(speed_units))
     except Exception:
-      speed_limit_target_ms = 0.0
+      raw_ms = 0.0
 
-    if speed_limit_target_ms > 0.0:
-      return float(speed_limit_target_ms), True, "carstate_speed_limit_target"
-    return None, False, "none"
+    mapd_posted_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
+    tol = float(self._SPEED_LIMIT_MATCH_TOL_MS)
+
+    def _mapd_fallback(reason: str):
+      # Prefer mapd's posted limit (offset-matched to CarState) while CarState is unstable;
+      # if mapd isn't available, hold the last settled CarState target rather than the flicker.
+      if mapd_posted_ms is not None and float(mapd_posted_ms) > 0.1:
+        return float(mapd_posted_ms) + float(self._sl_carstate_mapd_offset_ms), True, reason
+      if float(self._sl_stable_target_ms) > 0.1:
+        return float(self._sl_stable_target_ms), True, "carstate_speed_limit_held[unsettled]"
+      return None, False, "none"
+
+    if not (raw_ms > 0.0):
+      return _mapd_fallback("mapd_posted_limit[no_carstate]")
+
+    # A change that arrives within the flicker window of the previous change marks the source
+    # unstable; an isolated change (slower than the window) is accepted immediately below.
+    if abs(float(raw_ms) - float(self._sl_last_raw_ms)) > tol:
+      interval_ms = int(now_ms) - int(self._sl_last_change_ms)
+      if int(self._sl_last_change_ms) > 0 and interval_ms <= int(self._SPEED_LIMIT_FLICKER_WINDOW_MS):
+        self._sl_flicker_latch = True
+      self._sl_last_change_ms = int(now_ms)
+      self._sl_last_raw_ms = float(raw_ms)
+
+    # CarState has held steady long enough -> trust it again.
+    if (int(now_ms) - int(self._sl_last_change_ms)) >= int(self._SPEED_LIMIT_SETTLE_MS):
+      self._sl_flicker_latch = False
+
+    if not self._sl_flicker_latch:
+      self._sl_stable_target_ms = float(raw_ms)
+      self._update_sl_offset(float(raw_ms), mapd_posted_ms)
+      return float(raw_ms), True, "carstate_speed_limit_target"
+
+    return _mapd_fallback("mapd_posted_limit[carstate_unsettled]")
+
+  def _update_sl_offset(self, carstate_target_ms: float, mapd_posted_ms: Optional[float]) -> None:
+    # Learn the CarState-target vs mapd-posted offset (the limit + ACC overshoot, e.g. +2 mph)
+    # whenever both are available and stable, so the mapd fallback lands at the same target.
+    if mapd_posted_ms is None or float(mapd_posted_ms) <= 0.1:
+      return
+    off = float(carstate_target_ms) - float(mapd_posted_ms)
+    if 0.0 <= off <= float(self._SPEED_LIMIT_OFFSET_MAX_MS):
+      self._sl_carstate_mapd_offset_ms = float(off)
 
   def _roadworks_cap_ms(self, *, now_ms: int, posted_limit_ms: Optional[float] = None) -> tuple[Optional[float], str]:
     try:
@@ -2909,6 +2976,11 @@ class LongController:
     self._mapd_comfort_bias_active = False
     self._mapd_entry_candidate_since_ms = 0
     self._mapd_stale_block_until_ms = 0
+    # Point 2: speed-limit flicker-debounce state
+    self._sl_stable_target_ms = 0.0
+    self._sl_last_raw_ms = 0.0
+    self._sl_last_change_ms = 0
+    self._sl_flicker_latch = False
     # longitudinal-plan / lead cache
     self._lp_target_last_ms = None
     self._lp_target_near_ms = None
@@ -3748,7 +3820,7 @@ class LongController:
       )
     )
 
-    speed_limit_target_ms, set_speed_limit_active, ceiling_src = self._resolve_speed_limit_target_ms(CS, speed_units=speed_units)
+    speed_limit_target_ms, set_speed_limit_active, ceiling_src = self._resolve_speed_limit_target_ms(CS, speed_units=speed_units, now_ms=int(now), now_ns=int(now_ns))
     posted_limit_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
     roadworks_cap_ms, roadworks_cap_src = self._roadworks_cap_ms(now_ms=int(now), posted_limit_ms=posted_limit_ms)
 
