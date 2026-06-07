@@ -132,6 +132,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TeslaLeadSelectionEnabled", {PERSISTENT, BOOL, "1"}},
     {"TeslaRadarFilteringEnabled", {PERSISTENT, BOOL, "1"}},
     {"TeslaSetSpeedOwnershipEnabled", {PERSISTENT, BOOL, "1"}},
+    {"XnorForceFingerprint", {PERSISTENT, STRING}},
     {"XnorTeslaVirtualTorqueBlending", {PERSISTENT, BOOL, "0"}},
     {"TinklaAdjustAccWithSpeedLimit", {PERSISTENT, BOOL, "1"}},
     {"TinklaAlcDelay", {PERSISTENT, FLOAT, "2.0"}},

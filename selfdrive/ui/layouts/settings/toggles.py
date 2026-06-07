@@ -31,7 +31,16 @@ DESCRIPTIONS = {
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
+  "XnorForceFingerprint": tr_noop(
+    "Force the car fingerprint and skip the firmware query at boot. This brings the panda's Tesla safety mode up early enough to " +
+    "suppress the stock Autopilot's cold-boot AEB/FCW warning on the instrument cluster. Set this to your exact car, then reboot " +
+    "for it to take effect. Leave on Off to use the normal automatic fingerprint."
+  ),
 }
+
+# XnorForceFingerprint selector: button index -> param value written to "XnorForceFingerprint".
+# "NONE" is the sentinel for off (the launch gate treats NONE/empty as "run the normal FW query").
+FORCE_FP_VALUES = ["NONE", "TESLA_MODEL_S_HW2", "TESLA_MODEL_X_HW2"]
 
 
 class TogglesLayout(Widget):
@@ -102,6 +111,18 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    cur_fp = self._params.get("XnorForceFingerprint") or "NONE"
+    fp_selected = FORCE_FP_VALUES.index(cur_fp) if cur_fp in FORCE_FP_VALUES else 0
+    self._force_fp_setting = multiple_button_item(
+      lambda: tr("Force Car Fingerprint"),
+      lambda: tr(DESCRIPTIONS["XnorForceFingerprint"]),
+      buttons=[lambda: tr("Off"), lambda: tr("Model S HW2"), lambda: tr("Model X HW2")],
+      button_width=255,
+      callback=self._set_force_fingerprint,
+      selected_index=fp_selected,
+      icon="warning.png"
+    )
+
     self._toggles = {}
     self._locked_toggles = set()
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
@@ -134,6 +155,10 @@ class TogglesLayout(Widget):
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
         self._toggles["LongitudinalPersonality"] = self._long_personality_setting
+
+    # Tesla cold-boot AEB-flash fix: force-fingerprint selector (not a bool toggle, so it is added
+    # to _toggles only -- like LongitudinalPersonality -- and stays out of _toggle_defs).
+    self._toggles["XnorForceFingerprint"] = self._force_fp_setting
 
     self._update_experimental_mode_icon()
     self._scroller = Scroller(list(self._toggles.values()), line_separator=True, spacing=0)
@@ -243,3 +268,8 @@ class TogglesLayout(Widget):
 
   def _set_longitudinal_personality(self, button_index: int):
     self._params.put("LongitudinalPersonality", button_index)
+
+  def _set_force_fingerprint(self, button_index: int):
+    # Written value is consumed by launch_env.sh at the next boot (exports FINGERPRINT +
+    # SKIP_FW_QUERY). Requires a reboot to take effect -- it is not read at openpilot restart.
+    self._params.put("XnorForceFingerprint", FORCE_FP_VALUES[button_index])
