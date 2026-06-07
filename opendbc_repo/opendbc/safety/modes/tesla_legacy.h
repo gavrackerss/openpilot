@@ -588,6 +588,17 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // regressed it to a sticky latch. 0x389/object/warning-matrix keep the gated full rewrite while
   // OP owns the HUD. (0x2BF is powertrain-only and never reaches the IC; its branch is harmless.)
   if (bus_num == 2) {
+    // Block-and-replace: OP transmits its own 0x399 (DAS_status) and 0x389 (DAS_status2)
+    // continuously on bus0 (sendcan confirms ~9000 frames each). Forwarding the stock copies
+    // too puts TWO sources on the IC bus with conflicting DAS_statusCounter values, so the IC
+    // flags a counter fault and may refuse to latch OP's clean frame. Drop the stock forwards
+    // here so OP is the SOLE coherent source for these two. Display-only; never touches
+    // controls_allowed. (If OP ever stops transmitting, the IC briefly loses 0x399 -- acceptable,
+    // and far better than a stuck AEB.)
+    if ((addr == 0x399) || (addr == 0x389)) {
+      return true;
+    }
+
     const bool op_hud_owner = tesla_legacy_hud_takeover_owner();
     const bool scrub_hud_owner = op_hud_owner || tesla_legacy_aeb_hud_scrub_active();
     const uint8_t status = controls_allowed ? 0x05U : (to_fwd->data[0] & 0x0FU);
