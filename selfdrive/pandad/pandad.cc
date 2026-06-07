@@ -502,7 +502,7 @@ void pandad_run(std::vector<Panda *> &pandas) {
       engaged = sm.allAliveAndValid({"selfdriveState"}) && sm["selfdriveState"].getSelfdriveState().getEnabled();
       is_onroad = params.getBool("IsOnroad");
       process_panda_state(pandas, &pm, engaged, is_onroad, spoofing_started);
-      panda_safety.configureSafetyMode(is_onroad);
+      panda_safety.configureSafetyMode(is_onroad, engaged);
       panda_safety.maybeBootRelayReset(is_onroad, engaged);
     }
 

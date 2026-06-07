@@ -2,9 +2,77 @@
 #include "cereal/messaging/messaging.h"
 #include "common/swaglog.h"
 
-void PandaSafety::configureSafetyMode(bool is_onroad) {
+// --- XNOR early-teslaLegacy ---------------------------------------------------------------
+// Cold-boot AEB flash root cause: the stock AP asserts fcw=3 during its own boot and reaches the
+// IC through the closed harness relay BEFORE the panda is in teslaLegacy. The IC latches it for
+// the whole ignition cycle. The fix is to bring teslaLegacy up (relay open + forward-scrub live)
+// BEFORE the stock AP's fcw=3 -- i.e. set the safety model from cached CarParams the moment we go
+// onroad, instead of waiting for the FW-query/ControlsReady handshake.
+//
+// The previous early-safety attempt dropped controls mid-drive because it re-ran setSafetyMode on
+// an is_onroad transient and that resets controls_allowed to 0. This version is structurally
+// guarded against that:
+//   - setSafetyMode is only ever called while NOT engaged (see configureSafetyMode's `engaged`
+//     guard), so it can never reset controls out from under an active drive;
+//   - the offroad re-arm requires a SUSTAINED offroad (debounced) AND not engaged, so a brief
+//     is_onroad glitch cannot trigger a re-apply.
+
+bool PandaSafety::carParamsHaveTeslaLegacySafety(const std::string &params_string) {
+  if (params_string.empty()) {
+    return false;
+  }
+  try {
+    AlignedBuffer aligned_buf;
+    capnp::FlatArrayMessageReader cmsg(aligned_buf.align(params_string.data(), params_string.size()));
+    cereal::CarParams::Reader car_params = cmsg.getRoot<cereal::CarParams>();
+    auto safety_configs = car_params.getSafetyConfigs();
+    for (uint32_t i = 0; i < safety_configs.size(); ++i) {
+      if (safety_configs[i].getSafetyModel() == cereal::CarParams::SafetyModel::TESLA_LEGACY) {
+        return true;
+      }
+    }
+  } catch (...) {
+    return false;
+  }
+  return false;
+}
+
+bool PandaSafety::trySetEarlyTeslaSafety() {
+  static const char *early_param_keys[] = {
+    "CarParamsPersistent",
+    "CarParamsPrevRoute",
+    "CarParamsCache",
+  };
+  for (const char *key : early_param_keys) {
+    const std::string params_string = params_.get(key);
+    if (carParamsHaveTeslaLegacySafety(params_string)) {
+      LOGW("XNOR early Tesla safety: applying teslaLegacy from %s before ControlsReady", key);
+      setSafetyMode(params_string);  // sets teslaLegacy (+ is_tesla_legacy_), relay opens, scrub live
+      initialized_ = true;           // skip the ELM327 init block in updateMultiplexingMode
+      return true;
+    }
+  }
+  return false;
+}
+
+void PandaSafety::configureSafetyMode(bool is_onroad, bool engaged) {
   if (is_onroad && !safety_configured_) {
-    updateMultiplexingMode();
+    // Never apply/replace the safety mode while engaged -- setSafetyMode resets controls_allowed.
+    // At boot this branch runs pre-engage; the guard is defensive against any odd ordering.
+    if (engaged) {
+      return;
+    }
+
+    offroad_debounce_ = 0;
+
+    // Early path: bring teslaLegacy up from cached CarParams now, so the scrub beats the stock
+    // boot fcw=3. Falls back to the stock ELM327 fingerprint init only with no cached Tesla.
+    if (!early_applied_) {
+      early_applied_ = trySetEarlyTeslaSafety();
+    }
+    if (!early_applied_) {
+      updateMultiplexingMode();
+    }
 
     auto car_params = fetchCarParams();
     if (!car_params.empty()) {
@@ -13,33 +81,33 @@ void PandaSafety::configureSafetyMode(bool is_onroad) {
       safety_configured_ = true;
     }
   } else if (!is_onroad) {
-    initialized_ = false;
-    safety_configured_ = false;
-    log_once_ = false;
+    // Re-arm for a new drive ONLY on a sustained offroad and only while not engaged. A transient
+    // is_onroad glitch must not reset our flags (that is what re-ran setSafetyMode mid-drive and
+    // dropped controls last time).
+    if (!engaged && (++offroad_debounce_ >= 30)) {  // ~3 s sustained offroad at 10 Hz
+      initialized_ = false;
+      safety_configured_ = false;
+      early_applied_ = false;
+      log_once_ = false;
+      offroad_debounce_ = 0;
+    }
+  } else {
+    // onroad and already configured: nothing to do; keep the offroad debounce cleared.
+    offroad_debounce_ = 0;
   }
 }
 
-// XNOR boot relay-reset.
-// The cold-boot AEB flash is the stock AP asserting fcw=3 during its own boot, reaching the IC
-// through the closed harness relay BEFORE the panda is in teslaLegacy. The IC latches it for the
-// whole ignition cycle; nothing the panda does after teslaLegacy clears it. The user's manual
-// fix -- power off/on, i.e. OP offroad->onroad -- works because that cycles the safety mode and
-// thus toggles the intercept relay (set_intercept_relay: car modes open it, NO_OUTPUT closes it),
-// which makes the IC re-sync. By then the stock AP has recovered to fcw=0, so the IC comes up
-// clean. This reproduces that ONCE, automatically, in the safe pre-engage window:
-//   - only while onroad and teslaLegacy is configured,
-//   - only while NOT engaged (controls can't be reset out from under an active drive),
-//   - ~8 s after teslaLegacy (past the stock AP's fcw=3 -> fcw=0 recovery),
-//   - exactly once per drive (re-arms when offroad).
-// Phase timers count 10 Hz calls (this is invoked once per main-loop state tick).
+// XNOR boot relay-reset (belt-and-braces for any latch the early path doesn't beat).
+// Reproduces the user's power-cycle/offroad->onroad clear: a one-shot safety re-cycle that
+// toggles the intercept relay (NO_OUTPUT closes it, teslaLegacy opens it) so the IC re-syncs to
+// the recovered stock fcw=0. Fires once per drive, pre-engage only, holding the relay closed for
+// ~5 s (a 0.5 s blip did not give the IC time to re-sync).
 void PandaSafety::maybeBootRelayReset(bool is_onroad, bool engaged) {
   if (!is_onroad) {
-    // Re-arm for the next drive.
     relay_reset_phase_ = 0;
     relay_reset_counter_ = 0;
     return;
   }
-  // Only for a configured teslaLegacy car.
   if (!safety_configured_ || !is_tesla_legacy_) {
     return;
   }
@@ -65,12 +133,12 @@ void PandaSafety::maybeBootRelayReset(bool is_onroad, bool engaged) {
       }
       break;
 
-    case 2:  // relay closed (~0.5 s), then re-apply the real safety to re-open it
+    case 2:  // relay closed (~5 s), then re-apply the real safety to re-open it
       if (engaged) {  // extremely unlikely while NO_OUTPUT, but be safe
         relay_reset_phase_ = 99;
         break;
       }
-      if (++relay_reset_counter_ >= 5) {  // ~0.5 s at 10 Hz
+      if (++relay_reset_counter_ >= 50) {  // ~5 s at 10 Hz
         const std::string car_params = params_.get("CarParams");
         if (!car_params.empty()) {
           setSafetyMode(car_params);  // restores teslaLegacy + alternativeExperience, relay re-opens
