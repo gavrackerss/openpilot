@@ -406,12 +406,7 @@ class CarController(CarControllerBase):
     # writes autopilotStatus=2). Both sources agree -> no oscillation, and the IC drops the latch.
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
     self._hud_prev_enabled = enabled
-    # TEMP DEBUG — remove after diagnosing
-    self._diag_log(
-      f"[XNOR_HUD] cls={type(self.tesla_can).__name__} enabled={enabled} "
-      f"has_ds={hasattr(self.tesla_can,'create_das_status')} "
-      f"has_ds2={hasattr(self.tesla_can,'create_das_status2')} parity={self.frame % 2}"
-    )
+
     # Only the legacy builders own the clean DAS group; non-legacy path is unaffected.
     if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
       return
@@ -432,23 +427,36 @@ class CarController(CarControllerBase):
     # only the spurious AEB/activation flash. No genuine-FCW signal is plumbed here yet -> 0.
     fcw = False
 
-    can_sends.append(self.tesla_can.create_das_status(
-      counter,
-      op_status,
-      fcw,
-      0,                              # DAS_laneDepartureWarning
-      self._hud_hands_on(CS),
-      self._hud_alca_state(CS),
-      blind_left,
-      blind_right,
-      speed_limit,
-      0,                              # DAS_fleetSpeedState
-    ))
-    can_sends.append(self.tesla_can.create_das_status2(
-      counter,
-      speed_limit,
-      fcw,
-    ))
+    # TEMP DIAGNOSTIC (XNOR_HUD2): wrap the DAS_status builders so a packer / signal-name
+    # failure can't silently swallow the transmit (and can't take down the rest of update()).
+    # Logs the built addr@bus on success, or the exception type+message on failure, ~1/sec via
+    # cloudlog.warning (NOT _diag_log, so it isn't starved by the shared 1/sec throttle). Remove
+    # this wrapper once 0x399/0x389 are confirmed transmitting.
+    try:
+      m1 = self.tesla_can.create_das_status(
+        counter,
+        op_status,
+        fcw,
+        0,                              # DAS_laneDepartureWarning
+        self._hud_hands_on(CS),
+        self._hud_alca_state(CS),
+        blind_left,
+        blind_right,
+        speed_limit,
+        0,                              # DAS_fleetSpeedState
+      )
+      m2 = self.tesla_can.create_das_status2(
+        counter,
+        speed_limit,
+        fcw,
+      )
+      can_sends.append(m1)
+      can_sends.append(m2)
+      if self.frame % 100 == 0:
+        cloudlog.warning(f"[XNOR_HUD2] OK 0x{m1[0]:x}@{m1[-1]} 0x{m2[0]:x}@{m2[-1]}")
+    except Exception as e:
+      if self.frame % 100 == 0:
+        cloudlog.warning(f"[XNOR_HUD2] RAISED {type(e).__name__}: {e}")
 
   def _hud_hands_on(self, CS) -> int:
     return 0
