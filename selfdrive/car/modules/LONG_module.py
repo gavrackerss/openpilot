@@ -405,6 +405,7 @@ class LongController:
   # are still applied immediately. (Revert: restore the simple body of _resolve_speed_limit_target_ms.)
   _SPEED_LIMIT_SETTLE_MS = 1500
   _SPEED_LIMIT_FLICKER_WINDOW_MS = 2500
+  _SPEED_LIMIT_LATCH_MAX_MS = 4000   # hard cap on how long the flicker latch may hold (anti-stuck)
   _SPEED_LIMIT_MATCH_TOL_MS = 1.0 * CV.MPH_TO_MS
   _SPEED_LIMIT_OFFSET_MAX_MS = 5.0 * CV.MPH_TO_MS
   _FOLLOW_GAP_DEFAULT_S = 2.0   # lowered from 2.35: shorter fallback follow/release when the stalk gap isn't decoded from CarState (revert to 2.35 to restore)
@@ -413,6 +414,7 @@ class LongController:
   _FOLLOW_GAP_STALK_STEP_S = 0.35
   _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.85
   _FOLLOW_GAP_RELEASE_VREL_MS = 0.10
+  _RESUME_DECEL_GATE_MS2 = -0.5   # aEgo below this = actively decelerating; suppress upward SET restore (decel set-restore gate)
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
@@ -463,8 +465,16 @@ class LongController:
   # roadRange 30-38m vs ~110m design) cannot release a map cap that is correctly catching a bend
   # CSA has not locked yet. Fail-safe + trivial revert: set _CSA_MAP_DISAGREE_VETO False.
   _CSA_MAP_DISAGREE_VETO = True
-  _CSA_CONFIDENT_FLAT_C2 = 0.00225          # 1/m; 0.5 * _CSA_MIN_ABS_C2 (R > ~440m = unambiguously straight)
+  _CSA_CONFIDENT_FLAT_C2 = 0.00225          # 1/m; base (low-speed) flat threshold (R > ~440m = unambiguously straight)
   _CSA_CONFIDENT_FLAT_MIN_RANGE_M = 100.0   # CSA must be far-sighted (near design lookahead) before "flat" is trusted to veto
+  # Speed-scale (49mph-miss fix): CSA under-reads curvature on faster roads, so a fixed c2 flat
+  # threshold lets a real bend read as "flat" and veto a correct mapd cap (the 49 mph c2 -0.0018
+  # case). Demand a lower c2 at higher speed by holding a gentle lateral accel v^2*|c2| constant,
+  # floored so it never gets impossibly strict. Low speed keeps the base threshold (still vetoes
+  # mapd false positives). Revert: set _CSA_FLAT_LAT_ACCEL_MS2 huge to disable the scaling.
+  _CSA_FLAT_LAT_ACCEL_MS2 = 0.58
+  _CSA_CONFIDENT_FLAT_C2_FLOOR = 0.0008
+  _CURVE_EXIT_FLAT_C2 = 0.0012   # range-independent "bend has ended" curvature for curve-exit release
 
   # Named-road roundabout cap. The Tesla posts NO native roundabout/junction flag over CAN
   # when the nav route is inactive (the UI_csaOfframpCurvature channel stays zero and
@@ -540,6 +550,7 @@ class LongController:
     self._sl_last_raw_ms: float = 0.0
     self._sl_last_change_ms: int = 0
     self._sl_flicker_latch: bool = False
+    self._sl_flicker_latch_since_ms: int = 0
     self._sl_carstate_mapd_offset_ms: float = 0.0
     self._mapd_map_curve_ms: Optional[float] = None
     self._mapd_vision_curve_ms: Optional[float] = None
@@ -1222,6 +1233,15 @@ class LongController:
       self._curve_planner_release_candidate_since_ms = 0
       return True
 
+    # Delme-exit fix: range-independent geometric-clear release. At a curve exit the CSA range is
+    # naturally short (fails _csa_confidently_flat's 100m gate), so the hold lingered until the
+    # wheel straightened. When NO fresh mapd curve cap remains AND live CSA curvature is small,
+    # the bend we were in has ended -> release now. Fail-safe: only restores speed; arbitration
+    # re-caps next cycle if a real curve remains. (Revert: delete this block.)
+    if self._curve_geometrically_cleared(now_ns=int(now_ns)):
+      self._curve_planner_release_candidate_since_ms = 0
+      return True
+
     release_margin_ms = float(self._CURVE_RELEASE_NEAR_TARGET_MARGIN_MS)
     planner_last_clear = float(planner_last_ms) >= (float(reference_ms) - release_margin_ms)
     planner_near_clear = float(planner_near_ms) >= (float(reference_ms) - (2.2 * release_margin_ms))
@@ -1247,6 +1267,21 @@ class LongController:
         return False
 
     return elapsed_ms >= int(self._CURVE_PLANNER_RELEASE_PERSIST_MS)
+
+  def _curve_geometrically_cleared(self, *, now_ns: int) -> bool:
+    """Range-independent 'the bend I'm in has ended' check for curve-EXIT release: no fresh mapd
+    curve cap AND live CSA curvature small. Unlike _csa_confidently_flat (far-sighted, 100m gate,
+    for the veto), this trusts a short-range flat reading because CSA range is naturally short at
+    a curve exit. Fail-safe: only used to release a hold (restores speed); arbitration re-caps if
+    a real curve remains."""
+    raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
+    if raw_map_ms is not None or raw_vision_ms is not None:
+      return False
+    sample = self._csa_last_sample
+    if not isinstance(sample, dict) or not bool(sample.get("advancing", False)):
+      return False
+    c2 = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0))
+    return bool(math.isfinite(c2) and c2 < float(self._CURVE_EXIT_FLAT_C2))
 
   def _reset_curve_hold(self) -> None:
     self._curve_entry_candidate_since_ms = 0
@@ -1892,12 +1927,19 @@ class LongController:
     if abs(float(raw_ms) - float(self._sl_last_raw_ms)) > tol:
       interval_ms = int(now_ms) - int(self._sl_last_change_ms)
       if int(self._sl_last_change_ms) > 0 and interval_ms <= int(self._SPEED_LIMIT_FLICKER_WINDOW_MS):
+        if not self._sl_flicker_latch:
+          self._sl_flicker_latch_since_ms = int(now_ms)
         self._sl_flicker_latch = True
       self._sl_last_change_ms = int(now_ms)
       self._sl_last_raw_ms = float(raw_ms)
 
     # CarState has held steady long enough -> trust it again.
     if (int(now_ms) - int(self._sl_last_change_ms)) >= int(self._SPEED_LIMIT_SETTLE_MS):
+      self._sl_flicker_latch = False
+    # Safety bound: the latch can never hold longer than _SPEED_LIMIT_LATCH_MAX_MS, so a persistent
+    # micro-flicker with mapd absent can't pin the limit on a stale held value indefinitely (the
+    # 49mph-stuck-until-power-cycle failure mode). After the bound it trusts live CarState again.
+    if self._sl_flicker_latch and (int(now_ms) - int(self._sl_flicker_latch_since_ms)) >= int(self._SPEED_LIMIT_LATCH_MAX_MS):
       self._sl_flicker_latch = False
 
     if not self._sl_flicker_latch:
@@ -2176,7 +2218,7 @@ class LongController:
       # released on a confidently-flat road. A fresh+advancing+far-sighted CSA reading that sees a
       # straight road vetoes the map-only force-entry too. Same strict asymmetry: short-range /
       # silent / stale CSA returns False and never blocks force-entry (late-CSA tight curves stand).
-      if (not self._MAPD_VISION_ENABLE) and self._csa_confidently_flat():
+      if (not self._MAPD_VISION_ENABLE) and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms)):
         self._curve_force_entry_candidate_since_ms = 0
         return None, ""
       strong_map_only_hint = bool(
@@ -2338,10 +2380,17 @@ class LongController:
     curve_floor_ms = min(curve_candidates) if curve_candidates else 0.0
     curve_drop_ms = float(reference_ms) - float(curve_floor_ms) if curve_floor_ms > 0.1 else 0.0
 
-    low_speed_curve = float(v_ego_ms) <= 35.0 * CV.MPH_TO_MS
+    # Delme-exit fix: only keep blocking re-acceleration while an actual curve source is still
+    # present. Previously the low-speed (v<=35) and steering terms held the block for seconds
+    # after a roundabout had cleared (map=0, c2 flat, vision clear) until the wheel finished
+    # unwinding. Gate those terms on a live mapd curve cap so the block lifts the moment the bend
+    # is geometrically gone. lat-saturation still always blocks (safety). The curve HOLD remains
+    # the primary cap, so this only releases belt-and-suspenders pinning, never a real curve.
+    has_curve_source = bool(curve_candidates)
+    low_speed_curve = bool(has_curve_source) and float(v_ego_ms) <= 35.0 * CV.MPH_TO_MS
     meaningful_curve = (
       curve_drop_ms >= float(self._CURVE_ACTIVE_ACCEL_BLOCK_MIN_DROP_MS)
-      or abs(float(current_angle_deg)) >= float(self._CURVE_REENTRY_ALLOW_STEER_DEG)
+      or (has_curve_source and abs(float(current_angle_deg)) >= float(self._CURVE_REENTRY_ALLOW_STEER_DEG))
       or bool(self._lat_limit_saturated)
       or low_speed_curve
     )
@@ -2981,6 +3030,7 @@ class LongController:
     self._sl_last_raw_ms = 0.0
     self._sl_last_change_ms = 0
     self._sl_flicker_latch = False
+    self._sl_flicker_latch_since_ms = 0
     # longitudinal-plan / lead cache
     self._lp_target_last_ms = None
     self._lp_target_near_ms = None
@@ -3059,7 +3109,7 @@ class LongController:
     return float(v_cap_ms), "csa"
 
 
-  def _csa_confidently_flat(self) -> bool:
+  def _csa_confidently_flat(self, *, v_ego_ms: float = 0.0) -> bool:
     """True only when a FRESH, advancing, FAR-SIGHTED CSA sample reads the road ahead as
     unambiguously straight. Used as the vision-style disagreement cross-check (point 2): when
     mapd vision is disabled and mapd-map alone wants a cap, a confidently-flat CSA reading
@@ -3087,7 +3137,11 @@ class LongController:
     c2 = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0))
     if not math.isfinite(c2):
       return False
-    return bool(c2 < float(self._CSA_CONFIDENT_FLAT_C2))
+    flat_c2 = float(self._CSA_CONFIDENT_FLAT_C2)
+    v = float(v_ego_ms)
+    if v > 1.0:
+      flat_c2 = min(flat_c2, max(float(self._CSA_CONFIDENT_FLAT_C2_FLOOR), float(self._CSA_FLAT_LAT_ACCEL_MS2) / (v * v)))
+    return bool(c2 < flat_c2)
 
 
   def _roundabout_curve_target_ms(
@@ -3252,7 +3306,7 @@ class LongController:
     if (
       not self._MAPD_VISION_ENABLE
       and map_only_low
-      and self._csa_confidently_flat()
+      and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms))
       and not (planner_curve_active or steer_busy or bool(self._lat_limit_saturated) or bool(live_lead_context) or csa_supports or roundabout_supports)
     ):
       return None, "map_only_csa_disagrees"
@@ -4448,6 +4502,16 @@ class LongController:
       )
       self._rate_log(msg)
       return LongDecision(int(CruiseButtons.CANCEL), msg)
+
+    # Decel set-restore gate: while the car is actively slowing, never command SET above the
+    # current SET. Previously the CRUISE_SYNC restore kept yanking SET up toward v_ego mid-decel
+    # (set oscillated 40->58->40 on a 60->30), holding speed up and interrupting the slowdown.
+    # Only restore SET upward when accelerating/steady. Downward caps (curve/lead/limit) are
+    # untouched -- this clamps only the upward restore. (Revert: delete this block.)
+    a_ego_ms2 = float(getattr(cs_out, "aEgo", 0.0) or 0.0)
+    if a_ego_ms2 < float(self._RESUME_DECEL_GATE_MS2) and float(desired_ms) > float(current_set_ms):
+      desired_ms = float(current_set_ms)
+      src = f"{src}+decel_no_restore"
 
     decision: AccDecision = self.acc.update(
       now_ms=now,

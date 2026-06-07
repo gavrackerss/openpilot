@@ -1077,6 +1077,13 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"csaOffRange={_safe_float((record.get('csa') or {}).get('offrampRange'), 0.0):.0f} "
     f"navExp={_safe_float((record.get('csa') or {}).get('navExpSpeed'), 0.0):.0f} "
     f"navAct={_safe_float((record.get('csa') or {}).get('navRouteActive'), 0.0):.0f} "
+    f"laneC2={_safe_float((record.get('csa') or {}).get('laneC2'), 0.0):.6f} "
+    f"laneRng={_safe_float((record.get('csa') or {}).get('laneRange'), 0.0):.0f} "
+    f"laneCtr={_safe_float((record.get('csa') or {}).get('laneCtr'), 0.0):.0f} "
+    f"mppSL={_safe_float((record.get('csa') or {}).get('mppSpeedLimit'), 0.0):.0f} "
+    f"mapSL={_safe_float((record.get('csa') or {}).get('mapSpeedLimit'), 0.0):.0f} "
+    f"roadSign={_safe_float((record.get('csa') or {}).get('roadSign'), 0.0):.0f} "
+    f"redLight={_safe_float((record.get('csa') or {}).get('redLightStopSign'), 0.0):.0f} "
     f"road={_safe_str((mapd.get('rawRoadFields') or {}).get('roadName', (mapd.get('rawRoadFields') or {}).get('wayName', '-'))).replace(' ', '_')[:32] or '-'} "
     f"ctx={_safe_str((mapd.get('rawRoadFields') or {}).get('roadContext', '-')) or '-'} "
     f"sel={_safe_str((mapd.get('rawRoadFields') or {}).get('waySelectionType', '-')) or '-'} "
@@ -1122,7 +1129,12 @@ class CsaCanReader:
     ("UI_csaOfframpCurvature", 0),  # 728: offramp curvature + Range
     ("AutopilotStatus", 0),         # 921: DAS_csaState gate (0 unavail/1 avail/2 enable/3 hold)
     ("MCU_locationStatus2", 0),     # 104: MCU_navigonExpectedSpeed (route-tied, mph)
-    ("UI_driverAssistMapData", 0),  # 968: UI_navRouteActive
+    ("UI_driverAssistMapData", 0),  # 968: UI_navRouteActive, UI_mapSpeedLimit, UI_mapSpeedLimitType
+    # Camera / AP-derived candidates (evaluate as replacements for the CSA/mapd cross-checks)
+    ("DAS_lanes", 0),               # 569: DAS_virtualLaneC2/C3 (camera lane-path curvature), view range, lane-exists
+    ("UI_gpsVehicleSpeed", 0),      # 760: UI_mppSpeedLimit (posted limit, kph/mph)
+    ("UI_driverAssistRoadSign", 0), # 568: UI_roadSign (camera TSR), UI_roadSignCounter
+    ("MCU_chassisControl", 0),      # 536: MCU_redLightStopSignEnable (red-light / stop-sign awareness)
   ]
 
   def __init__(self) -> None:
@@ -1175,6 +1187,18 @@ class CsaCanReader:
       return None
     return v if math.isfinite(v) else None
 
+  def _read_any(self, msg: str, sig: str) -> float | None:
+    # The camera/AP messages may ride a different bus than CSA, so try every built parser
+    # and return the first finite read instead of assuming the CSA-live bus.
+    for b in self.buses_built:
+      cp = self._parsers.get(b)
+      if cp is None:
+        continue
+      v = self._read(cp, msg, sig)
+      if v is not None:
+        return v
+    return None
+
   def _bus_counter(self, bus: int) -> int:
     cp = self._parsers.get(bus)
     if cp is None:
@@ -1221,6 +1245,19 @@ class CsaCanReader:
     out["offrampCtr"] = self._read(cp, "UI_csaOfframpCurvature", "UI_csaOfframpCurvCounter")
     out["navExpSpeed"] = self._read(cp, "MCU_locationStatus2", "MCU_navigonExpectedSpeed")
     out["navRouteActive"] = self._read(cp, "UI_driverAssistMapData", "UI_navRouteActive")
+    # Camera / AP-derived candidate signals (read across all buses; null => not on this car's bus)
+    out["laneC2"] = self._read_any("DAS_lanes", "DAS_virtualLaneC2")            # camera lane-path curvature (1/m)
+    out["laneC3"] = self._read_any("DAS_lanes", "DAS_virtualLaneC3")
+    out["laneRange"] = self._read_any("DAS_lanes", "DAS_virtualLaneViewRange")  # m
+    out["laneL"] = self._read_any("DAS_lanes", "DAS_leftLaneExists")
+    out["laneR"] = self._read_any("DAS_lanes", "DAS_rightLaneExists")
+    out["laneCtr"] = self._read_any("DAS_lanes", "DAS_lanesCounter")
+    out["mppSpeedLimit"] = self._read_any("UI_gpsVehicleSpeed", "UI_mppSpeedLimit")        # posted limit (kph/mph)
+    out["mapSpeedLimit"] = self._read_any("UI_driverAssistMapData", "UI_mapSpeedLimit")    # enum (LESS_OR_EQ_*)
+    out["mapSpeedLimitType"] = self._read_any("UI_driverAssistMapData", "UI_mapSpeedLimitType")
+    out["roadSign"] = self._read_any("UI_driverAssistRoadSign", "UI_roadSign")             # camera TSR
+    out["roadSignCtr"] = self._read_any("UI_driverAssistRoadSign", "UI_roadSignCounter")
+    out["redLightStopSign"] = self._read_any("MCU_chassisControl", "MCU_redLightStopSignEnable")
     return out
 
 
@@ -1320,9 +1357,16 @@ def main() -> int:
           cc_diag_age_ms = -1.0
       cc_diag_stale = bool(cc_diag_age_ms < 0.0 or cc_diag_age_ms > 1800.0)
 
+      # Prefer the LONG module's actual decision (src/tgt/btn/reason). The carcontroller's
+      # high-rate cc_diag 'no_decision' heartbeat (the 5Hz send-gate "gated: 5Hz(frame)") must
+      # NOT override a fresh real command -- doing so blanked ~95% of summary rows and hid every
+      # press/cancel. Only fall back to cc_diag when there is NO fresh long_decision, so the
+      # summary still surfaces no_decision/pre/turn_hold context when the module isn't commanding.
+      # (Revert: drop the `long_log_stale and` guard to restore the old no_decision-wins behaviour.)
       decision_raw = long_decision_raw
       if (
-        isinstance(cc_diag_raw, dict)
+        long_log_stale
+        and isinstance(cc_diag_raw, dict)
         and not cc_diag_stale
         and _safe_str(cc_diag_raw.get("gate")) == "no_decision"
       ):

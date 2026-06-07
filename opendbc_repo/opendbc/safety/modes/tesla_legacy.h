@@ -228,6 +228,16 @@ static void tesla_legacy_scrub_fcw_only(CANPacket_t *msg) {
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
+// Unity-parity 0x389 (DAS_status2) benign-state scrub for the bus2->bus0 forward when OP does
+// NOT own the HUD. Mirrors the 0x399 scrub so a latched IC long-collision/AEB warning clears
+// without engaging: DAS_activationFailureStatus (14|2) -> 0, DAS_longCollisionWarning (48|4) ->
+// 0x0F ("no warning"). Display-only; does NOT affect AEB braking.
+static void tesla_legacy_scrub_status2_longcoll_only(CANPacket_t *msg) {
+  msg->data[1] &= 0x3FU;                                     // DAS_activationFailureStatus = 0
+  msg->data[6] = (uint8_t)((msg->data[6] & 0xF0U) | 0x0FU);  // DAS_longCollisionWarning = 0x0F
+  tesla_legacy_set_last_byte_checksum(msg);
+}
+
 
 
 // --- RX hook ---
@@ -608,10 +618,16 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       } else {
         tesla_legacy_scrub_fcw_only(to_fwd);
       }
-    } else if (scrub_hud_owner) {
-      if (addr == 0x389) {
+    } else if (addr == 0x389) {
+      // Always neutralize DAS_status2 AEB/long-collision fields on the IC-bound copy. Full
+      // idle rewrite while OP owns the HUD; benign long-collision/activation clear otherwise.
+      if (scrub_hud_owner) {
         tesla_legacy_scrub_status2_warnings(to_fwd);
-      } else if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
+      } else {
+        tesla_legacy_scrub_status2_longcoll_only(to_fwd);
+      }
+    } else if (scrub_hud_owner) {
+      if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
         tesla_legacy_clear_warning_matrix(to_fwd);
       } else {
       }

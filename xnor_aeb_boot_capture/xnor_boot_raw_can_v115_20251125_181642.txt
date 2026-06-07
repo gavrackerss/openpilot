@@ -1,0 +1,117 @@
+# xnor boot raw CAN watcher v115
+# XNOR_V161_QUIET_BOOT_WATCHER active
+# XNOR_V162_DIAGNOSTIC_ONLY_BOOT_WATCHER active
+# XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY active
+# started=2025-11-25T18:16:42.037115+00:00
+# duration=210.0s raw_can_mode=targeted all_sendcan=True
+# caps=jsonl_uncompressed<2.0MiB txt<128.0KiB keep_runs=6
+# txt=/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181642.txt
+# jsonl_gz=/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181642.jsonl.gz
+# summary=/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181642.summary.json
+# target_addrs=0x45:STW_ACTN_RQ stalk,0x106:DI_torque1 PT,0x108:DI_torque1 chassis,0x116:DI_torque2 PT,0x118:DI_torque2 chassis,0x155:ESP_vehicleSpeed,0x20A:BrakeMessage,0x219:AP/EAC/autopark state,0x239:DAS_lanes,0x27D:APS_eacMonitor,0x2BF:DAS_control/AEB/longitudinal,0x309:warning matrix,0x329:warning matrix,0x349:warning matrix,0x368:DI_state/cruise,0x369:warning matrix,0x370:EPAS_sysStatus/EAC,0x389:DAS_status2/longCollision HUD,0x399:AutopilotStatus/FCW HUD,0x3A9:DAS_telemetry,0x488:DAS_steeringControl,0x659:XNOR fake/internal DAS carrier
+STATE t=1.010 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=1.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=2.010 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=2.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=3.019 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=3.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=4.021 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=4.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=5.026 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=5.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=6.028 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=6.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=7.031 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=7.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=8.035 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=8.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=9.036 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=9.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=10.044 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=10.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=11.054 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=11.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=12.063 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=12.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=13.067 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=13.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=14.068 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=14.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=15.078 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=15.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=16.088 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=16.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=17.098 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=17.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=18.107 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=18.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=19.111 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=19.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=20.128 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=20.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=21.136 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=21.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=22.142 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=22.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=23.148 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=23.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=24.155 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=24.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=25.166 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=25.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=26.168 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=26.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=27.177 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=27.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=28.186 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=28.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=29.189 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=29.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=30.197 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=30.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=31.207 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=31.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=32.216 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=32.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=33.225 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=33.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=34.225 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=34.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=35.231 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=35.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=36.239 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=36.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=37.240 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=37.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=38.241 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=38.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=39.249 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=39.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=40.255 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=40.3 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=41.256 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=41.3 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=42.257 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=42.3 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=43.259 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=43.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=44.265 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=44.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=45.275 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=45.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=46.283 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=46.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=47.288 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=47.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=48.291 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=48.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=49.302 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=49.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=50.312 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=50.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=51.316 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=51.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=52.323 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=52.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
+STATE t=53.326 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
+SUMMARY t=53.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0

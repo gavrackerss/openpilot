@@ -17,10 +17,15 @@ private:
   void updateMultiplexingMode();
   std::string fetchCarParams();
   void setSafetyMode(const std::string &params_string);
+  // XNOR early-teslaLegacy: set the real safety model from cached CarParams before
+  // ControlsReady, so the forward-scrub is live early and the boot-window leak shrinks.
+  bool trySetEarlyTeslaSafety();
+  bool carParamsHaveTeslaLegacySafety(const std::string &params_string);
 
   bool initialized_ = false;
   bool log_once_ = false;
   bool safety_configured_ = false;
+  bool early_tesla_safety_configured_ = false;
   bool prev_obd_multiplexing_ = false;
   std::vector<Panda *> pandas_;
   Params params_;
