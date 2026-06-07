@@ -10,6 +10,16 @@ if test -z "${XNOR_BOOT_RAW_CAN_WATCH_V115_DISABLE:-}" && test ! -e /tmp/xnor_bo
 fi
 # XNOR_BOOT_RAW_CAN_WATCH_V115_END
 
+# XNOR_MAPD_WATCHDOG_START
+if test -z "${XNOR_MAPD_WATCHDOG_DISABLE:-}" && test ! -e /tmp/xnor_mapd_watchdog.started; then
+  touch /tmp/xnor_mapd_watchdog.started 2>/dev/null || true
+  (
+    cd /data/openpilot 2>/dev/null || exit 0
+    nohup /usr/bin/env python3 mapd_watchdog.py >/tmp/xnor_mapd_watchdog.log 2>&1 &
+  ) >/dev/null 2>&1 || true
+fi
+# XNOR_MAPD_WATCHDOG_END
+
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
 source "$DIR/launch_env.sh"
