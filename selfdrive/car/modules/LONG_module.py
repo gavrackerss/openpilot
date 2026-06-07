@@ -378,6 +378,7 @@ class LongController:
   _LOW_SPEED_LEAD_BLOCK_OPENING_VREL_MS = 1.0
   _LOW_SPEED_LEAD_BLOCK_TARGET_MARGIN_MS = 0.35 * CV.MPH_TO_MS
   _ARBITRATION_LEAD_CRITICAL_TIME_GAP_S = 1.35
+  _LEAD_OFFPATH_CANCEL_MARGIN_M = 3.5   # radar |yRel| beyond the curvature-predicted lateral offset by this much => off-path lead; block hard CANCEL (still followed)
   _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 2.15
   _ARBITRATION_LEAD_CLOSING_MS = -0.15
   _ARBITRATION_LEAD_PLANNER_DROP_MS = 1.5 * CV.MPH_TO_MS
@@ -2567,6 +2568,24 @@ class LongController:
     blocked_ms = min(float(desired_ms), float(no_accel_ceiling_ms))
     return float(blocked_ms), bool(blocked_ms < (float(desired_ms) - 0.05))
 
+  def _lead_offpath_for_cancel(self) -> bool:
+    """Radar lateral-offset sanity for hard lead CANCELs (plumb-in more radar data). A real in-lane
+    lead at distance d on a road of curvature kappa sits at a predicted lateral offset ~0.5*|kappa|*d^2
+    (CSA c2 as kappa). A radar return well outside that band is a roadside object / adjacent lane, so
+    it must not trigger a blunt CANCEL (the phantom-lead-on-curve -7.9 m/s pop-in). Conservative: the
+    lead is still FOLLOWED with normal DECEL -- only the CANCEL is gated. Fail-safe: missing yRel /
+    curvature returns False and the cancel proceeds exactly as before."""
+    d = float(self._lead_drel)
+    if d <= 0.1:
+      return False
+    y = abs(float(self._lead_yrel))
+    if not math.isfinite(y) or y <= 0.0:
+      return False
+    sample = self._csa_last_sample if isinstance(self._csa_last_sample, dict) else {}
+    kappa = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0)) if bool(sample.get("advancing")) else 0.0
+    expected_y = 0.5 * float(kappa) * d * d
+    return bool(y > (expected_y + float(self._LEAD_OFFPATH_CANCEL_MARGIN_M)))
+
   def _lead_close_cancel_needed(
     self,
     *,
@@ -3276,12 +3295,20 @@ class LongController:
         raw_vision_ms is not None
         and float(raw_vision_ms) >= (float(reference_ms) - float(self._PLANNER_ONLY_CURVE_RELEASE_VISION_MARGIN_MS))
       )
+      # Fix #5 (phantom planner curve): with mapd vision disabled raw_vision_ms is None, so
+      # vision_clear is never True and a planner-only false curve on a dead-straight road was never
+      # vetoed -- it pinned the SET at 40 for ~55s on flat A32. Let a confidently-flat, far-sighted
+      # CSA reading stand in for vision_clear, exactly as it does for the mapd-map cross-check.
+      road_clear = bool(
+        vision_clear
+        or ((not self._MAPD_VISION_ENABLE) and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms)))
+      )
       straightish = bool(
         abs(float(current_angle_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_STEER_DEG)
         and abs(float(steering_rate_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_RATE_DEG)
       )
       generic_plan_source = str(self._lp_source or "").lower() in ("", "cruise", "e2e")
-      if generic_plan_source and vision_clear and straightish and not bool(self._lat_limit_saturated) and not csa_supports and not roundabout_supports:
+      if generic_plan_source and road_clear and straightish and not bool(self._lat_limit_saturated) and not csa_supports and not roundabout_supports:
         return None, "planner_suggested_unconfirmed"
 
     map_only_low = bool(
@@ -3331,7 +3358,10 @@ class LongController:
       owner_parts.append("roundabout")
 
     if planner_curve_active:
-      curve_candidates.append(float(planner_near_ms))
+      planner_cand_ms = float(planner_near_ms)
+      if roundabout_supports:
+        planner_cand_ms = max(planner_cand_ms, float(roundabout_target_ms))
+      curve_candidates.append(planner_cand_ms)
       owner_parts.append("planner")
 
     curve_specific_ms = self._curve_specific_mapd_target_ms(
@@ -3342,7 +3372,14 @@ class LongController:
       planner_curve_active=bool(planner_curve_active),
     )
     if curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
-      curve_candidates.append(float(curve_specific_ms))
+      mapd_cand_ms = float(curve_specific_ms)
+      # Fix #2: mapd under-reads big named roundabouts (Delme: mapCurveSpeed 15 -> floored to 18,
+      # too slow; ~23 is fine). On a named roundabout don't let the mapd/planner candidate pull the
+      # target below the roundabout circulation cap. CSA (real geometry, added unfloored above) may
+      # still lower it for a genuinely tight roundabout. (Revert: drop these two roundabout floors.)
+      if roundabout_supports:
+        mapd_cand_ms = max(mapd_cand_ms, float(roundabout_target_ms))
+      curve_candidates.append(mapd_cand_ms)
       owner_parts.append("mapd_comfort" if bool(self._mapd_comfort_bias_active) else "mapd")
 
     if not curve_candidates:
@@ -4426,7 +4463,8 @@ class LongController:
     stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
     brake_pressed = bool(getattr(cs_out, "brakePressed", False))
 
-    if stock_cruise_enabled and self._lead_approach_force_cancel_needed(
+    lead_offpath = self._lead_offpath_for_cancel()
+    if stock_cruise_enabled and not lead_offpath and self._lead_approach_force_cancel_needed(
       now_ms=int(now),
       desired_ms=float(desired_ms),
       current_set_ms=float(current_set_ms),
@@ -4446,7 +4484,7 @@ class LongController:
       self._rate_log(msg)
       return LongDecision(int(CruiseButtons.CANCEL), msg)
 
-    if stock_cruise_enabled and self._lead_close_cancel_needed(
+    if stock_cruise_enabled and not lead_offpath and self._lead_close_cancel_needed(
       now_ms=int(now),
       current_set_ms=float(current_set_ms),
       v_ego_ms=float(v_ego_ms),
@@ -4463,7 +4501,7 @@ class LongController:
       self._rate_log(msg)
       return LongDecision(int(CruiseButtons.CANCEL), msg)
 
-    if stock_cruise_enabled and self._lead_approach_cancel_needed(
+    if stock_cruise_enabled and not lead_offpath and self._lead_approach_cancel_needed(
       now_ms=int(now),
       desired_ms=float(desired_ms),
       current_set_ms=float(current_set_ms),
@@ -4483,7 +4521,7 @@ class LongController:
       self._rate_log(msg)
       return LongDecision(int(CruiseButtons.CANCEL), msg)
 
-    if stock_cruise_enabled and self._lead_stuck_cancel_needed(
+    if stock_cruise_enabled and not lead_offpath and self._lead_stuck_cancel_needed(
       now_ms=int(now),
       desired_ms=float(desired_ms),
       current_set_ms=float(current_set_ms),

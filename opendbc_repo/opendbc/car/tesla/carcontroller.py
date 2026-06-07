@@ -397,25 +397,31 @@ class CarController(CarControllerBase):
     # the most-recent coherent source the IC latches: warning fields held at 0/clean, counter
     # rolling 0-15, checksum computed in Python (external panda does not recompute on TX).
     #
-    # Emit the WHOLE group together and ONLY while engaged to avoid the dual-ownership IC
-    # oscillation (blue/white D) that the prior no-op was guarding against. When disengaged we
-    # stop emitting and hand the HUD back to the factory computer.
+    # Unity-style full ownership: transmit the clean DAS_status group CONTINUOUSLY -- disengaged
+    # too -- so OP is always the IC's coherent source and the factory AEB/FCW never shows or
+    # latches. The earlier engaged-only guard avoided a blue/white IC oscillation, but that came
+    # from OP asserting an "engaged" state (autopilotStatus=5) that disagreed with the stock /
+    # forward-scrubbed frame. We avoid it by emitting a benign autopilotStatus=2 when disengaged
+    # (5 when engaged), which MATCHES the panda forward-scrub (tesla_legacy_scrub_fcw_only also
+    # writes autopilotStatus=2). Both sources agree -> no oscillation, and the IC drops the latch.
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
     self._hud_prev_enabled = enabled
-
+    # TEMP DEBUG — remove after diagnosing
+    self._diag_log(
+      f"[XNOR_HUD] cls={type(self.tesla_can).__name__} enabled={enabled} "
+      f"has_ds={hasattr(self.tesla_can,'create_das_status')} "
+      f"has_ds2={hasattr(self.tesla_can,'create_das_status2')} parity={self.frame % 2}"
+    )
     # Only the legacy builders own the clean DAS group; non-legacy path is unaffected.
     if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
       return
-
-    if not enabled:
-      return  # disengaged -> stock owns its own HUD; do not half-own it
 
     # 50 Hz (every other frame) to meet/beat the ~25 Hz stock cadence so OP latches last.
     if self.frame % 2 != 0:
       return
 
     counter = (self.frame // 2) % 16
-    op_status = 5  # engaged
+    op_status = 5 if enabled else 2  # 5 engaged; 2 = benign "AP active" (matches forward-scrub)
 
     cs_out = getattr(CS, "out", None)
     blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False

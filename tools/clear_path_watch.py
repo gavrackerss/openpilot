@@ -663,6 +663,32 @@ def _model_summary(model: Any) -> dict[str, Any]:
     "x0": (_take_numeric(_maybe_attr(position, "x", None), 1) or [None])[0],
     "y0": (_take_numeric(_maybe_attr(position, "y", None), 1) or [None])[0],
   }
+
+  # Vision path curvature from the comma model (candidate cross-check vs CSA c2 / mapd).
+  # kappa(i) = yawRate(i) / max(v(i), 1) [1/m] along the predicted path. Report: the immediate
+  # value (mean of the first few near points), the tightest |kappa| within ~130 m ahead, and how
+  # far ahead that tightest point sits -- directly comparable to csaC2 + csaRange.
+  out["mdlCurvNow"] = None
+  out["mdlCurvMax"] = None
+  out["mdlCurvMaxDist"] = None
+  try:
+    xs = _take_numeric(_maybe_attr(position, "x", None), 33)
+    yaw_rate = _take_numeric(_maybe_attr(_maybe_attr(model, "orientationRate", None), "z", None), 33)
+    vx = _take_numeric(_maybe_attr(_maybe_attr(model, "velocity", None), "x", None), 33)
+    n = min(len(xs), len(yaw_rate), len(vx))
+    if n > 0:
+      kappa = [yaw_rate[i] / (vx[i] if vx[i] > 1.0 else 1.0) for i in range(n)]
+      near = [abs(k) for k in kappa[:4]]
+      if near:
+        out["mdlCurvNow"] = sum(near) / len(near)
+      horizon = [(xs[i], kappa[i]) for i in range(n) if xs[i] <= 130.0]
+      if horizon:
+        x_at, k_at = max(horizon, key=lambda p: abs(p[1]))
+        out["mdlCurvMax"] = k_at
+        out["mdlCurvMaxDist"] = x_at
+  except Exception:
+    pass
+
   out["leadsV3"] = leads_out
   out["laneLines"] = lane_lines
   return out
@@ -1060,6 +1086,8 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"gapS={_safe_float(follow.get('actualGapS'), 0.0):.2f} "
     f"dRel={_safe_float(follow.get('dRel'), 0.0):.1f} "
     f"vRel={_safe_float(follow.get('vRel'), 0.0):.2f} "
+    f"yRel={_safe_float(record['radarState']['leadOne'].get('yRel'), 0.0):.1f} "
+    f"aLeadK={_safe_float(record['radarState']['leadOne'].get('aLeadK'), 0.0):.2f} "
     f"desiredTF={_safe_float(follow.get('desiredTF'), 0.0):.2f} "
     f"pNear={_safe_float(flags.get('pNear'), 0.0):.2f} "
     f"mapAlive={int(_safe_bool(mapd.get('alive', False)))} "
@@ -1074,6 +1102,9 @@ def _write_summary_line(txt_f, record: dict[str, Any]) -> None:
     f"csaC2={_safe_float((record.get('csa') or {}).get('roadC2'), 0.0):.6f} "
     f"csaRange={_safe_float((record.get('csa') or {}).get('roadRange'), 0.0):.0f} "
     f"csaCtr={_safe_float((record.get('csa') or {}).get('roadCtr'), 0.0):.0f} "
+    f"mdlCurvNow={_safe_float((record.get('modelV2') or {}).get('mdlCurvNow'), 0.0):.6f} "
+    f"mdlCurvMax={_safe_float((record.get('modelV2') or {}).get('mdlCurvMax'), 0.0):.6f} "
+    f"mdlCurvDist={_safe_float((record.get('modelV2') or {}).get('mdlCurvMaxDist'), 0.0):.0f} "
     f"csaOffRange={_safe_float((record.get('csa') or {}).get('offrampRange'), 0.0):.0f} "
     f"navExp={_safe_float((record.get('csa') or {}).get('navExpSpeed'), 0.0):.0f} "
     f"navAct={_safe_float((record.get('csa') or {}).get('navRouteActive'), 0.0):.0f} "
