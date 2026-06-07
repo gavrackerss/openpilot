@@ -2,427 +2,582 @@
 # XNOR_V161_QUIET_BOOT_WATCHER active
 # XNOR_V162_DIAGNOSTIC_ONLY_BOOT_WATCHER active
 # XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY active
-# started=2025-11-25T18:16:42.037115+00:00
+# started=2025-11-25T18:16:42.530580+00:00
 # duration=210.0s raw_can_mode=targeted all_sendcan=True
 # caps=jsonl_uncompressed<2.0MiB txt<128.0KiB keep_runs=6
 # txt=/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181642.txt
 # jsonl_gz=/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181642.jsonl.gz
 # summary=/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181642.summary.json
+# pruned_old_runs=2
 # target_addrs=0x45:STW_ACTN_RQ stalk,0x106:DI_torque1 PT,0x108:DI_torque1 chassis,0x116:DI_torque2 PT,0x118:DI_torque2 chassis,0x155:ESP_vehicleSpeed,0x20A:BrakeMessage,0x219:AP/EAC/autopark state,0x239:DAS_lanes,0x27D:APS_eacMonitor,0x2BF:DAS_control/AEB/longitudinal,0x309:warning matrix,0x329:warning matrix,0x349:warning matrix,0x368:DI_state/cruise,0x369:warning matrix,0x370:EPAS_sysStatus/EAC,0x389:DAS_status2/longCollision HUD,0x399:AutopilotStatus/FCW HUD,0x3A9:DAS_telemetry,0x488:DAS_steeringControl,0x659:XNOR fake/internal DAS carrier
-STATE t=1.010 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=1.000 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=1.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=2.010 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=2.000 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=2.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=3.019 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=3.004 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=3.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=4.021 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=4.011 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=4.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=5.026 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=5.019 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=5.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=6.028 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=6.026 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=6.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=7.031 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=7.032 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=7.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=8.035 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=8.033 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=8.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=9.036 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=9.045 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=9.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=10.044 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=10.045 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=10.0 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=11.054 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=11.067 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=11.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=12.063 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=12.069 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=12.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=13.067 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=13.072 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=13.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=14.068 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=14.083 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=14.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=15.078 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=15.091 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=15.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=16.088 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=16.091 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=16.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=17.098 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=17.099 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=17.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=18.107 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=18.108 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=18.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=19.111 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=19.110 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=19.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=20.128 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=20.119 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=20.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=21.136 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=21.121 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=21.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=22.142 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=22.124 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=22.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=23.148 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=23.125 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=23.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=24.155 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
-SUMMARY t=24.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=25.166 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
-SUMMARY t=25.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=26.168 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
-SUMMARY t=26.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=27.177 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
-SUMMARY t=27.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=28.186 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=24.132 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=24.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=25.141 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=25.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=26.143 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=26.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=27.146 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=27.1 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=28.152 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=28.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=29.189 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=29.161 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=29.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=30.197 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=30.166 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=30.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=31.207 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=31.176 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=31.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=32.216 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=32.185 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=32.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=33.225 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=33.191 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=33.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=34.225 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=34.197 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=34.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=35.231 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=35.202 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=35.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=36.239 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=36.206 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=36.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=37.240 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=37.209 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=37.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=38.241 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=38.213 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=38.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=39.249 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+STATE t=39.214 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
 SUMMARY t=39.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=40.255 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
-SUMMARY t=40.3 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=41.256 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
-SUMMARY t=41.3 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=42.257 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
-SUMMARY t=42.3 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
-STATE t=43.259 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=43.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=44.265 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=44.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=45.275 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=45.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=46.283 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=46.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=47.288 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=47.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=48.291 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=48.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=49.302 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=49.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=50.312 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=50.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=51.316 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=51.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=52.323 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=52.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=53.326 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=53.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=54.336 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=54.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=55.345 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=55.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=56.348 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=56.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=57.349 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=57.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=58.350 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=58.3 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=59.355 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=59.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=60.364 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=60.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=61.367 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=61.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=62.368 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=62.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=63.371 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=63.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=64.379 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=64.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=65.381 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=65.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=66.382 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=66.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=67.388 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=67.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=68.393 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=68.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=69.399 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=69.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=70.405 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=70.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=71.410 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=71.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=72.415 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=72.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=73.416 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=73.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=74.425 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=74.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=75.430 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=75.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=76.431 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=76.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=77.432 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=77.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=78.438 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=78.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=79.447 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=79.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=80.448 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=80.4 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=81.453 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=81.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=82.454 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=82.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=83.456 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=83.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=84.464 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=84.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=85.465 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=85.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=86.468 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=86.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=87.475 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=87.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=88.480 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=88.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=89.490 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=89.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=90.499 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=90.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=91.505 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=91.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=92.510 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=92.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=93.510 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=93.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=94.514 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=94.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=95.520 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=95.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=96.530 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=96.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=97.533 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=97.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=98.538 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=98.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=99.545 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=99.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=100.547 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=100.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=101.549 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=101.5 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=102.559 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=102.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=103.569 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=103.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=104.577 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=104.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=105.586 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=105.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=106.593 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=106.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=107.600 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=107.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=108.606 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=108.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=109.612 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=109.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=110.617 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=110.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=111.620 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=111.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=112.625 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=112.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=113.628 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=113.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=114.630 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=114.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=115.631 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=115.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=116.637 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=116.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=117.641 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=117.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=118.649 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=118.6 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=119.652 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=119.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=120.659 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=120.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=121.669 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=121.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=122.677 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=122.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=123.683 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=123.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=124.684 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=124.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=125.693 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=125.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=126.696 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=126.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=127.706 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=127.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=128.706 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=128.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=129.707 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=129.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=130.714 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=130.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=131.718 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=131.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=132.719 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=132.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=133.727 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=133.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=134.734 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=134.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=135.737 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=135.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=136.746 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=136.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=137.748 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=137.7 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=138.758 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=138.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=139.758 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=139.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=140.762 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=140.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=141.770 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=141.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=142.772 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=142.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=143.776 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=143.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=144.779 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=144.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=145.787 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=145.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=146.787 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=146.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=147.793 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=147.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=148.802 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=148.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=149.811 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=149.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=150.814 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=150.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=151.818 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=151.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=152.822 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=152.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=153.823 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=153.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=154.833 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=154.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=155.833 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=155.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=156.837 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=156.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=157.842 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=157.8 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=158.852 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=158.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=159.853 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=159.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=160.859 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=160.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=161.869 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=161.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=162.874 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=162.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=163.880 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=163.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=164.881 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=164.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=165.890 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=165.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=166.899 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=166.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=167.900 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=167.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=168.905 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=168.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=169.908 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=169.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=170.910 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=170.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=171.918 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=171.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=172.918 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=172.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=173.925 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=173.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=174.931 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=174.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=175.940 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=175.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=176.947 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=176.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=177.950 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=177.9 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=178.958 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=179.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=179.967 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=180.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=180.968 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=181.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=181.970 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=182.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=182.975 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=183.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=183.980 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=184.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=184.981 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=185.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=185.991 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=186.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=186.993 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=187.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=187.994 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=188.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=188.995 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=189.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=190.002 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=190.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=191.002 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=191.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=192.004 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=192.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=193.007 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=193.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=194.008 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=194.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=195.015 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=195.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=196.016 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=196.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=197.021 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=197.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=198.025 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=198.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=199.030 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=199.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=200.042 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=200.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=201.047 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=201.0 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=202.056 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=202.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=203.062 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=203.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=204.065 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=204.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=205.066 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=205.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=206.073 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=206.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=207.076 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=207.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=208.083 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=208.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-STATE t=209.091 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:noOutput/allowed=0/fault=none/txBlk=0;p1:noOutput/allowed=0/fault=none/txBlk=0
-SUMMARY t=209.1 txblk_events=0 warnings=0 diag=2 top=- jsonl_drop=0
-# finished summary=/data/openpilot/xnor_aeb_boot_capture/xnor_boot_raw_can_v115_20251125_181642.summary.json jsonl_dropped=0 txt_dropped=0
+STATE t=40.218 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=40.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=41.219 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=41.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=42.222 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=42.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+STATE t=43.224 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- -
+SUMMARY t=43.2 txblk_events=0 warnings=0 diag=0 top=- jsonl_drop=0
+DIAG_EPAS t=43.318 src=0 status=EAC_INHIBITED(0) err=EAC_ERROR_TMP_FAULT(4) hands=0 faultRaw=0 reducedRaw=1 dat=11FE48071FF605EB steerTmp=- ctrlAllowed=-
+DIAG_EPAS t=43.318 src=2 status=EAC_INHIBITED(0) err=EAC_ERROR_TMP_FAULT(4) hands=0 faultRaw=0 reducedRaw=1 dat=11FE48071FF606EC steerTmp=- ctrlAllowed=-
+DIAG_STALK t=43.318 src=2 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=-
+DIAG_STALK t=43.318 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=-
+DIAG_STALK t=43.318 src=2 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=-
+DIAG_STALK t=43.318 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=-
+CAN_WARNING t=43.318 src=2 addr=0x399 dat=F006DF80B008F9A2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=43.318 src=0 addr=0x399 dat=F006DF80B008F9A2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=43.318 src=6 addr=0x2BF dat=0000529F79EB7A8A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 3, 'checksum': 138}
+CAN_WARNING t=43.318 src=4 addr=0x2BF dat=0000529F79EB7A8A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 3, 'checksum': 138}
+DIAG_STALK t=43.427 src=2 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.427 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.427 src=2 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.427 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.499 src=2 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.499 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.499 src=2 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.499 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.572 src=2 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.572 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.572 src=2 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.572 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.622 src=2 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.622 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.667 src=2 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.667 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.711 src=2 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.711 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.798 src=2 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.798 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.909 src=2 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=43.909 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.070 src=2 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.070 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.204 src=2 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.204 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+STATE t=44.282 v=- gear=- gas=- brake=- cruiseEn=- cruiseAvail=- stockAeb=- steerTmp=- ctrlEn=- ctrlAct=- long=- p0:elm327/allowed=0/fault=none/txBlk=0;p1:elm327/allowed=0/fault=none/txBlk=0
+SUMMARY t=44.3 txblk_events=0 warnings=72 diag=106 top=can:0x108@2:146;can:0x118@2:146;can:0x108@0:144;can:0x118@0:144;can:0x106@4:141;can:0x116@4:141;can:0x155@6:140;can:0x155@4:140;can:0x106@6:140;can:0x116@6:140 jsonl_drop=0
+DIAG_STALK t=44.301 src=2 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.301 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=44.325 src=4 addr=0x2BF dat=0000529F79EB1A2A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 0, 'checksum': 42}
+CAN_WARNING t=44.325 src=6 addr=0x2BF dat=0000529F79EB1A2A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 0, 'checksum': 42}
+CAN_WARNING t=44.340 src=2 addr=0x399 dat=F006DF80B00829D2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=44.340 src=0 addr=0x399 dat=F006DF80B00829D2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=44.379 src=2 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.379 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.456 src=2 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.456 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.514 src=2 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.514 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.600 src=2 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.600 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.695 src=2 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.695 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.806 src=2 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.806 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.916 src=2 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=44.916 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_CARSTATE t=45.036 steerTmp=0 stockAeb=0 cruiseAvail=1 gear=unknown lastEpas={0: {'epas_internal_sas_deg': -1.0, 'hands_on_level': 0, 'eac_error_code': 4, 'eac_error_name': 'EAC_ERROR_TMP_FAULT', 'eac_status': 0, 'eac_status_name': 'EAC_INHIBITED', 'epas_steering_fault_raw': 0, 'epas_steering_reduced_raw': 1, 'raw_b0': 17, 'raw_b2': 72, 'raw_b4': 31, 'raw_b6': 5, 'counter': 5, 'checksum': 235}, 2: {'epas_internal_sas_deg': -1.0, 'hands_on_level': 0, 'eac_error_code': 4, 'eac_error_name': 'EAC_ERROR_TMP_FAULT', 'eac_status': 0, 'eac_status_name': 'EAC_INHIBITED', 'epas_steering_fault_raw': 0, 'epas_steering_reduced_raw': 1, 'raw_b0': 17, 'raw_b2': 72, 'raw_b4': 31, 'raw_b6': 6, 'counter': 6, 'checksum': 236}}
+DIAG_STALK t=45.049 src=2 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.049 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_CARSTATE t=45.097 steerTmp=0 stockAeb=0 cruiseAvail=1 gear=drive lastEpas={0: {'epas_internal_sas_deg': -1.0, 'hands_on_level': 0, 'eac_error_code': 4, 'eac_error_name': 'EAC_ERROR_TMP_FAULT', 'eac_status': 0, 'eac_status_name': 'EAC_INHIBITED', 'epas_steering_fault_raw': 0, 'epas_steering_reduced_raw': 1, 'raw_b0': 17, 'raw_b2': 72, 'raw_b4': 31, 'raw_b6': 5, 'counter': 5, 'checksum': 235}, 2: {'epas_internal_sas_deg': -1.0, 'hands_on_level': 0, 'eac_error_code': 4, 'eac_error_name': 'EAC_ERROR_TMP_FAULT', 'eac_status': 0, 'eac_status_name': 'EAC_INHIBITED', 'epas_steering_fault_raw': 0, 'epas_steering_reduced_raw': 1, 'raw_b0': 17, 'raw_b2': 72, 'raw_b4': 31, 'raw_b6': 6, 'counter': 6, 'checksum': 236}}
+DIAG_STALK t=45.125 src=2 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.125 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=-/- pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.220 src=2 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.220 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+STATE t=45.310 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:elm327/allowed=0/fault=none/txBlk=0;p1:elm327/allowed=0/fault=none/txBlk=0
+SUMMARY t=45.3 txblk_events=0 warnings=134 diag=193 top=can:0x108@2:259;can:0x118@2:259;can:0x108@0:257;can:0x118@0:257;can:0x106@4:254;can:0x116@4:253;can:0x155@6:253;can:0x155@4:253;can:0x106@6:253;can:0x116@6:252 jsonl_drop=0
+DIAG_STALK t=45.310 src=2 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.310 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=45.325 src=4 addr=0x2BF dat=0000529F79EB7A8A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 3, 'checksum': 138}
+CAN_WARNING t=45.325 src=6 addr=0x2BF dat=0000529F79EB7A8A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 3, 'checksum': 138}
+DIAG_STALK t=45.399 src=2 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.399 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.499 src=2 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.499 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.647 src=2 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.647 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.741 src=2 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.741 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=45.759 src=2 addr=0x389 dat=4B18006000809F6E name=DAS_status2/longCollision HUD decoded={'pmm_obstacle_severity': 6, 'activation_failure': 0, 'pmm_ultrasonics_fault': 0, 'pmm_radar_fault': 0, 'pmm_sys_fault': 0, 'pmm_camera_fault': 0, 'acc_report': 24, 'long_collision_warning': 15, 'counter': 9, 'checksum': 110}
+CAN_WARNING t=45.759 src=0 addr=0x389 dat=4B18006000809F6E name=DAS_status2/longCollision HUD decoded={'pmm_obstacle_severity': 6, 'activation_failure': 0, 'pmm_ultrasonics_fault': 0, 'pmm_radar_fault': 0, 'pmm_sys_fault': 0, 'pmm_camera_fault': 0, 'acc_report': 24, 'long_collision_warning': 15, 'counter': 9, 'checksum': 110}
+CAN_WARNING t=45.808 src=2 addr=0x399 dat=F006DF80B0085902 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=45.808 src=0 addr=0x399 dat=F006DF80B0085902 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=45.879 src=2 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.879 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.951 src=2 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=45.951 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.049 src=2 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.049 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.130 src=2 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.130 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.237 src=2 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.237 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=46.366 src=6 addr=0x2BF dat=0000529F79EB7A8A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 3, 'checksum': 138}
+CAN_WARNING t=46.366 src=4 addr=0x2BF dat=0000529F79EB7A8A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 3, 'checksum': 138}
+STATE t=46.429 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:elm327/allowed=0/fault=none/txBlk=0;p1:elm327/allowed=0/fault=none/txBlk=0
+SUMMARY t=46.4 txblk_events=0 warnings=190 diag=269 top=can:0x108@2:357;can:0x118@2:357;can:0x108@0:355;can:0x118@0:355;can:0x106@4:352;can:0x116@4:352;can:0x155@6:351;can:0x155@4:351;can:0x106@6:351;can:0x116@6:351 jsonl_drop=0
+DIAG_STALK t=46.437 src=2 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.437 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.547 src=2 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.547 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=46.600 src=2 addr=0x2BF dat=E5E5BF0000E07900 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 150.9, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 3, 'checksum': 0}
+CAN_WARNING t=46.600 src=0 addr=0x2BF dat=E5E5BF0000E07900 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 150.9, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 3, 'checksum': 0}
+DIAG_STALK t=46.650 src=2 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.650 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.744 src=2 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.744 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.828 src=2 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.828 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=46.873 src=2 addr=0x399 dat=F006DF80B0087922 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=46.873 src=0 addr=0x399 dat=F006DF80B0087922 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=46.949 src=2 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=46.949 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.026 src=2 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.026 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.128 src=2 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.128 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.208 src=2 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.208 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.297 src=2 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.297 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=47.373 src=4 addr=0x2BF dat=0000529F79EB9AAA name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 4, 'checksum': 170}
+CAN_WARNING t=47.373 src=6 addr=0x2BF dat=0000529F79EB9AAA name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 4, 'checksum': 170}
+DIAG_STALK t=47.397 src=2 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.397 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+STATE t=47.462 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:elm327/allowed=0/fault=none/txBlk=0;p1:elm327/allowed=0/fault=none/txBlk=0
+SUMMARY t=47.5 txblk_events=0 warnings=248 diag=349 top=can:0x108@2:463;can:0x118@2:463;can:0x108@0:461;can:0x118@0:461;can:0x106@4:458;can:0x116@4:458;can:0x155@6:457;can:0x155@4:457;can:0x106@6:457;can:0x116@6:457 jsonl_drop=0
+DIAG_STALK t=47.519 src=2 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.519 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.600 src=2 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.600 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.709 src=2 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.709 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=47.732 src=2 addr=0x2BF dat=E4653D0100E07907 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 150.8, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 3, 'checksum': 7}
+CAN_WARNING t=47.732 src=0 addr=0x2BF dat=E4653D0100E07907 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 150.8, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 3, 'checksum': 7}
+DIAG_STALK t=47.809 src=2 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.809 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.946 src=2 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=47.946 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.080 src=2 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.080 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=48.147 src=2 addr=0x2BF dat=E4E93F0100E05104 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 2, 'checksum': 4}
+CAN_WARNING t=48.147 src=0 addr=0x2BF dat=E4E93F0100E05104 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 2, 'checksum': 4}
+DIAG_STALK t=48.257 src=2 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.257 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.396 src=2 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.396 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=48.420 src=6 addr=0x2BF dat=0000529F79EB3A4A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 1, 'checksum': 74}
+CAN_WARNING t=48.420 src=4 addr=0x2BF dat=0000529F79EB3A4A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 1, 'checksum': 74}
+DIAG_STALK t=48.599 src=2 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.599 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=48.667 src=2 addr=0x399 dat=F006DF80B008A952 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=48.667 src=0 addr=0x399 dat=F006DF80B008A952 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=48.757 src=2 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.757 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+STATE t=48.896 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:elm327/allowed=0/fault=none/txBlk=0;p1:elm327/allowed=0/fault=none/txBlk=0
+SUMMARY t=48.9 txblk_events=0 warnings=310 diag=431 top=can:0x108@2:565;can:0x118@2:565;can:0x108@0:563;can:0x118@0:563;can:0x106@4:560;can:0x116@4:560;can:0x155@6:559;can:0x155@4:559;can:0x106@6:559;can:0x116@6:559 jsonl_drop=0
+DIAG_STALK t=48.947 src=2 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=48.947 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.035 src=2 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.035 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.169 src=2 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.169 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=49.218 src=2 addr=0x2BF dat=E549BD0000E00907 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 0, 'checksum': 7}
+CAN_WARNING t=49.218 src=0 addr=0x2BF dat=E549BD0000E00907 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 0, 'checksum': 7}
+DIAG_STALK t=49.297 src=2 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.297 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=49.424 src=6 addr=0x2BF dat=0000529F79EB5A6A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 2, 'checksum': 106}
+CAN_WARNING t=49.424 src=4 addr=0x2BF dat=0000529F79EB5A6A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 2, 'checksum': 106}
+DIAG_STALK t=49.444 src=2 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.444 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.528 src=2 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.528 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.672 src=2 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.672 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.757 src=2 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.757 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.888 src=2 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=49.888 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=49.941 src=2 addr=0x399 dat=F006DF80B008C972 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=49.941 src=0 addr=0x399 dat=F006DF80B008C972 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=50.004 src=2 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.004 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.151 src=2 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.151 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.242 src=2 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.242 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+STATE t=50.378 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:elm327/allowed=0/fault=none/txBlk=0;p1:elm327/allowed=0/fault=none/txBlk=0
+SUMMARY t=50.4 txblk_events=0 warnings=380 diag=525 top=can:0x108@2:688;can:0x118@2:688;can:0x108@0:686;can:0x118@0:686;can:0x106@4:683;can:0x116@4:683;can:0x155@6:682;can:0x155@4:682;can:0x106@6:682;can:0x116@6:682 jsonl_drop=29
+DIAG_STALK t=50.403 src=2 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.403 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=50.432 src=2 addr=0x2BF dat=E5893D0100E00903 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 8, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 0, 'checksum': 3}
+CAN_WARNING t=50.432 src=0 addr=0x2BF dat=E5893D0100E00903 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 8, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 0, 'checksum': 3}
+CAN_WARNING t=50.457 src=4 addr=0x2BF dat=0000529F79EBFA0A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 7, 'checksum': 10}
+CAN_WARNING t=50.457 src=6 addr=0x2BF dat=0000529F79EBFA0A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 7, 'checksum': 10}
+DIAG_STALK t=50.546 src=2 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.546 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.732 src=2 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.732 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=50.750 src=2 addr=0x389 dat=4B18006000803F0E name=DAS_status2/longCollision HUD decoded={'pmm_obstacle_severity': 6, 'activation_failure': 0, 'pmm_ultrasonics_fault': 0, 'pmm_radar_fault': 0, 'pmm_sys_fault': 0, 'pmm_camera_fault': 0, 'acc_report': 24, 'long_collision_warning': 15, 'counter': 3, 'checksum': 14}
+CAN_WARNING t=50.750 src=0 addr=0x389 dat=4B18006000803F0E name=DAS_status2/longCollision HUD decoded={'pmm_obstacle_severity': 6, 'activation_failure': 0, 'pmm_ultrasonics_fault': 0, 'pmm_radar_fault': 0, 'pmm_sys_fault': 0, 'pmm_camera_fault': 0, 'acc_report': 24, 'long_collision_warning': 15, 'counter': 3, 'checksum': 14}
+DIAG_STALK t=50.848 src=2 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.848 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.975 src=2 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=50.975 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.076 src=2 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.076 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.182 src=2 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.182 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=51.233 src=2 addr=0x399 dat=F006DF80B008E992 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=51.233 src=0 addr=0x399 dat=F006DF80B008E992 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=51.304 src=2 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.304 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+TXBLK_DELTA t=51.443 panda=0 delta=3 model=elm327 allowed=0 fault=none faults= recent=0x488@0:30;0x2BF@4:15;0x659@0:6;0x659@4:6;0x27D@0:6
+TXBLK_DELTA t=51.443 panda=1 delta=1 model=elm327 allowed=0 fault=none faults= recent=0x488@0:30;0x2BF@4:15;0x659@0:6;0x659@4:6;0x27D@0:6
+STATE t=51.630 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:teslaLegacy/allowed=0/fault=none/txBlk=8;p1:teslaLegacy/allowed=0/fault=none/txBlk=7
+SUMMARY t=51.6 txblk_events=12 warnings=432 diag=605 top=can:0x108@2:769;can:0x118@2:768;can:0x108@0:767;can:0x118@0:766;can:0x106@4:763;can:0x116@4:763;can:0x155@6:762;can:0x155@4:762;can:0x106@6:762;can:0x116@6:762 jsonl_drop=131
+CAN_WARNING t=51.632 src=4 addr=0x2BF dat=0000529F79EB5A6A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 2, 'checksum': 106}
+CAN_WARNING t=51.632 src=6 addr=0x2BF dat=0000529F79EB5A6A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 2, 'checksum': 106}
+DIAG_STALK t=51.657 src=2 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.657 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=51.725 src=2 addr=0x2BF dat=E4693D0100E09106 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 4, 'checksum': 6}
+CAN_WARNING t=51.725 src=0 addr=0x2BF dat=E4693D0100E09106 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 4, 'checksum': 6}
+DIAG_STALK t=51.780 src=2 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.780 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.933 src=2 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=51.933 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.052 src=2 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.052 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.194 src=2 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.194 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.246 src=128 addr=0x659 dat=0000000000800000 decoded={'pedal_enabled_bit': 0, 'autopilot_disabled_bit': 1, 'stalk_main_edge_bit': 0, 'stalk_cancel_edge_bit': 0, 'byte5': 128} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.246 src=2 addr=0x659 dat=0000000000800000 decoded={'pedal_enabled_bit': 0, 'autopilot_disabled_bit': 1, 'stalk_main_edge_bit': 0, 'stalk_cancel_edge_bit': 0, 'byte5': 128} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.246 src=6 addr=0x659 dat=0000000000800000 decoded={'pedal_enabled_bit': 0, 'autopilot_disabled_bit': 1, 'stalk_main_edge_bit': 0, 'stalk_cancel_edge_bit': 0, 'byte5': 128} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.246 src=132 addr=0x659 dat=0000000000800000 decoded={'pedal_enabled_bit': 0, 'autopilot_disabled_bit': 1, 'stalk_main_edge_bit': 0, 'stalk_cancel_edge_bit': 0, 'byte5': 128} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.321 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.321 src=130 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_EPAS t=52.321 src=130 status=EAC_INHIBITED(0) err=EAC_ERROR_TMP_FAULT(4) hands=0 faultRaw=0 reducedRaw=1 dat=11FF48071FF606ED steerTmp=0 ctrlAllowed=0,0
+DIAG_STALK t=52.413 src=192 addr=0x659 dat=0000000000800000 decoded={'pedal_enabled_bit': 0, 'autopilot_disabled_bit': 1, 'stalk_main_edge_bit': 0, 'stalk_cancel_edge_bit': 0, 'byte5': 128} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.413 src=196 addr=0x659 dat=0000000000800000 decoded={'pedal_enabled_bit': 0, 'autopilot_disabled_bit': 1, 'stalk_main_edge_bit': 0, 'stalk_cancel_edge_bit': 0, 'byte5': 128} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=52.440 src=130 addr=0x2BF dat=E449BD0000E05906 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 2, 'checksum': 6}
+DIAG_STALK t=52.484 src=130 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.484 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.541 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.541 src=130 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.623 src=130 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.623 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=52.644 src=6 addr=0x2BF dat=0000529F79EBFA0A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 7, 'checksum': 10}
+CAN_WARNING t=52.658 src=2 addr=0x399 dat=F006DF80B00809B2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=52.694 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.694 src=130 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.807 src=130 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.807 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=52.877 src=0 addr=0x2BF dat=E4493D0100E0A103 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 30, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -13.8, 'das_counter': 5, 'checksum': 3}
+DIAG_STALK t=52.877 src=130 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.877 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.990 src=130 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=52.990 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+TXBLK_DELTA t=53.037 panda=0 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:80;0x2BF@4:40;0x659@0:16;0x659@4:16;0x27D@0:16
+TXBLK_DELTA t=53.037 panda=1 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:80;0x2BF@4:40;0x659@0:16;0x659@4:16;0x27D@0:16
+STATE t=53.491 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:teslaLegacy/allowed=0/fault=none/txBlk=24;p1:teslaLegacy/allowed=0/fault=none/txBlk=23
+SUMMARY t=53.5 txblk_events=44 warnings=492 diag=730 top=can:0x108@0:890;can:0x118@0:890;can:0x155@4:888;can:0x106@4:887;can:0x116@4:887;can:0x108@2:818;can:0x118@2:818;can:0x155@6:814;can:0x106@6:813;can:0x116@6:813 jsonl_drop=299
+CAN_WARNING t=53.497 src=130 addr=0x2BF dat=E449BD0000E07107 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 3, 'checksum': 7}
+DIAG_STALK t=53.544 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.544 src=130 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.656 src=130 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.656 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=53.686 src=6 addr=0x2BF dat=0000529F79EBDAEA name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 6, 'checksum': 234}
+DIAG_STALK t=53.751 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.751 src=130 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.825 src=130 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.825 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.887 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.887 src=130 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.955 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=53.955 src=130 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=53.993 src=2 addr=0x399 dat=F006DF80B00829D2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=54.036 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.036 src=130 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.114 src=130 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.114 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=54.178 src=0 addr=0x2BF dat=E5493D0100E0A102 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 30, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -13.8, 'das_counter': 5, 'checksum': 2}
+DIAG_STALK t=54.178 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.178 src=130 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.286 src=130 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.286 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.355 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.355 src=130 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.481 src=130 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.481 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.542 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.542 src=130 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=54.588 src=130 addr=0x2BF dat=E665BD0000E07907 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 151.0, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 3, 'checksum': 7}
+DIAG_STALK t=54.655 src=130 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.655 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=54.686 src=6 addr=0x2BF dat=0000529F79EB9AAA name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 4, 'checksum': 170}
+DIAG_STALK t=54.734 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.734 src=130 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.826 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.826 src=130 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.906 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.906 src=130 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.991 src=130 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=54.991 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=55.023 src=2 addr=0x389 dat=4B1800600080BF8E name=DAS_status2/longCollision HUD decoded={'pmm_obstacle_severity': 6, 'activation_failure': 0, 'pmm_ultrasonics_fault': 0, 'pmm_radar_fault': 0, 'pmm_sys_fault': 0, 'pmm_camera_fault': 0, 'acc_report': 24, 'long_collision_warning': 15, 'counter': 11, 'checksum': 142}
+CAN_WARNING t=55.053 src=0 addr=0x2BF dat=ECE5BF0000E05105 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 151.6, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 2, 'checksum': 5}
+CAN_WARNING t=55.053 src=130 addr=0x2BF dat=ECE5BF0000E05105 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 151.6, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 2, 'checksum': 5}
+TXBLK_DELTA t=55.113 panda=0 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:103;0x2BF@4:52;0x659@0:21;0x659@4:21;0x27D@0:21
+TXBLK_DELTA t=55.113 panda=1 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:103;0x2BF@4:52;0x659@0:21;0x659@4:21;0x27D@0:21
+STATE t=55.675 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:teslaLegacy/allowed=0/fault=none/txBlk=45;p1:teslaLegacy/allowed=0/fault=none/txBlk=44
+SUMMARY t=55.7 txblk_events=86 warnings=555 diag=871 top=can:0x108@0:1076;can:0x118@0:1076;can:0x155@4:1074;can:0x106@4:1073;can:0x116@4:1073;can:0x108@2:818;can:0x118@2:818;can:0x155@6:814;can:0x106@6:813;can:0x116@6:813 jsonl_drop=494
+DIAG_STALK t=55.678 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=55.678 src=130 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=55.692 src=6 addr=0x2BF dat=0000529F79EB1A2A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 0, 'checksum': 42}
+DIAG_STALK t=55.746 src=130 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=55.746 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=55.839 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=55.839 src=130 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=55.882 src=2 addr=0x399 dat=F006DF80B0085902 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=55.934 src=130 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=55.934 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=55.952 src=0 addr=0x2BF dat=E665BD0000E07902 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 151.0, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 3, 'checksum': 2}
+CAN_WARNING t=55.952 src=130 addr=0x2BF dat=E665BD0000E07902 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 151.0, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 3, 'checksum': 2}
+DIAG_STALK t=56.025 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.025 src=130 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.095 src=130 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.095 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.159 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.159 src=130 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.240 src=130 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.240 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.309 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.309 src=130 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.478 src=130 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.478 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.542 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.542 src=130 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.635 src=130 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.635 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.703 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.703 src=130 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=56.728 src=6 addr=0x2BF dat=0000529F79EBDAEA name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 6, 'checksum': 234}
+DIAG_STALK t=56.795 src=130 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.795 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.868 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.868 src=130 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.944 src=130 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=56.944 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.014 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.014 src=130 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.092 src=130 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.092 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=57.138 src=2 addr=0x399 dat=F006DF80B0088932 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=57.186 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.186 src=130 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=57.231 src=0 addr=0x2BF dat=E4493D0100E0B907 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 5, 'checksum': 7}
+CAN_WARNING t=57.231 src=130 addr=0x2BF dat=E4493D0100E0B907 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 414, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': 1.56, 'das_counter': 5, 'checksum': 7}
+DIAG_STALK t=57.295 src=130 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.295 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.388 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.388 src=130 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.495 src=130 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=57.495 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+TXBLK_DELTA t=57.614 panda=0 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:125;0x2BF@4:62;0x659@0:25;0x659@4:25;0x27D@0:25
+TXBLK_DELTA t=57.614 panda=1 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:125;0x2BF@4:62;0x659@0:25;0x659@4:25;0x27D@0:25
+STATE t=58.223 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:teslaLegacy/allowed=0/fault=none/txBlk=70;p1:teslaLegacy/allowed=0/fault=none/txBlk=69
+SUMMARY t=58.2 txblk_events=136 warnings=628 diag=1038 top=can:0x108@0:1295;can:0x118@0:1295;can:0x155@4:1293;can:0x106@4:1292;can:0x116@4:1292;can:0x108@2:818;can:0x118@2:818;can:0x155@6:814;can:0x106@6:813;can:0x116@6:813 jsonl_drop=722
+DIAG_STALK t=58.245 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.245 src=130 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=58.272 src=6 addr=0x2BF dat=0000529F79EBFA0A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 7, 'checksum': 10}
+CAN_WARNING t=58.288 src=2 addr=0x399 dat=F006DF80B0089942 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=58.363 src=130 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.363 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=58.401 src=0 addr=0x2BF dat=E3693D0100E0E904 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.1, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 7, 'checksum': 4}
+CAN_WARNING t=58.401 src=130 addr=0x2BF dat=E3693D0100E0E904 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.1, 'das_acc_state': 6, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 7, 'checksum': 4}
+DIAG_STALK t=58.478 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.478 src=130 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.573 src=130 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.573 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.631 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.631 src=130 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.701 src=130 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.701 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.771 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.771 src=130 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.856 src=130 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.856 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.924 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=58.924 src=130 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.002 src=130 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.002 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.095 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.095 src=130 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.193 src=130 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.193 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.256 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.256 src=130 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=59.300 src=6 addr=0x2BF dat=0000529F79EBDAEA name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 6, 'checksum': 234}
+DIAG_STALK t=59.336 src=130 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.336 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.402 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.402 src=130 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.522 src=130 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.522 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=59.564 src=2 addr=0x399 dat=F006DF80B008C972 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=59.588 src=0 addr=0x2BF dat=E5E9BF0000E06105 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 30, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -13.8, 'das_counter': 3, 'checksum': 5}
+CAN_WARNING t=59.588 src=130 addr=0x2BF dat=E5E9BF0000E06105 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 14, 'das_aeb_event': 3, 'das_accel_min_raw': 0, 'das_accel_max_raw': 30, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -13.8, 'das_counter': 3, 'checksum': 5}
+DIAG_STALK t=59.641 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.641 src=130 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.732 src=130 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.732 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=59.754 src=0 addr=0x2BF dat=E4493D0100E04100 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 30, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -13.8, 'das_counter': 2, 'checksum': 0}
+CAN_WARNING t=59.754 src=130 addr=0x2BF dat=E4493D0100E04100 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.2, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 30, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -13.8, 'das_counter': 2, 'checksum': 0}
+DIAG_STALK t=59.830 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.830 src=130 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.910 src=130 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=59.910 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.008 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.008 src=130 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.136 src=130 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.136 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.202 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.202 src=130 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.289 src=130 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.289 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=60.323 src=6 addr=0x2BF dat=0000529F79EB3A4A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 1, 'checksum': 74}
+DIAG_STALK t=60.401 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.401 src=130 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.495 src=130 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=60.495 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=60.595 src=2 addr=0x399 dat=F006DF80B008E992 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+TXBLK_DELTA t=60.637 panda=0 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:151;0x2BF@4:76;0x659@0:30;0x659@4:30;0x27D@0:30
+TXBLK_DELTA t=60.637 panda=1 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:151;0x2BF@4:76;0x659@0:30;0x659@4:30;0x27D@0:30
+STATE t=61.513 v=0.0 gear=drive gas=0 brake=0 cruiseEn=0 cruiseAvail=1 stockAeb=0 steerTmp=0 ctrlEn=0 ctrlAct=0 long=off p0:teslaLegacy/allowed=0/fault=none/txBlk=100;p1:teslaLegacy/allowed=0/fault=none/txBlk=99
+SUMMARY t=61.5 txblk_events=196 warnings=714 diag=1236 top=can:0x108@0:1551;can:0x118@0:1551;can:0x155@4:1549;can:0x106@4:1548;can:0x116@4:1548;can:0x108@2:818;can:0x118@2:818;can:0x155@6:814;can:0x106@6:813;can:0x116@6:813 jsonl_drop=995
+CAN_WARNING t=61.532 src=6 addr=0x2BF dat=0000529F79EBFA0A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 7, 'checksum': 10}
+DIAG_STALK t=61.554 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.554 src=130 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.637 src=130 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.637 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=61.664 src=0 addr=0x2BF dat=E549BD0000E0E902 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 7, 'checksum': 2}
+CAN_WARNING t=61.664 src=130 addr=0x2BF dat=E549BD0000E0E902 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 4, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 158, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -8.68, 'das_counter': 7, 'checksum': 2}
+DIAG_STALK t=61.753 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.753 src=130 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.873 src=130 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.873 src=0 addr=0x45 dat=40210000000030F0 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.936 src=0 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=61.936 src=130 addr=0x45 dat=40210000000040A9 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=61.980 src=2 addr=0x399 dat=F006DF80B008F9A2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+DIAG_STALK t=62.038 src=130 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.038 src=0 addr=0x45 dat=4021000000005064 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.105 src=0 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.105 src=130 addr=0x45 dat=402100000000602E decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.236 src=130 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.236 src=0 addr=0x45 dat=40210000000070E3 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.387 src=0 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.387 src=130 addr=0x45 dat=402100000000809C decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.524 src=130 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.524 src=0 addr=0x45 dat=4021000000009051 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=62.543 src=6 addr=0x2BF dat=0000529F79EBFA0A name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 7, 'checksum': 10}
+DIAG_STALK t=62.603 src=0 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.603 src=130 addr=0x45 dat=402100000000A01B decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.692 src=130 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.692 src=0 addr=0x45 dat=402100000000B0D6 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.803 src=0 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.803 src=130 addr=0x45 dat=402100000000C08F decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.963 src=130 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=62.963 src=0 addr=0x45 dat=402100000000D042 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=63.020 src=2 addr=0x389 dat=4B18006000809F6E name=DAS_status2/longCollision HUD decoded={'pmm_obstacle_severity': 6, 'activation_failure': 0, 'pmm_ultrasonics_fault': 0, 'pmm_radar_fault': 0, 'pmm_sys_fault': 0, 'pmm_camera_fault': 0, 'acc_report': 24, 'long_collision_warning': 15, 'counter': 9, 'checksum': 110}
+DIAG_STALK t=63.080 src=0 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=63.080 src=130 addr=0x45 dat=402100000000E008 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=63.125 src=2 addr=0x399 dat=F006DF80B00819C2 name=AutopilotStatus/FCW HUD decoded={'autopilot_status': 0, 'fcw': 3, 'side_collision_avoid': 2, 'side_collision_warning': 0, 'raw_b2': 223, 'raw_b3': 128, 'raw_b4': 176}
+CAN_WARNING t=63.125 src=0 addr=0x2BF dat=E5C9BD0000E03105 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 12, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 1, 'checksum': 5}
+CAN_WARNING t=63.125 src=130 addr=0x2BF dat=E5C9BD0000E03105 name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 253.3, 'das_acc_state': 12, 'das_aeb_event': 1, 'das_accel_min_raw': 0, 'das_accel_max_raw': 286, 'das_accel_min_ms2': -15.0, 'das_accel_max_ms2': -3.56, 'das_counter': 1, 'checksum': 5}
+DIAG_STALK t=63.244 src=130 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=63.244 src=0 addr=0x45 dat=402100000000F0C5 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=63.331 src=0 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=63.331 src=130 addr=0x45 dat=40210000000000BA decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=63.493 src=130 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=63.493 src=0 addr=0x45 dat=4021000000001077 decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+CAN_WARNING t=63.589 src=6 addr=0x2BF dat=0000529F79EB9AAA name=DAS_control/AEB/longitudinal decoded={'das_set_speed_kph': 0.0, 'das_acc_state': 0, 'das_aeb_event': 2, 'das_accel_min_raw': 367, 'das_accel_max_raw': 430, 'das_accel_min_ms2': -0.32, 'das_accel_max_ms2': 2.2, 'das_counter': 4, 'checksum': 170}
+DIAG_STALK t=63.625 src=0 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+DIAG_STALK t=63.625 src=130 addr=0x45 dat=402100000000203D decoded={'stalk_button': 0, 'dtr_distance_request': 33, 'turn_indicator_stalk': 0, 'raw_b0': 64, 'raw_b1': 33, 'raw_b2': 0} ctrl=0/0 pandas=p0:allowed=0,fault=none;p1:allowed=0,fault=none
+TXBLK_DELTA t=65.134 panda=0 delta=1 model=teslaLegacy allowed=0 fault=none faults= recent=0x488@0:224;0x2BF@4:112;0x659@0:45;0x659@4:45;0x27D@0:45

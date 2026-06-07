@@ -213,33 +213,6 @@ static void tesla_legacy_clear_warning_matrix(CANPacket_t *msg) {
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
-// Unity-parity 0x399 benign-state scrub for the bus2->bus0 forward when OP does NOT own the
-// HUD (boot / disengaged). Zeroing fcw removes the trigger but does NOT clear an ALREADY
-// latched IC AEB warning -- which is why a boot-window latch persisted until a power cycle.
-// Unity's safety_tesla.h sets DAS_autopilotState=2 ("so we don't trigger warnings") on every
-// forwarded 0x399: a benign "AP active" state that makes the IC drop the warning. We replicate
-// it -- autopilotStatus(0|4)=2 + DAS_forwardCollisionWarning(22|2)=0 -- so the post-teslaLegacy
-// stream actively clears the IC latch without needing to engage. Display-only; does NOT affect
-// AEB braking (0x2BF, PT bus). NOTE: asserts a faint "AP available" state on the IC while
-// disengaged -- this is the same trade Unity makes.
-static void tesla_legacy_scrub_fcw_only(CANPacket_t *msg) {
-  msg->data[0] = (uint8_t)((msg->data[0] & 0xF0U) | 0x02U);  // autopilotStatus = 2 (benign)
-  msg->data[2] &= 0x3FU;                                     // DAS_forwardCollisionWarning = 0
-  tesla_legacy_set_last_byte_checksum(msg);
-}
-
-// Unity-parity 0x389 (DAS_status2) benign-state scrub for the bus2->bus0 forward when OP does
-// NOT own the HUD. Mirrors the 0x399 scrub so a latched IC long-collision/AEB warning clears
-// without engaging: DAS_activationFailureStatus (14|2) -> 0, DAS_longCollisionWarning (48|4) ->
-// 0x0F ("no warning"). Display-only; does NOT affect AEB braking.
-static void tesla_legacy_scrub_status2_longcoll_only(CANPacket_t *msg) {
-  msg->data[1] &= 0x3FU;                                     // DAS_activationFailureStatus = 0
-  msg->data[6] = (uint8_t)((msg->data[6] & 0xF0U) | 0x0FU);  // DAS_longCollisionWarning = 0x0F
-  tesla_legacy_set_last_byte_checksum(msg);
-}
-
-
-
 // --- RX hook ---
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   const int bus = (int)msg->bus;
@@ -597,40 +570,29 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // bus2 -> bus0: Unity-style HUD warning cleanup without gating steering/engage.
+  // bus2 -> bus0: Unity full-ownership of the IC HUD. Every DAS status/warning frame is
+  // sanitized on EVERY forward, regardless of engagement -- OP owns the HUD 100%, not just
+  // while engaged. This is display-only: it rewrites the IC-bound copy and never touches
+  // controls_allowed / actuation gating.
   if (bus_num == 2) {
-    const bool op_hud_owner = tesla_legacy_hud_takeover_owner();
-    const bool scrub_hud_owner = op_hud_owner || tesla_legacy_aeb_hud_scrub_active();
-    const uint8_t status = controls_allowed ? 0x05U : (to_fwd->data[0] & 0x0FU);
-
     if (addr == 0x2BF) {
+      // DAS_control carries the genuine AEB event display. Keep the existing conditional scrub
+      // (spurious/standstill events suppressed; a genuine moving AEB still surfaces on the IC).
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
       if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
         tesla_legacy_scrub_das_control_aeb(to_fwd);
       }
     } else if (addr == 0x399) {
-      // Always neutralize the AEB/FCW display on the IC-bound copy. While OP owns the HUD,
-      // do the full clean (sets autopilot_status nibble + clears side/LDW); before engage,
-      // do the surgical FCW-only scrub so the stock AP's boot-time FCW=3 can't flash AEB.
-      if (scrub_hud_owner) {
-        tesla_legacy_scrub_status_warnings(to_fwd, status);
-      } else {
-        tesla_legacy_scrub_fcw_only(to_fwd);
-      }
+      // Own DAS_status: clear all warning fields and assert a benign autopilotStatus
+      // (5 engaged / 2 otherwise) so the IC never shows or latches a stock AEB/FCW warning.
+      tesla_legacy_scrub_status_warnings(to_fwd, controls_allowed ? 0x05U : 0x02U);
     } else if (addr == 0x389) {
-      // Always neutralize DAS_status2 AEB/long-collision fields on the IC-bound copy. Full
-      // idle rewrite while OP owns the HUD; benign long-collision/activation clear otherwise.
-      if (scrub_hud_owner) {
-        tesla_legacy_scrub_status2_warnings(to_fwd);
-      } else {
-        tesla_legacy_scrub_status2_longcoll_only(to_fwd);
-      }
-    } else if (scrub_hud_owner) {
-      if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
-        tesla_legacy_clear_warning_matrix(to_fwd);
-      } else {
-      }
+      // Own DAS_status2: full benign idle rewrite (activation/long-collision warnings cleared).
+      tesla_legacy_scrub_status2_warnings(to_fwd);
+    } else if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
+      // Own the object / warning-matrix HUD frames: clear unconditionally.
+      tesla_legacy_clear_warning_matrix(to_fwd);
     }
 
     if (!controls_allowed) {

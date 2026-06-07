@@ -18,10 +18,6 @@ from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
-XNOR_V158_BENIGN_EAC_INHIBIT_CODES = {"EAC_ERROR_IDLE", "EAC_ERROR_HANDS_ON", "EAC_ERROR_TMP_FAULT"}
-XNOR_V164_WAKE_INHIBIT_CODES = {"EAC_ERROR_TMP_FAULT", "EAC_ERROR_EPB_OR_EXTERNAL_MONITOR_INHIBIT"}
-XNOR_V164_WAKE_READY_CODES = {"EAC_ERROR_IDLE", "EAC_ERROR_HANDS_ON"}
-
 
 @dataclass
 class _TinklaConfig:
@@ -93,13 +89,6 @@ class CarState(CarStateBase):
     self._xnor_last_virtual_ms = 0
     self._xnor_last_virtual_turn = 0
     self._xnor_last_virtual_turn_ms = 0
-    self.xnor_epas_eac_status = ""
-    self.xnor_epas_eac_error = ""
-    self.xnor_epas_wake_inhibit = False
-    self.xnor_epas_wake_block_reason = "init"
-    self._xnor_epas_available_since_ms = 0
-    self._xnor_epas_last_inhibit_ms = 0
-    self._xnor_epas_gate_last_log_ms = 0
 
     # XNOR CSA (Curve Speed Adaptation) decoded off the party-bus parser (Option 1).
     # No second 'can' socket: signals come from the already-deserialized party CAN list.
@@ -175,59 +164,6 @@ class CarState(CarStateBase):
     self.enableHSO = bool(self._tinkla.enable_hso)
     self.hsoNumbPeriod = float(self._tinkla.hso_numb_period)
     self.enableACC = bool(self._tinkla.enable_acc)
-
-
-  def _update_xnor_epas_wake_gate(self, eac_status: str | None, eac_error_code: str | None) -> None:
-    now_ms = int(time.monotonic_ns() // 1_000_000)
-    status = str(eac_status or "")
-    error = str(eac_error_code or "")
-    self.xnor_epas_eac_status = status
-    self.xnor_epas_eac_error = error
-
-    wake_inhibit = status == "EAC_INHIBITED" and error in XNOR_V164_WAKE_INHIBIT_CODES
-    wake_ready = status == "EAC_AVAILABLE" and error in XNOR_V164_WAKE_READY_CODES
-
-    if wake_inhibit:
-      self._xnor_epas_last_inhibit_ms = now_ms
-      self._xnor_epas_available_since_ms = 0
-      self.xnor_epas_wake_inhibit = True
-      self.xnor_epas_wake_block_reason = f"{status}/{error}"
-    elif wake_ready:
-      if int(self._xnor_epas_available_since_ms) <= 0:
-        self._xnor_epas_available_since_ms = now_ms
-      stable_ms = now_ms - int(self._xnor_epas_available_since_ms)
-      recent_inhibit_ms = now_ms - int(self._xnor_epas_last_inhibit_ms or 0)
-      self.xnor_epas_wake_inhibit = (
-        int(self._xnor_epas_last_inhibit_ms) > 0 and
-        recent_inhibit_ms <= 10000 and
-        stable_ms < 1200
-      )
-      self.xnor_epas_wake_block_reason = "available_stabilizing" if self.xnor_epas_wake_inhibit else "ready"
-    else:
-      self._xnor_epas_available_since_ms = 0
-      self.xnor_epas_wake_inhibit = status == "EAC_INHIBITED"
-      self.xnor_epas_wake_block_reason = f"{status}/{error}" if self.xnor_epas_wake_inhibit else "unknown"
-
-    if bool(self.xnor_epas_wake_inhibit) and (now_ms - int(self._xnor_epas_gate_last_log_ms)) >= 2000:
-      self._xnor_epas_gate_last_log_ms = now_ms
-      cloudlog.info(
-        f"[XNOR_V164_EPAS_WAKE_RECOVERY] gate=1 reason={self.xnor_epas_wake_block_reason} "
-        f"status={status} error={error}"
-      )
-
-  def _clear_xnor_local_latches_when_not_ready(self, ret) -> None:
-    if (ret.gearShifter != structs.CarState.GearShifter.drive) or bool(ret.doorOpen) or bool(ret.seatbeltUnlatched):
-      self.cruiseEnabled = False
-      self.enable_adaptive_cruise = False
-      self._last_cruise_stalk_pull_ms = 0
-      self._prev_pull_button = 0
-      self._alc_tap_latch_dir = 0
-      self._alc_tap_latch_until = 0
-      self.alca_direction = 0
-      self.alca_pre_engage = False
-      self.alca_engaged = False
-      self.alca_done = False
-
 
   def _update_alc_state_from_plan(self, enabled: bool) -> None:
     if self._alc_sm is None:
@@ -545,11 +481,16 @@ class CarState(CarStateBase):
         base_map = float(getattr(self, "baseMapSpeedLimitMPS", 0.0) or 0.0)
         gps_mpp = float(gps.get("UI_mppSpeedLimit", 0.0) or 0.0)
 
+        # UI_mppSpeedLimit (gps_mpp) is the stable Tesla map/nav posted limit -- on this car it
+        # sits steady at the real value, while the road-sign-derived base_map can flicker between
+        # adjacent limits and drive the 40<->30 SET oscillation. Prefer mpp as the primary source;
+        # fall back to the road-sign base_map only when mpp is unavailable. (Revert: swap the order.)
+        mpp_ms = gps_mpp * map_uom_to_ms if gps_mpp > 0.0 else 0.0
         live_map_limit_ms = 0.0
-        if base_map > 0.0 and (speed_limit_type != 0x1F or base_map >= 5.56):
+        if mpp_ms > 0.0:
+          live_map_limit_ms = float(mpp_ms)
+        elif base_map > 0.0 and (speed_limit_type != 0x1F or base_map >= 5.56):
           live_map_limit_ms = float(base_map)
-        elif gps_mpp > 0.0:
-          live_map_limit_ms = gps_mpp * map_uom_to_ms
 
         if live_map_limit_ms > 0.0:
           self.lastValidMapSpeedLimitMPS = float(live_map_limit_ms)
@@ -658,12 +599,11 @@ class CarState(CarStateBase):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
 
     eac_status = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacStatus"].get(int(epas_status["EPAS3S_eacStatus"]), None)
-    eac_error_code = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacErrorCode"].get(int(epas_status["EPAS3S_eacErrorCode"]), None)
-    self._update_xnor_epas_wake_gate(eac_status, eac_error_code)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    ret.steerFaultTemporary = (eac_status == "EAC_INHIBITED") and (eac_error_code not in XNOR_V158_BENIGN_EAC_INHIBIT_CODES)
+    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
 
     # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
+    eac_error_code = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacErrorCode"].get(int(epas_status["EPAS3S_eacErrorCode"]), None)
     if self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
@@ -793,9 +733,7 @@ class CarState(CarStateBase):
       self.blinker_controller.tap_direction = 0
 
     if self.autopilot_disabled:
-      if bool(getattr(self, "xnor_epas_wake_inhibit", False)):
-        self.cruiseEnabled = False
-      elif self.cruise_buttons == 2:  # MAIN
+      if self.cruise_buttons == 2:  # MAIN
         self.cruiseEnabled = True
       if self.cruise_buttons == 1:  # CANCEL
         self.cruiseEnabled = False
@@ -822,8 +760,6 @@ class CarState(CarStateBase):
 
     # Seatbelt
     ret.seatbeltUnlatched = cp_party.vl["UI_warning"]["buckleStatus"] != 1
-
-    self._clear_xnor_local_latches_when_not_ready(ret)
 
     # Blindspot
     ret.leftBlindspot = cp_ap_party.vl["DAS_status"]["DAS_blindSpotRearLeft"] != 0
@@ -1042,12 +978,11 @@ class CarState(CarStateBase):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
 
     eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
-    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
-    self._update_xnor_epas_wake_gate(eac_status, eac_error_code)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    ret.steerFaultTemporary = (eac_status == "EAC_INHIBITED") and (eac_error_code not in XNOR_V158_BENIGN_EAC_INHIBIT_CODES)
+    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
 
     # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
+    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
     if self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
@@ -1126,9 +1061,7 @@ class CarState(CarStateBase):
 
 
     if self.autopilot_disabled:
-      if bool(getattr(self, "xnor_epas_wake_inhibit", False)):
-        self.cruiseEnabled = False
-      elif self.cruise_buttons == 2:  # MAIN
+      if self.cruise_buttons == 2:  # MAIN
         self.cruiseEnabled = True
       if self.cruise_buttons == 1:  # CANCEL
         self.cruiseEnabled = False
@@ -1158,8 +1091,6 @@ class CarState(CarStateBase):
       ret.seatbeltUnlatched = cp_chassis.vl["RCM_status"]["RCM_buckleDriverStatus"] != 1
     else:
       ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
-
-    self._clear_xnor_local_latches_when_not_ready(ret)
 
     if (self._param_frame % 100) == 0:
       try:
