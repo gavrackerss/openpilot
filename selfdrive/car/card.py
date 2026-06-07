@@ -78,18 +78,20 @@ REPLAY = "REPLAY" in os.environ
 
 EventName = log.OnroadEvent.EventName
 
+# XNOR cold-boot AEB-flash fix: cap how long card waits for selfdrived to FINISH initializing before
+# signaling ControlsReady (the signal pandad uses to bring the panda to teslaLegacy -- relay open +
+# forward-scrub). With the firmware query skipped (forced fingerprint), this selfdrived-init wait is
+# the only thing still landing teslaLegacy AFTER the stock AP's boot-time fcw=3. Once CAN is valid and
+# selfdrived is publishing, force ControlsReady after this many control frames even if init has not
+# finished. One-shot at boot -- see Car.step(). ~3.5s matches the Unity fork's init timeout.
+EARLY_CONTROLS_READY_FRAMES = int(3.5 / DT_CTRL)
+
 # forward
 carlog.addHandler(ForwardingHandler(cloudlog))
 
 
 def obd_callback(params: Params) -> ObdCallback:
   def set_obd_multiplexing(obd_multiplexing: bool):
-    # XNOR: never enable OBD multiplexing. On the legacy Tesla 2-panda harness the main
-    # panda's CAN2 carries the live AP/DAS bus; toggling OBD multiplexing (elm327) during
-    # boot/wake fingerprinting storms CAN2 -> interruptRateCan2 faultTemp -> controls_allowed
-    # latches 0 (controls mismatch), cleared only by a full power cycle. The FW requests are
-    # all bus=0 so they don't need it, and passive CAN fingerprinting is unaffected.
-    obd_multiplexing = False
     if params.get_bool("ObdMultiplexingEnabled") != obd_multiplexing:
       cloudlog.warning(f"Setting OBD multiplexing to {obd_multiplexing}")
       params.remove("ObdMultiplexingChanged")
@@ -132,6 +134,9 @@ class Car:
     self.CC_prev = car.CarControl.new_message()
     self.CS_prev = car.CarState.new_message()
     self.initialized_prev = False
+    # XNOR early-ControlsReady state (see EARLY_CONTROLS_READY_FRAMES and step())
+    self._force_controls_ready = False
+    self._early_init_frames = 0
 
     self.last_actuators_output = structs.CarControl.Actuators()
 
@@ -332,8 +337,22 @@ class Car:
 
     self.state_publish(CS, RD)
 
-    initialized = (not any(e.name == EventName.selfdriveInitializing for e in self.sm['onroadEvents']) and
-                   self.sm.seen['onroadEvents'])
+    onroad_events_seen = self.sm.seen['onroadEvents']
+    selfdrive_ready = (not any(e.name == EventName.selfdriveInitializing for e in self.sm['onroadEvents']) and
+                       onroad_events_seen)
+
+    # XNOR cold-boot AEB-flash fix: bound the wait for selfdrived init. Once selfdrived is publishing
+    # and CAN is valid, force ControlsReady after EARLY_CONTROLS_READY_FRAMES even if init hasn't
+    # finished, so teslaLegacy (relay open + scrub) beats the stock AP's boot fcw=3. One-shot boot
+    # signal: controls_update still gates actuation on carControl being alive, so nothing is sent
+    # early and ControlsReady/setSafetyMode is applied once -- controls_allowed is never reset mid-drive.
+    if not self._force_controls_ready and not selfdrive_ready and onroad_events_seen and CS.canValid:
+      self._early_init_frames += 1
+      if self._early_init_frames >= EARLY_CONTROLS_READY_FRAMES:
+        self._force_controls_ready = True
+        cloudlog.warning("XNOR: forcing early ControlsReady to bring teslaLegacy up before stock boot fcw=3")
+
+    initialized = selfdrive_ready or self._force_controls_ready
     if not self.CP.passive and initialized:
       self.controls_update(CS, self.sm['carControl'])
 
