@@ -225,6 +225,20 @@ static void tesla_legacy_scrub_fcw_only(CANPacket_t *msg) {
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
+// LEAN 0x389 (DAS_status2) scrub -- the DAS_status2 analogue of tesla_legacy_scrub_fcw_only.
+// Touches ONLY the two AEB-relevant warning fields and leaves the live counter + every other
+// field intact, so the stock frame's own continuous DAS_status2Counter reaches the IC. Unity's
+// AP-car forward keeps the stock counter and zeroes the warnings; the full status2 rewrite
+// (tesla_legacy_scrub_status2_warnings) regressed to a sticky latch, so ownership mode uses this.
+//   DAS_activationFailureStatus 14|2  -> 0  (byte1 bits 6-7)
+//   DAS_longCollisionWarning    48|4  -> 0  (byte6 low nibble; 0 = NONE on this DBC, 15 = warning)
+//   DAS_status2Counter          52|4  preserved (byte6 high nibble)
+static void tesla_legacy_scrub_status2_lean(CANPacket_t *msg) {
+  msg->data[1] &= 0x3FU;   // DAS_activationFailureStatus = 0
+  msg->data[6] &= 0xF0U;   // DAS_longCollisionWarning = 0 (NONE); keep counter in high nibble
+  tesla_legacy_set_last_byte_checksum(msg);
+}
+
 // --- RX hook ---
 static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   const int bus = (int)msg->bus;
@@ -588,21 +602,24 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // regressed it to a sticky latch. 0x389/object/warning-matrix keep the gated full rewrite while
   // OP owns the HUD. (0x2BF is powertrain-only and never reaches the IC; its branch is harmless.)
   if (bus_num == 2) {
-    // Block-and-replace: OP transmits its own 0x399 (DAS_status) and 0x389 (DAS_status2)
-    // continuously on bus0 (sendcan confirms ~9000 frames each). Forwarding the stock copies
-    // too puts TWO sources on the IC bus with conflicting DAS_statusCounter values, so the IC
-    // flags a counter fault and may refuse to latch OP's clean frame. Drop the stock forwards
-    // here so OP is the SOLE coherent source for these two. Display-only; never touches
-    // controls_allowed. (If OP ever stops transmitting, the IC briefly loses 0x399 -- acceptable,
-    // and far better than a stuck AEB.)
-    if ((addr == 0x399) || (addr == 0x389)) {
-      return true;
-    }
-
+    // Forward the stock 0x399/0x389 (scrubbed), NOT block them: the IC validates
+    // DAS_statusCounter continuity and clears its AEB latch when the stock frame recovers to
+    // fcw=0 on its own continuous counter post-boot. Blocking the stock forward (and relying on
+    // OP's transmitted frame, which carries a different rolling counter) makes the IC reject the
+    // replacement and keep the latched warning until a power cycle. So we keep the stock frame
+    // flowing and only scrub its warning fields in transit.
     const bool op_hud_owner = tesla_legacy_hud_takeover_owner();
     const bool scrub_hud_owner = op_hud_owner || tesla_legacy_aeb_hud_scrub_active();
     const uint8_t status = controls_allowed ? 0x05U : (to_fwd->data[0] & 0x0FU);
 
+    // XNOR ownership mode (TinklaAutopilotDisabled, via the 0x659 carrier): Unity AP-car parity.
+    // Unity does NOT block the stock 0x399/0x389 or transmit its own -- it FORWARDS the stock frame
+    // with a counter-preserving bit-scrub (stock DAS_statusCounter + checksum kept, only the warning
+    // bits zeroed). That keeps the IC's counter sequence unbroken across boot->ownership, which is
+    // what lets the IC drop the latched fcw=3. So in ownership mode we LEAN-scrub both frames on
+    // every forward (counter preserved) rather than blocking. The earlier block (+ a competing
+    // OP frame on a new counter) reintroduced the discontinuity; the full warning rewrite zeroed
+    // fields the IC needs and went sticky. Lean + counter-preserving is the Unity-faithful path.
     if (addr == 0x2BF) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
@@ -610,15 +627,21 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
         tesla_legacy_scrub_das_control_aeb(to_fwd);
       }
     } else if (addr == 0x399) {
-      if (scrub_hud_owner) {
-        tesla_legacy_scrub_status_warnings(to_fwd, status);
-      } else {
+      // Ownership mode: always LEAN scrub (counter preserved, fcw=0, autopilotStatus benign).
+      if (tesla_legacy_op_autopilot_disabled || !scrub_hud_owner) {
         tesla_legacy_scrub_fcw_only(to_fwd);
+      } else {
+        tesla_legacy_scrub_status_warnings(to_fwd, status);
+      }
+    } else if (addr == 0x389) {
+      // Ownership mode: lean status2 scrub (counter preserved). Else only when OP owns the HUD.
+      if (tesla_legacy_op_autopilot_disabled) {
+        tesla_legacy_scrub_status2_lean(to_fwd);
+      } else if (scrub_hud_owner) {
+        tesla_legacy_scrub_status2_warnings(to_fwd);
       }
     } else if (scrub_hud_owner) {
-      if (addr == 0x389) {
-        tesla_legacy_scrub_status2_warnings(to_fwd);
-      } else if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
+      if ((addr == 0x309) || (addr == 0x329) || (addr == 0x349) || (addr == 0x369)) {
         tesla_legacy_clear_warning_matrix(to_fwd);
       } else {
       }

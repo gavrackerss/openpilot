@@ -411,19 +411,22 @@ class CarController(CarControllerBase):
     if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
       return
 
-    # Ownership mode (TinklaAutopilotDisabled): OP owns the IC's DAS group and the panda BLOCKS the
-    # stock 0x399/0x389 (see tesla_legacy_v167_hud.h). We therefore transmit CONTINUOUSLY -- engaged
-    # AND disengaged -- so the IC always has OP's clean frame as its sole source on one continuous
-    # counter. This is the piece the earlier block-and-replace lacked: blocking the stock frame while
-    # only transmitting when engaged left the IC with no 0x399 while disengaged, so it held the
-    # latched boot warning until a power cycle. Continuous OP transmit + panda block clears it.
-    #
-    # In strict-passthrough mode (toggle off) the panda does NOT block the stock frame, so we keep
-    # the engaged-only behavior: when disengaged the stock AP owns 0x399 on its own counter and the
-    # panda forward-scrub keeps it clean; emitting our own rolling-counter frame alongside the stock
-    # one would make the IC reject it as a counter discontinuity.
+    # Ownership mode (TinklaAutopilotDisabled): Unity AP-car parity. The panda now FORWARDS the
+    # stock 0x399/0x389 with a counter-preserving lean scrub (warnings zeroed, stock counter kept)
+    # -- it does NOT block them, and OP does NOT transmit its own copy. A second OP frame on a
+    # different rolling counter would reintroduce exactly the counter discontinuity we're removing,
+    # so in ownership mode we DO NOT emit 0x399/0x389 here; the panda's scrubbed stock stream is the
+    # sole, counter-continuous IC source. (The 0x659 ownership carrier is still sent in
+    # _emit_internal_0x659.)
     ap_disabled = bool(self._cached_autopilot_disabled)
-    if not ap_disabled and not enabled:
+    if ap_disabled:
+      return
+
+    # Strict-passthrough mode (toggle off): transmit our clean DAS group only while ENGAGED. When
+    # disengaged the stock AP owns 0x399 on its own counter and the panda forward-scrub keeps it
+    # clean; emitting our own rolling-counter frame alongside the stock one would make the IC reject
+    # it as a counter discontinuity.
+    if not enabled:
       return
 
     # 50 Hz (every other frame) to meet/beat the ~25 Hz stock cadence so OP latches last.
@@ -431,9 +434,7 @@ class CarController(CarControllerBase):
       return
 
     counter = (self.frame // 2) % 16
-    # 5 = engaged; 2 = available (matches the panda's disengaged scrub value) when we own the HUD
-    # but OP is not engaged.
-    op_status = 5 if enabled else 2
+    op_status = 5  # engaged
 
     cs_out = getattr(CS, "out", None)
     blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
