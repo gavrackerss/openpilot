@@ -411,12 +411,29 @@ class CarController(CarControllerBase):
     if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
       return
 
+    # Ownership mode (TinklaAutopilotDisabled): OP owns the IC's DAS group and the panda BLOCKS the
+    # stock 0x399/0x389 (see tesla_legacy_v167_hud.h). We therefore transmit CONTINUOUSLY -- engaged
+    # AND disengaged -- so the IC always has OP's clean frame as its sole source on one continuous
+    # counter. This is the piece the earlier block-and-replace lacked: blocking the stock frame while
+    # only transmitting when engaged left the IC with no 0x399 while disengaged, so it held the
+    # latched boot warning until a power cycle. Continuous OP transmit + panda block clears it.
+    #
+    # In strict-passthrough mode (toggle off) the panda does NOT block the stock frame, so we keep
+    # the engaged-only behavior: when disengaged the stock AP owns 0x399 on its own counter and the
+    # panda forward-scrub keeps it clean; emitting our own rolling-counter frame alongside the stock
+    # one would make the IC reject it as a counter discontinuity.
+    ap_disabled = bool(self._cached_autopilot_disabled)
+    if not ap_disabled and not enabled:
+      return
+
     # 50 Hz (every other frame) to meet/beat the ~25 Hz stock cadence so OP latches last.
     if self.frame % 2 != 0:
       return
 
     counter = (self.frame // 2) % 16
-    op_status = 5 if enabled else 2  # 5 engaged; 2 = benign "AP active" (matches forward-scrub)
+    # 5 = engaged; 2 = available (matches the panda's disengaged scrub value) when we own the HUD
+    # but OP is not engaged.
+    op_status = 5 if enabled else 2
 
     cs_out = getattr(CS, "out", None)
     blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
@@ -427,36 +444,23 @@ class CarController(CarControllerBase):
     # only the spurious AEB/activation flash. No genuine-FCW signal is plumbed here yet -> 0.
     fcw = False
 
-    # TEMP DIAGNOSTIC (XNOR_HUD2): wrap the DAS_status builders so a packer / signal-name
-    # failure can't silently swallow the transmit (and can't take down the rest of update()).
-    # Logs the built addr@bus on success, or the exception type+message on failure, ~1/sec via
-    # cloudlog.warning (NOT _diag_log, so it isn't starved by the shared 1/sec throttle). Remove
-    # this wrapper once 0x399/0x389 are confirmed transmitting.
-    try:
-      m1 = self.tesla_can.create_das_status(
-        counter,
-        op_status,
-        fcw,
-        0,                              # DAS_laneDepartureWarning
-        self._hud_hands_on(CS),
-        self._hud_alca_state(CS),
-        blind_left,
-        blind_right,
-        speed_limit,
-        0,                              # DAS_fleetSpeedState
-      )
-      m2 = self.tesla_can.create_das_status2(
-        counter,
-        speed_limit,
-        fcw,
-      )
-      can_sends.append(m1)
-      can_sends.append(m2)
-      if self.frame % 100 == 0:
-        cloudlog.warning(f"[XNOR_HUD2] OK 0x{m1[0]:x}@{m1[-1]} 0x{m2[0]:x}@{m2[-1]}")
-    except Exception as e:
-      if self.frame % 100 == 0:
-        cloudlog.warning(f"[XNOR_HUD2] RAISED {type(e).__name__}: {e}")
+    can_sends.append(self.tesla_can.create_das_status(
+      counter,
+      op_status,
+      fcw,
+      0,                              # DAS_laneDepartureWarning
+      self._hud_hands_on(CS),
+      self._hud_alca_state(CS),
+      blind_left,
+      blind_right,
+      speed_limit,
+      0,                              # DAS_fleetSpeedState
+    ))
+    can_sends.append(self.tesla_can.create_das_status2(
+      counter,
+      speed_limit,
+      fcw,
+    ))
 
   def _hud_hands_on(self, CS) -> int:
     return 0
