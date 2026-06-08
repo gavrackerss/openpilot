@@ -689,6 +689,7 @@ def run(args: argparse.Namespace) -> int:
   last_text_emit: dict[str, float] = {}
   last_epas_by_src: dict[int, dict[str, Any]] = {}
   last_epas_sig_by_src: dict[int, str] = {}
+  last_das_trace_sig: dict[tuple, str] = {}  # XNOR: 0x399/0x389 fcw per (service,src,addr) for change-detect
   last_stalk_sig_by_addr_src: dict[tuple[int, int], str] = {}
   last_car_diag_sig = ""
   last_ctrl_diag_sig = ""
@@ -772,6 +773,25 @@ def run(args: argparse.Namespace) -> int:
                 text.write(
                   f"{service.upper()}_WARNING t={rel_t:.3f} src={item['src']} addr={item['addr_hex']} "
                   f"dat={item['dat']} name={item.get('name','')} decoded={item.get('decoded',{})}"
+                )
+
+            # XNOR DAS_TRACE: surface 0x399/0x389 on src=0 (IC bus) AND on sendcan regardless of
+            # warning status, so OP's CLEAN fcw=0 ownership frames are visible (the warning-only
+            # filter hides them). Logs on every fcw change + at most ~0.5 Hz otherwise. This is how
+            # we confirm (a) OP is transmitting its clean DAS group, and (b) whether the IC AEB
+            # latch actually clears (fcw on src=0 going 3 -> 0 and staying once OP owns the bus).
+            if addr in (0x399, 0x389):
+              _dec = item.get("decoded", {}) or {}
+              _fcw = _dec.get("fcw", _dec.get("DAS_forwardCollisionWarning",
+                              _dec.get("DAS_longCollisionWarning", "")))
+              _apst = _dec.get("autopilot_status", _dec.get("autopilotStatus", ""))
+              _dkey = (service, item["src"], item["addr_hex"])
+              _changed = last_das_trace_sig.get(_dkey) != str(_fcw)
+              last_das_trace_sig[_dkey] = str(_fcw)
+              if _changed or should_emit_rate_limited(last_text_emit, f"das:{_dkey}", rel_t, 2.0):
+                text.write(
+                  f"DAS_TRACE t={rel_t:.3f} {service} src={item['src']} addr={item['addr_hex']} "
+                  f"fcw={_fcw} apstat={_apst} dat={item['dat']}"
                 )
 
             if service == "can" and addr == EPAS_DIAG_ADDR:
