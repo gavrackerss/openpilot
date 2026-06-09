@@ -86,3 +86,9 @@ build/
 .context/
 PLAN.md
 TASK.md
+panda/board/obj/
+panda/board/**/obj/
+panda/tests/libpanda/*.so
+panda/tests/libpanda/*.os
+panda/tests/libpanda/*.o
+xnor_aeb_boot_capture/
