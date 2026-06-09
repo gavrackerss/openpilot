@@ -43,7 +43,8 @@ except Exception as exc:
   raise
 
 DEFAULT_TARGETS: dict[int, str] = {
-  0x02BF: "DAS_control/AEB/longitudinal",
+  0x02BF: "DAS_control/AEB/longitudinal (powertrain ns)",
+  0x02B9: "DAS_control/AEB/longitudinal (chassis ns) - verify split",
   0x0488: "DAS_steeringControl",
   0x027D: "APS_eacMonitor",
   0x0659: "XNOR fake/internal DAS carrier",

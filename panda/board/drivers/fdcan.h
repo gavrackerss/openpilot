@@ -1,25 +1,9 @@
 #include "board/drivers/drivers.h"
 
-#define XNOR_V129_BOOT_WARNING_FORWARD_QUARANTINE 1
-
-static bool xnor_v129_startup_safety_mode(void) {
-  return (current_safety_mode == SAFETY_SILENT) ||
-         (current_safety_mode == SAFETY_NOOUTPUT) ||
-         (current_safety_mode == SAFETY_ELM327);
-}
-
-static bool xnor_v129_tesla_warning_addr(uint32_t addr) {
-  return (addr == 0x2BFU) ||  // DAS_control / AEB event
-         (addr == 0x389U) ||  // DAS_status2 / long collision HUD
-         (addr == 0x399U);    // AutopilotStatus / FCW HUD
-}
-
-static bool xnor_v129_block_startup_forwarding(uint8_t bus_number, int forward_bus, const CANPacket_t *msg) {
-  return xnor_v129_startup_safety_mode() &&
-         (bus_number == 2U) &&
-         (forward_bus == 0) &&
-         xnor_v129_tesla_warning_addr(msg->addr);
-}
+// XNOR_V129 boot-warning forward quarantine REMOVED: it ran inside the CAN RX ISR and overloaded
+// CAN2 (the AP bus) during the SILENT/ELM327 boot window, tripping FAULT_INTERRUPT_RATE_CAN_2 ->
+// faultTemp -> noOutput, which then defeated forwarding/scrub entirely. Boot-warning suppression
+// is now owned by tesla_legacy_fwd_msg_hook (the proper safety layer), not the interrupt handler.
 
 FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT] = {FDCAN1, FDCAN2, FDCAN3};
 
@@ -219,17 +203,11 @@ void can_rx(uint8_t can_number) {
     to_send.returned = 0U;
     to_send.rejected = 0U;
     int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
-    const bool xnor_v129_block_hook_fwd = xnor_v129_block_startup_forwarding(bus_number, bus_fwd_num, &to_send);
-    if (xnor_v129_block_hook_fwd) {
-      bus_fwd_num = -1;
-    } else if (bus_fwd_num < 0) {
-      const int fallback_bus = bus_config[can_number].forwarding_bus;
-      if (!xnor_v129_block_startup_forwarding(bus_number, fallback_bus, &to_push)) {
-        bus_fwd_num = fallback_bus;
-        to_send = to_push;
-        to_send.returned = 0U;
-        to_send.rejected = 0U;
-      }
+    if (bus_fwd_num < 0) {
+      bus_fwd_num = bus_config[can_number].forwarding_bus;
+      to_send = to_push;
+      to_send.returned = 0U;
+      to_send.rejected = 0U;
     }
     if (bus_fwd_num != -1) {
       to_send.bus = (uint8_t)bus_fwd_num;
