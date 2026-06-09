@@ -65,6 +65,26 @@ DEFAULT_TARGETS: dict[int, str] = {
   0x0155: "ESP_vehicleSpeed",
   0x020A: "BrakeMessage",
   0x0368: "DI_state/cruise",
+  # --- Bosch forward radar (HW2) -------------------------------------------------------------
+  # The AP needs the radar to do FCW; if these stop reaching the radar/AP, the AP boots into
+  # fcw=3 ("forward sensing unavailable"). RADAR INPUTS = car/AP -> radar (config/keepalive/
+  # vehicle-state); RADAR TRACKS = radar -> AP (object detections). We log both + their src(bus)
+  # to see whether the radar is fed and is producing tracks, and whether the AP (src=2) sees them.
+  0x0398: "GTW_carConfig (radar/DAS hw config)",
+  0x02A9: "radar IN: carConfig->radar (0x398 remap)",
+  0x0199: "radar IN: vehicle-state",
+  0x0159: "radar IN: vehicle-state",
+  0x0149: "radar IN: ESP/vehicle-state",
+  0x0129: "radar IN: vehicle-state",
+  0x0119: "radar IN: DI_torque2->radar",
+  0x0214: "radar IN: EPB/epasControl->radar",
+  0x0310: "radar TRACK (sample, range 0x310-0x36D)",
+  0x0340: "radar TRACK (sample)",
+  0x036D: "radar TRACK (range end)",
+  0x0371: "radar TRACK (range 0x371-0x37D)",
+  0x037D: "radar TRACK (range end)",
+  0x0631: "radar status/diag",
+  0x0671: "radar UDS",
 }
 
 WARNING_KEYS = {
@@ -634,7 +654,8 @@ def should_log_can(addr: int, args: argparse.Namespace, targets: dict[int, str])
 
 def setup_sockets(addr: str, text: BoundedText) -> dict[str, Any]:
   socks: dict[str, Any] = {}
-  services = ["can", "sendcan", "pandaStates", "carState", "controlsState", "selfdriveState"]
+  services = ["can", "sendcan", "pandaStates", "carState", "controlsState", "selfdriveState",
+              "liveTracks", "radarState"]
   for service in services:
     try:
       socks[service] = messaging.sub_sock(service, conflate=False, timeout=0, addr=addr)
@@ -695,6 +716,8 @@ def run(args: argparse.Namespace) -> int:
   last_ctrl_diag_sig = ""
   last_panda_fault_sig: dict[int, str] = {}
   recent_can: deque[dict[str, Any]] = deque(maxlen=int(args.recent_can_max))
+  last_radar_sig = ""
+  last_radarstate_sig = ""
   diag_events = 0
 
   text.write("# xnor boot raw CAN watcher v115")
@@ -971,6 +994,64 @@ def run(args: argparse.Namespace) -> int:
                 "controlsState": last_ctrl,
                 "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
               })
+
+        # XNOR RADARD OBSERVER: radard's own view of the Bosch HW2 radar. radard subscribes to
+        # the radar TRACK frames (0x310-0x37D) off the radar bus and publishes liveTracks (raw
+        # points) + radarState (leads). This is a SECOND, independent witness of the radar:
+        #  - liveTracks non-empty / radarState has a lead  => radard IS getting tracks => the radar
+        #    is alive and producing. If the AP still booted fcw=3, the tracks exist but aren't
+        #    reaching the AP's side of the bus (routing/intercept), NOT a dead radar.
+        #  - liveTracks persistently empty + radarErrors set => radard is starved too => the radar
+        #    is genuinely dark (no keepalive/config, or the bus is rerouted away from it), which is
+        #    exactly the input the AP needs => AP boots into fcw=3. These two cases need different fixes.
+        elif service == "liveTracks":
+          lt = getattr(evt, "liveTracks", None)
+          if lt is not None:
+            pts = list(getattr(lt, "points", []) or [])
+            errs = getattr(lt, "errors", None)
+            err_list = []
+            if errs is not None:
+              try:
+                err_list = [k for k, v in errs.to_dict().items() if v]
+              except Exception:
+                err_list = [enum_str(errs)]
+            n = len(pts)
+            radar_sig = f"liveTracks:n={1 if n > 0 else 0}:err={','.join(sorted(err_list))}"
+            if radar_sig != last_radar_sig or should_emit_rate_limited(last_text_emit, "liveTracks", rel_t, 2.0):
+              last_radar_sig = radar_sig
+              diag_events += 1
+              evt_obj = {
+                "type": "diag_radard_livetracks",
+                "event_version": XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY,
+                "t": round(rel_t, 6),
+                "num_points": n,
+                "errors": err_list,
+                "snapshot": make_diag_snapshot(rel_t, last_car, last_ctrl, last_pandas, last_epas_by_src, recent_sendcan, recent_can),
+              }
+              jsonl.write(evt_obj)
+              text.write(
+                f"DIAG_RADAR_TRACKS t={rel_t:.3f} num_points={n} errors={','.join(err_list) or '-'} "
+                f"valid={int(bool(getattr(lt, 'valid', False)))}"
+              )
+
+        elif service == "radarState":
+          rs = getattr(evt, "radarState", None)
+          if rs is not None:
+            lead1 = getattr(rs, "leadOne", None)
+            lead_status = int(bool(getattr(lead1, "status", False))) if lead1 is not None else 0
+            lead_d = round(safe_float(getattr(lead1, "dRel", 0.0), 0.0), 1) if lead1 is not None else 0.0
+            rstate_sig = f"radarState:lead={lead_status}"
+            if rstate_sig != last_radarstate_sig or should_emit_rate_limited(last_text_emit, "radarState", rel_t, 2.0):
+              last_radarstate_sig = rstate_sig
+              diag_events += 1
+              jsonl.write({
+                "type": "diag_radard_radarstate",
+                "event_version": XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY,
+                "t": round(rel_t, 6),
+                "lead_status": lead_status,
+                "lead_d_rel": lead_d,
+              })
+              text.write(f"DIAG_RADAR_STATE t={rel_t:.3f} lead={lead_status} dRel={lead_d}")
 
     now = time.monotonic()
     rel_t = now - start
