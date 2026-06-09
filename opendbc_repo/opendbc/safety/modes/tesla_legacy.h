@@ -38,6 +38,12 @@ static bool tesla_legacy_external_panda = false;
 static bool tesla_legacy_has_ap_hw = false;
 static bool tesla_legacy_op_stalk_enable = false;
 static int tesla_legacy_chassis_bus = 0;
+// DAS_control lives in different ID namespaces per bus: 0x2B9 on the chassis/party bus (main
+// panda) and 0x2BF on the powertrain bus (external panda). Unity (das_control_addr) and vanilla
+// opendbc (das_control_msg) both split it; we set it per-panda in init and use it for every
+// DAS_control match. The additive checksum always bases on 0x2B9 regardless (see
+// tesla_legacy_calc_checksum8), so that path is unchanged.
+static int tesla_legacy_das_control_addr = 0x2BF;
 
 // internal OP->safety carrier (0x659) — Unity parity bits (byte5)
 static bool tesla_legacy_op_autopilot_disabled = false;  // bit7
@@ -329,7 +335,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     }
   }
 
-  if ((bus == 2) && (addr == 0x2BF)) {
+  if ((bus == 2) && (addr == tesla_legacy_das_control_addr)) {
     tesla_legacy_note_aeb_hud_warning((int)(msg->data[2] & 0x03U));
   }
 
@@ -354,7 +360,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       if (tesla_legacy_stock_lkas) {
         controls_allowed = false;
       }
-    } else if (tesla_legacy_external_panda && (addr == 0x2BF)) {
+    } else if (tesla_legacy_external_panda && (addr == tesla_legacy_das_control_addr)) {
       const int aeb_event = (int)(msg->data[2] & 0x03);
       tesla_legacy_stock_aeb = (aeb_event == 1);
       if (tesla_legacy_stock_aeb) {
@@ -405,19 +411,24 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
         pcm_cruise_check(false);
       }
     }
-    return false;
+    // Unity parity for 0x659: Unity blocks the carrier only `if (has_das_hw)`, which is FALSE on AP
+    // cars, so on an AP car Unity lets 0x659 onto the CHASSIS bus. Match that on the MAIN (chassis/
+    // party = bus 0) panda -> allow it on the wire. Keep blocking it on the EXTERNAL panda, whose
+    // bus is the separate powertrain bus 4; Unity's AP1 topology has CAN_POWERTRAIN=chassis(0), so
+    // it never puts 0x659 on a dedicated powertrain bus. Bits were already consumed above.
+    return !tesla_legacy_external_panda;   // main panda: allow on bus0; external panda: block on bus4
   }
 
   // Unity parity: on AP hardware cars, block OP actuation unless stock AP is disabled
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
-    if ((addr == 0x488) || (addr == 0x27D) || (addr == 0x2BF)) {
+    if ((addr == 0x488) || (addr == 0x27D) || (addr == tesla_legacy_das_control_addr)) {
       return false;
     }
   }
 
   // Main panda (lateral)
   if (!tesla_legacy_external_panda) {
-    if (addr == 0x2BF) {
+    if (addr == tesla_legacy_das_control_addr) {  // main: block chassis DAS_control (0x2B9)
       return false;
     }
 
@@ -476,7 +487,7 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     if ((addr == 0x399) || (addr == 0x389)) {
       return true;
     }
-    if (addr != 0x2BF) {
+    if (addr != tesla_legacy_das_control_addr) {  // external: only DAS_control (0x2BF) past here
       return false;
     }
 
@@ -535,7 +546,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   if ((bus_num == 0) && ((addr == 0x488) || (addr == 0x27D))) {
     return true;
   }
-  if ((bus_num == 0) && (addr == 0x2BF) && controls_allowed) {
+  if ((bus_num == 0) && (addr == tesla_legacy_das_control_addr) && controls_allowed) {
     return true;
   }
 
@@ -546,7 +557,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // - While OP is actively controlling, keep the previous Unity-style behavior: block
   //   stock longControl except real stock AEB events.
   if (tesla_legacy_external_panda) {
-    if ((bus_num == 2) && (addr == 0x2BF)) {
+    if ((bus_num == 2) && (addr == tesla_legacy_das_control_addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
       if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
@@ -600,7 +611,8 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // actually drives the IC AEB/FCW). 0x399 uses the LEAN scrub when disengaged (autopilotStatus=2
   // + fcw=0 only) because that is what reliably clears the IC latch; the full warning rewrite
   // regressed it to a sticky latch. 0x389/object/warning-matrix keep the gated full rewrite while
-  // OP owns the HUD. (0x2BF is powertrain-only and never reaches the IC; its branch is harmless.)
+  // OP owns the HUD. (On the main/chassis panda DAS_control is 0x2B9 and DOES reach the IC, so its
+  // AEB-event scrub matters here; tesla_legacy_das_control_addr selects 0x2B9 main / 0x2BF external.)
   if (bus_num == 2) {
     // Forward the stock 0x399/0x389 (scrubbed), NOT block them: the IC validates
     // DAS_statusCounter continuity and clears its AEB latch when the stock frame recovers to
@@ -620,7 +632,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     // every forward (counter preserved) rather than blocking. The earlier block (+ a competing
     // OP frame on a new counter) reintroduced the discontinuity; the full warning rewrite zeroed
     // fields the IC needs and went sticky. Lean + counter-preserving is the Unity-faithful path.
-    if (addr == 0x2BF) {
+    if (addr == tesla_legacy_das_control_addr) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
       if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
@@ -661,7 +673,12 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_external_panda = GET_FLAG(param, TESLA_LEGACY_FLAG_EXTERNAL_PANDA);
   tesla_legacy_op_stalk_enable = GET_FLAG(param, TESLA_LEGACY_FLAG_OP_STALK_ENABLE);
   tesla_legacy_has_ap_hw = GET_FLAG(param, TESLA_LEGACY_FLAG_HW2) || GET_FLAG(param, TESLA_LEGACY_FLAG_HW3);
-  tesla_legacy_chassis_bus = GET_FLAG(param, TESLA_LEGACY_FLAG_HW3) ? 1 : 0;
+  // chassis_bus: only the MAIN panda on HW3 (raven) reads chassis vehicle-state off bus 1. The
+  // external (powertrain) panda always reads its frames off its local bus 0, and HW1/HW2 main read
+  // chassis off bus 0. (Vanilla parity: HW3 main -> chassis_bus=1; external or HW2 -> 0.)
+  tesla_legacy_chassis_bus = (!tesla_legacy_external_panda && GET_FLAG(param, TESLA_LEGACY_FLAG_HW3)) ? 1 : 0;
+  // DAS_control namespace per panda: external(PT)=0x2BF, main(chassis)=0x2B9 (Unity/vanilla parity).
+  tesla_legacy_das_control_addr = tesla_legacy_external_panda ? 0x2BF : 0x2B9;
 
   tesla_legacy_op_autopilot_disabled = false;
   tesla_legacy_pedal_enabled = false;
@@ -706,37 +723,66 @@ static safety_config tesla_legacy_init(uint16_t param) {
 
   };
 
-  // These RX checks are the primary source of 'safetyRxChecksInvalid' -> controls mismatch.
-  // Keep them to frames that are always present on the respective panda's wiring.
-  //
-  // Your canmap (split) shows:
-  //  - main panda: chassis frames on bus0, AP/DAS frames on bus2
-  //  - external panda: does not consistently see the AP/DAS bus; keep minimal
+  // RX checks are the primary source of 'safetyRxChecksInvalid' -> controls mismatch. These mirror
+  // Unity's frame selection (AP-car: TESLA_AP_RX_CHECKS; PT panda: TESLA_PT_RX_CHECKS) but adapted
+  // to xnor's newer opendbc engine. NOTE: Unity ships its AP RX checks with frequency=0 (rate check
+  // disabled); that is UNSAFE here because safety_tick() computes 1e6/frequency (div-by-zero). So we
+  // use REAL frequencies + ignore_checksum/counter/quality, and rely on opendbc's lenient lag rule
+  // (a frame only trips if absent for > max(10*interval, 1s)). Each check lists alternative buses so
+  // a frame on either the direct bus or its forward-mirror still satisfies the check.
   static RxCheck tesla_legacy_rx_checks_external[] = {
-  // Unity parity (powertrain / longitudinal): these are always present on the PT bus.
-  // Keep this minimal; missing frames == rx_checks_invalid == controls mismatch.
+  // Unity PT parity: vehicle-state frames always present on the powertrain bus (bus0 here; bus2 alt
+  // accepts an AP-powertrain forward mirror).
   {.msg = {
-    {0x106, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque1
-    {0x106, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirrored
+    {0x106, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque1 (PT)
+    {0x106, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
     {0},
   }},
   {.msg = {
-    {0x116, 0, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque2
-    {0x116, 2, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirrored
+    {0x116, 0, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque2 (PT, vehicle speed)
+    {0x116, 2, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
+    {0},
+  }},
+  {.msg = {
+    {0x1F8, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // BrakeMessage (PT)
+    {0x1F8, 2, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
+    {0},
+  }},
+  {.msg = {
+    {0x256, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_state (PT)
+    {0x256, 2, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
     {0},
   }},
 };
 
   static RxCheck tesla_legacy_rx_checks_main[] = {
-  // Unity parity (AP-side / lateral): torque frames are the most reliable "always present" signals.
+  // Unity AP / vanilla HW2 parity: the real chassis signals the safety logic consumes -- EPAS_sysStatus
+  // (steering_disengage), DI_torque1/2 (gas + speed cross-check), BrakeMessage, DI_state (cruise/gear).
+  // EPAS/torque are bus0 on HW2 and HW3 (bus2 alt = forward mirror). BrakeMessage/DI_state move to
+  // bus1 on HW3 (raven chassis_bus=1), so each lists bus0 (HW2) + bus1 (HW3) -> one table covers both.
+  {.msg = {
+    {0x370, 0, 8, 25U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // EPAS_sysStatus
+    {0x370, 2, 8, 25U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
+    {0},
+  }},
   {.msg = {
     {0x108, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque1
-    {0x108, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirrored
+    {0x108, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
     {0},
   }},
   {.msg = {
     {0x118, 0, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque2
-    {0x118, 2, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirrored
+    {0x118, 2, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
+    {0},
+  }},
+  {.msg = {
+    {0x20A, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // BrakeMessage (HW2 bus0)
+    {0x20A, 1, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // HW3 chassis_bus=1
+    {0},
+  }},
+  {.msg = {
+    {0x368, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_state (HW2 bus0)
+    {0x368, 1, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // HW3 chassis_bus=1
     {0},
   }},
 };
