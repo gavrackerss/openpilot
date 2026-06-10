@@ -52,29 +52,42 @@ void register_clear_bits(volatile uint32_t *addr, uint32_t val) {
   register_set(addr, (~val), val);
 }
 
+// XNOR DIAGNOSTIC: LATCH the first divergent register the instant it diverges (even a 1-frame
+// cold-boot transient), then re-print the latched values ~periodically forever -- so the culprit
+// can be read from the panda serial long after the register has recovered. REVERT AFTER DIAGNOSIS.
+static volatile uint32_t xnor_div_addr = 0U;
+static volatile uint32_t xnor_div_map  = 0U;
+static volatile uint32_t xnor_div_reg  = 0U;
+static volatile uint32_t xnor_div_mask = 0U;
+static volatile bool     xnor_div_seen = false;
+
 // To be called periodically
 void check_registers(void){
-  // XNOR DIAGNOSTIC: the stock print is one-shot per register (logged_fault), so the boot-time
-  // divergent register scrolls off the serial ring before it can be read. Re-print on first
-  // detection AND ~periodically (every 0x4000 ticks) so the culprit can be read from the panda
-  // serial at any time, and add the check_mask to the line. REVERT THIS FILE AFTER DIAGNOSIS.
   static uint32_t xnor_diag_ctr = 0U;
   xnor_diag_ctr++;
   for(uint16_t i=0U; i<REGISTER_MAP_SIZE; i++){
     if((uint32_t) register_map[i].address != 0U){
       ENTER_CRITICAL()
       if((*(register_map[i].address) & register_map[i].check_mask) != (register_map[i].value & register_map[i].check_mask)){
-        if((!register_map[i].logged_fault) || ((xnor_diag_ctr & 0x3FFFU) == 0U)){
-          print("XNOR_DIVERGENT reg=0x"); puth((uint32_t) register_map[i].address);
-          print(" map=0x"); puth(register_map[i].value);
-          print(" reg=0x"); puth(*(register_map[i].address));
-          print(" mask=0x"); puth(register_map[i].check_mask); print("\n");
-          register_map[i].logged_fault = true;
+        if(!xnor_div_seen){
+          xnor_div_addr = (uint32_t) register_map[i].address;
+          xnor_div_map  = register_map[i].value;
+          xnor_div_reg  = *(register_map[i].address);
+          xnor_div_mask = register_map[i].check_mask;
+          xnor_div_seen = true;
         }
         fault_occurred(FAULT_REGISTER_DIVERGENT);
       }
       EXIT_CRITICAL()
     }
+  }
+  // Re-print the latched first-divergence ~periodically (outside the critical section), even after
+  // the register has recovered, so a transient cold-boot divergence is always readable.
+  if(xnor_div_seen && ((xnor_diag_ctr & 0x3FFFU) == 0U)){
+    print("XNOR_DIVERGENT reg=0x"); puth(xnor_div_addr);
+    print(" map=0x"); puth(xnor_div_map);
+    print(" reg=0x"); puth(xnor_div_reg);
+    print(" mask=0x"); puth(xnor_div_mask); print("\n");
   }
 }
 
