@@ -620,12 +620,14 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // scrub WAS the bug. We keep ONLY the DAS_control (0x2B9/0x2BF) AEB-event handling here -- that is
   // longitudinal actuation, not the IC HUD, and matches the stock-AEB intent.
   if (bus_num == 2) {
+    // Forward stock DAS_control (0x2B9) to the IC UNCHANGED -- like vanilla-xnor, which has NO
+    // fwd_msg scrub at all and never flashes. The rlog (cold-jun) proved this scrub was live:
+    // the AP's aeb=2 on bus2 was being forced to aeb=0 on the IC bus, while the sibling 0x2BF on
+    // the same bus stayed unscrubbed (main panda only matches 0x2B9). That panda rewrite +
+    // checksum recompute is the same class of change that latches the IC, and it left 0x2B9 and
+    // 0x2BF inconsistent. Observe the event for diagnostics only; do not modify the frame.
     if (addr == tesla_legacy_das_control_addr) {
-      const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
-      tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
-        tesla_legacy_scrub_das_control_aeb(to_fwd);
-      }
+      tesla_legacy_note_aeb_hud_warning((int)(to_fwd->data[2] & 0x03U));
     }
 
     if (!controls_allowed) {
