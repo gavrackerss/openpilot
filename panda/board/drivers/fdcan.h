@@ -1,11 +1,6 @@
-#include "board/drivers/drivers.h"
+#include "fdcan_declarations.h"
 
-// XNOR_V129 boot-warning forward quarantine REMOVED: it ran inside the CAN RX ISR and overloaded
-// CAN2 (the AP bus) during the SILENT/ELM327 boot window, tripping FAULT_INTERRUPT_RATE_CAN_2 ->
-// faultTemp -> noOutput, which then defeated forwarding/scrub entirely. Boot-warning suppression
-// is now owned by tesla_legacy_fwd_msg_hook (the proper safety layer), not the interrupt handler.
-
-FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT] = {FDCAN1, FDCAN2, FDCAN3};
+FDCAN_GlobalTypeDef *cans[CANS_ARRAY_SIZE] = {FDCAN1, FDCAN2, FDCAN3};
 
 static bool can_set_speed(uint8_t can_number) {
   bool ret = true;
@@ -18,7 +13,7 @@ static bool can_set_speed(uint8_t can_number) {
     bus_config[bus_number].can_data_speed,
     bus_config[bus_number].canfd_non_iso,
     can_loopback,
-    can_silent
+    (unsigned int)(can_silent) & (1U << can_number)
   );
   return ret;
 }
@@ -37,7 +32,7 @@ void can_clear_send(FDCAN_GlobalTypeDef *FDCANx, uint8_t can_number) {
 }
 
 void update_can_health_pkt(uint8_t can_number, uint32_t ir_reg) {
-  uint8_t can_irq_number[PANDA_CAN_CNT][2] = {
+  uint8_t can_irq_number[3][2] = {
     { FDCAN1_IT0_IRQn, FDCAN1_IT1_IRQn },
     { FDCAN2_IT0_IRQn, FDCAN2_IT1_IRQn },
     { FDCAN3_IT0_IRQn, FDCAN3_IT1_IRQn },
@@ -67,6 +62,7 @@ void update_can_health_pkt(uint8_t can_number, uint32_t ir_reg) {
 
   can_health[can_number].irq0_call_rate = interrupts[can_irq_number[can_number][0]].call_rate;
   can_health[can_number].irq1_call_rate = interrupts[can_irq_number[can_number][1]].call_rate;
+
 
   if (ir_reg != 0U) {
     // Clear error interrupts
@@ -162,13 +158,17 @@ void can_rx(uint8_t can_number) {
 
   // Clear all new messages from Rx FIFO 0
   FDCANx->IR |= FDCAN_IR_RF0N;
-  while ((FDCANx->RXF0S & FDCAN_RXF0S_F0FL) != 0U) {
+  while((FDCANx->RXF0S & FDCAN_RXF0S_F0FL) != 0U) {
     can_health[can_number].total_rx_cnt += 1U;
+
+    // can is live
+    pending_can_live = 1;
+
     // get the index of the next RX FIFO element (0 to FDCAN_RX_FIFO_0_EL_CNT - 1)
     uint32_t rx_fifo_idx = (uint8_t)((FDCANx->RXF0S >> FDCAN_RXF0S_F0GI_Pos) & 0x3FU);
 
     // Recommended to offset get index by at least +1 if RX FIFO is in overwrite mode and full (datasheet)
-    if ((FDCANx->RXF0S & FDCAN_RXF0S_F0F) == FDCAN_RXF0S_F0F) {
+    if((FDCANx->RXF0S & FDCAN_RXF0S_F0F) == FDCAN_RXF0S_F0F) {
       rx_fifo_idx = ((rx_fifo_idx + 1U) >= FDCAN_RX_FIFO_0_EL_CNT) ? 0U : (rx_fifo_idx + 1U);
       can_health[can_number].total_rx_lost_cnt += 1U; // At least one message was lost
     }
@@ -199,27 +199,26 @@ void can_rx(uint8_t can_number) {
     can_set_checksum(&to_push);
 
     // forwarding (panda only)
-    CANPacket_t to_send = to_push;
-    to_send.returned = 0U;
-    to_send.rejected = 0U;
-    int bus_fwd_num = safety_fwd_hook(bus_number, &to_send);
+    int bus_fwd_num = safety_fwd_hook(bus_number, to_push.addr);
     if (bus_fwd_num < 0) {
       bus_fwd_num = bus_config[can_number].forwarding_bus;
-      to_send = to_push;
-      to_send.returned = 0U;
-      to_send.rejected = 0U;
     }
     if (bus_fwd_num != -1) {
-      to_send.bus = (uint8_t)bus_fwd_num;
+      CANPacket_t to_send;
+
+      to_send.fd = to_push.fd;
+      to_send.returned = 0U;
+      to_send.rejected = 0U;
+      to_send.extended = to_push.extended;
+      to_send.addr = to_push.addr;
+      to_send.bus = to_push.bus;
+      to_send.data_len_code = to_push.data_len_code;
+      (void)memcpy(to_send.data, to_push.data, dlc_to_len[to_push.data_len_code]);
       can_set_checksum(&to_send);
 
       can_send(&to_send, bus_fwd_num, true);
       can_health[can_number].total_fwd_cnt += 1U;
     }
-
-    #ifdef PANDA_BODY
-    body_can_rx(&to_push);
-    #endif
 
     safety_rx_invalid += safety_rx_hook(&to_push) ? 0U : 1U;
     ignition_can_hook(&to_push);
