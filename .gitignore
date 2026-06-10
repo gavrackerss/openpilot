@@ -92,3 +92,13 @@ panda/tests/libpanda/*.so
 panda/tests/libpanda/*.os
 panda/tests/libpanda/*.o
 xnor_aeb_boot_capture/
+
+.sconsign.dblite
+selfdrive/pandad/pandad
+selfdrive/pandad/*.o
+panda/board/obj/
+*.bin.signed
+*.os
+*.o
+libpanda.so
+gitversion.h
