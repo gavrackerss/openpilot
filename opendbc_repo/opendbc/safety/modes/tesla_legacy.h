@@ -190,7 +190,8 @@ static void tesla_legacy_scrub_status2_warnings(CANPacket_t *msg) {
   w1 |= 0x03U;          // DAS_lssState bits 1..2 => 7/off
   w1 |= (1U << 2);      // DAS_radarTelemetry = normal
   w1 |= (2U << 4);      // DAS_robState = active
-  // XNOR_V167: this XNOR DBC/car renders 15 as long-collision/AEB warning; keep it at 0.
+  w1 |= (0xFU << 16);   // DAS_longCollisionWarning = 15 (SNA) -- Unity's no-warning value. 0/NONE
+                        // (the prior XNOR_V167 value) is what the IC renders as the AEB warning.
 
   msg->data[0] = (uint8_t)(w0 & 0xFFU);
   msg->data[1] = (uint8_t)((w0 >> 8) & 0xFFU);
@@ -237,11 +238,14 @@ static void tesla_legacy_scrub_fcw_only(CANPacket_t *msg) {
 // AP-car forward keeps the stock counter and zeroes the warnings; the full status2 rewrite
 // (tesla_legacy_scrub_status2_warnings) regressed to a sticky latch, so ownership mode uses this.
 //   DAS_activationFailureStatus 14|2  -> 0  (byte1 bits 6-7)
-//   DAS_longCollisionWarning    48|4  -> 0  (byte6 low nibble; 0 = NONE on this DBC, 15 = warning)
+//   DAS_longCollisionWarning    48|4  -> 15 (SNA)  (byte6 low nibble). DBC: 0=NONE, 1..12=warnings,
+//      15=SNA. Unity sets this to 15/SNA for the no-warning state: the IC drops the AEB indicator on
+//      SNA ("forward-collision signal unavailable") but treats a valid 0/NONE as a live report and
+//      keeps the warning lit. Forcing 0/NONE was the porting bug that kept the flash on.
 //   DAS_status2Counter          52|4  preserved (byte6 high nibble)
 static void tesla_legacy_scrub_status2_lean(CANPacket_t *msg) {
   msg->data[1] &= 0x3FU;   // DAS_activationFailureStatus = 0
-  msg->data[6] &= 0xF0U;   // DAS_longCollisionWarning = 0 (NONE); keep counter in high nibble
+  msg->data[6] |= 0x0FU;   // DAS_longCollisionWarning = 15 (SNA, Unity parity); keep counter (high nibble)
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
@@ -723,48 +727,26 @@ static safety_config tesla_legacy_init(uint16_t param) {
 
   };
 
-  // RX checks are the primary source of 'safetyRxChecksInvalid' -> controls mismatch. These mirror
-  // Unity's frame selection (AP-car: TESLA_AP_RX_CHECKS; PT panda: TESLA_PT_RX_CHECKS) but adapted
-  // to xnor's newer opendbc engine. NOTE: Unity ships its AP RX checks with frequency=0 (rate check
-  // disabled); that is UNSAFE here because safety_tick() computes 1e6/frequency (div-by-zero). So we
-  // use REAL frequencies + ignore_checksum/counter/quality, and rely on opendbc's lenient lag rule
-  // (a frame only trips if absent for > max(10*interval, 1s)). Each check lists alternative buses so
-  // a frame on either the direct bus or its forward-mirror still satisfies the check.
+  // RX checks: MINIMAL torque-only set (reverted from the Unity-parity EPAS/brake/DI_state set).
+  // The expanded set required EPAS(0x370)/BrakeMessage(0x20A)/DI_state(0x368) on specific buses; if
+  // any of those lagged >1s mid-drive on this harness it set safety_rx_checks_invalid -> controls
+  // mismatch + steerFaultTemporary mid-drive. Torque frames (0x106/0x108 + 0x116/0x118) are the most
+  // reliably-present signals and never tripped, so we validate only those. Each lists bus0 + its
+  // bus2 forward-mirror so a frame on either bus satisfies the check.
   static RxCheck tesla_legacy_rx_checks_external[] = {
-  // Unity PT parity: vehicle-state frames always present on the powertrain bus (bus0 here; bus2 alt
-  // accepts an AP-powertrain forward mirror).
   {.msg = {
     {0x106, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque1 (PT)
     {0x106, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
     {0},
   }},
   {.msg = {
-    {0x116, 0, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque2 (PT, vehicle speed)
+    {0x116, 0, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque2 (PT)
     {0x116, 2, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
-    {0},
-  }},
-  {.msg = {
-    {0x1F8, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // BrakeMessage (PT)
-    {0x1F8, 2, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
-    {0},
-  }},
-  {.msg = {
-    {0x256, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_state (PT)
-    {0x256, 2, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
     {0},
   }},
 };
 
   static RxCheck tesla_legacy_rx_checks_main[] = {
-  // Unity AP / vanilla HW2 parity: the real chassis signals the safety logic consumes -- EPAS_sysStatus
-  // (steering_disengage), DI_torque1/2 (gas + speed cross-check), BrakeMessage, DI_state (cruise/gear).
-  // EPAS/torque are bus0 on HW2 and HW3 (bus2 alt = forward mirror). BrakeMessage/DI_state move to
-  // bus1 on HW3 (raven chassis_bus=1), so each lists bus0 (HW2) + bus1 (HW3) -> one table covers both.
-  {.msg = {
-    {0x370, 0, 8, 25U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // EPAS_sysStatus
-    {0x370, 2, 8, 25U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
-    {0},
-  }},
   {.msg = {
     {0x108, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque1
     {0x108, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
@@ -773,16 +755,6 @@ static safety_config tesla_legacy_init(uint16_t param) {
   {.msg = {
     {0x118, 0, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque2
     {0x118, 2, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
-    {0},
-  }},
-  {.msg = {
-    {0x20A, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // BrakeMessage (HW2 bus0)
-    {0x20A, 1, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // HW3 chassis_bus=1
-    {0},
-  }},
-  {.msg = {
-    {0x368, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_state (HW2 bus0)
-    {0x368, 1, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // HW3 chassis_bus=1
     {0},
   }},
 };
