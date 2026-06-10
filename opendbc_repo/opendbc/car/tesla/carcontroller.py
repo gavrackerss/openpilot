@@ -388,6 +388,14 @@ class CarController(CarControllerBase):
     return max(0.0, limit_ms * (CV.MS_TO_KPH if units == "KPH" else CV.MS_TO_MPH))
 
   def _process_hud_status(self, CC, CS, can_sends, human_control: bool) -> None:
+    # DISABLED (vanilla-xnor parity): OP no longer transmits its own DAS_status (0x399) /
+    # DAS_status2 (0x389). Vanilla-xnor sends NO HUD and forwards the stock frames unchanged, and
+    # never flashes. Transmitting our own frame put a second 0x399 (different rolling counter) on the
+    # IC bus competing with the forwarded stock frame -- part of what latched the AEB warning. The
+    # panda now forwards the authentic stock HUD unchanged (tesla_legacy.h), so the IC has a single
+    # coherent source. Do not transmit.
+    return
+    # --- unreachable legacy HUD-transmit path kept below for reference ---
     # AEB/FCW HUD-flash suppression by transmit-ownership (legacy HW2, external panda).
     #
     # The factory AEB/FCW flash is the IC rendering the stock DAS_status (0x399) /
