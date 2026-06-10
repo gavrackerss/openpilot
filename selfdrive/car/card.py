@@ -152,8 +152,13 @@ class Car:
     # elm327/CAN_MODE_OBD_CAN2 window during which the stock AP's boot fcw=3 reaches the IC. Reading
     # the param here and setting the env before get_car() guarantees the query is skipped. Set via
     #   echo -n "TESLA_MODEL_S_HW2" > /data/params/d/XnorForceFingerprint   (clear with NONE / delete)
-    _xnor_ffp = self.params.get("XnorForceFingerprint", encoding="utf-8")
-    if _xnor_ffp is not None:
+    try:
+      _xnor_ffp = self.params.get("XnorForceFingerprint")
+    except Exception:
+      _xnor_ffp = None
+    if isinstance(_xnor_ffp, (bytes, bytearray)):
+      _xnor_ffp = _xnor_ffp.decode("utf-8", "replace")
+    if _xnor_ffp:
       _xnor_ffp = _xnor_ffp.strip()
       if _xnor_ffp and (_xnor_ffp != "NONE"):
         os.environ["FINGERPRINT"] = _xnor_ffp
