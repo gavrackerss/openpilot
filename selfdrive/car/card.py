@@ -146,6 +146,20 @@ class Car:
 
     is_release = self.params.get_bool("IsReleaseBranch")
 
+    # XNOR forced fingerprint, applied IN-PROCESS from the param (independent of launch_env.sh).
+    # The launch/overlay updater keeps reverting launch_env.sh, so the SKIP_FW_QUERY/FINGERPRINT env
+    # vars don't reliably reach this process -- the full FW/OBD query then runs, opening the
+    # elm327/CAN_MODE_OBD_CAN2 window during which the stock AP's boot fcw=3 reaches the IC. Reading
+    # the param here and setting the env before get_car() guarantees the query is skipped. Set via
+    #   echo -n "TESLA_MODEL_S_HW2" > /data/params/d/XnorForceFingerprint   (clear with NONE / delete)
+    _xnor_ffp = self.params.get("XnorForceFingerprint", encoding="utf-8")
+    if _xnor_ffp is not None:
+      _xnor_ffp = _xnor_ffp.strip()
+      if _xnor_ffp and (_xnor_ffp != "NONE"):
+        os.environ["FINGERPRINT"] = _xnor_ffp
+        os.environ["SKIP_FW_QUERY"] = "1"
+        cloudlog.warning(f"XNOR: forcing fingerprint {_xnor_ffp} + SKIP_FW_QUERY from param (bypassing launch_env)")
+
     if CI is None:
       # wait for one pandaState and one CAN packet
       print("Waiting for CAN messages...")
