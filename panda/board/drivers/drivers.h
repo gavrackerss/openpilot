@@ -107,11 +107,6 @@ void fan_tick(void);
 // ******************** fdcan ********************
 #ifdef STM32H7
 
-typedef struct {
-  volatile uint32_t header[2];
-  volatile uint32_t data_word[CANPACKET_DATA_SIZE_MAX/4U];
-} canfd_fifo;
-
 extern FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT];
 
 #define CAN_ACK_ERROR 3U
