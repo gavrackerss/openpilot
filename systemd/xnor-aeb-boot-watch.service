@@ -1,0 +1,16 @@
+[Unit]
+Description=XNOR decoded AEB boot watcher
+Before=manager.service
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/data/openpilot
+Environment=PYTHONPATH=/data/openpilot:/data/openpilot/opendbc_repo
+ExecStart=/usr/bin/python3 /data/openpilot/tools/xnor_aeb_boot_watch.py --boot-auto --duration 360 --output-dir /data/openpilot/aeb_boot_watch --state-interval 0.5 --repeat-suspicious-sec 1.0 --quiet
+Restart=no
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

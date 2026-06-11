@@ -1,0 +1,33 @@
+# xnor AEB boot safety v116
+
+## What the v115 raw CAN log showed
+
+- The first AEB/FCW HUD frames are stock AP/DAS frames, not OP `sendcan`.
+- OP `sendcan` 0x2BF has `DAS_aebEvent=0`; the warning frames have nonzero AEB/FCW fields.
+- `0x399` carries `fcw=3`.
+- `0x389` carries PMM/long-collision warning fields.
+- `0x2BF` carries nonzero `DAS_aebEvent` during standstill boot.
+- `txBlk` starts later and correlates mostly with normal 0x488/0x2BF/0x659/0x27D attempts; it is not the first cause of the HUD warning.
+
+## What v116 changes
+
+Only `opendbc_repo/opendbc/safety/modes/tesla_legacy.h` is patched.
+
+1. External panda 0x2BF forwarding:
+   - preserves neutral stock 0x2BF heartbeat while OP is inactive
+   - blocks stale boot/standstill non-real AEB event values
+   - still allows real stock AEB event value `1`
+
+2. Main panda bus2 -> bus0 HUD forwarding:
+   - while OP is inactive and vehicle speed is stopped/unknown, scrub warning fields on:
+     - 0x389
+     - 0x399
+     - 0x309 / 0x329 / 0x349 / 0x369
+   - while moving, stock AEB/FCW visibility is preserved.
+
+## Files intentionally not touched
+
+- `opendbc_repo/opendbc/car/tesla/carcontroller.py`
+- `selfdrive/car/modules/LONG_module.py`
+- Tesla `values.py`, `interface.py`, `carstate.py`
+- launch scripts / watcher hooks
