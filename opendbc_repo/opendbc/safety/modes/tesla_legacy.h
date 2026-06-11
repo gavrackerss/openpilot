@@ -573,7 +573,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       }
       return !tesla_legacy_stock_aeb;
     }
-    return true;
+    // Vanilla parity: forward everything else on the external panda. This bridges the powertrain
+    // bus (local bus0) to the AP-powertrain bus (local bus2 = global bus6), feeding the AP ~134k
+    // frames/run of vehicle dynamics. Blocking it (the old `return true`) starved the AP, which
+    // then asserted AEB-unavailable (DAS_control aeb_event=2) ~0.5s after relay-open -> the IC
+    // latched that warning. Confirmed by vanilla-vs-dev rlog diff (vanilla src134=~134k, dev=0).
+    return false;
   }
 
   // Main panda: stock LKAS passthrough (bus2 -> car)
@@ -620,12 +625,14 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // scrub WAS the bug. We keep ONLY the DAS_control (0x2B9/0x2BF) AEB-event handling here -- that is
   // longitudinal actuation, not the IC HUD, and matches the stock-AEB intent.
   if (bus_num == 2) {
+    // Forward stock DAS_control (0x2B9) to the IC UNCHANGED -- like vanilla-xnor, which has NO
+    // fwd_msg scrub at all and never flashes. The rlog (cold-jun) proved this scrub was live:
+    // the AP's aeb=2 on bus2 was being forced to aeb=0 on the IC bus, while the sibling 0x2BF on
+    // the same bus stayed unscrubbed (main panda only matches 0x2B9). That panda rewrite +
+    // checksum recompute is the same class of change that latches the IC, and it left 0x2B9 and
+    // 0x2BF inconsistent. Observe the event for diagnostics only; do not modify the frame.
     if (addr == tesla_legacy_das_control_addr) {
-      const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
-      tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
-        tesla_legacy_scrub_das_control_aeb(to_fwd);
-      }
+      tesla_legacy_note_aeb_hud_warning((int)(to_fwd->data[2] & 0x03U));
     }
 
     if (!controls_allowed) {
@@ -728,9 +735,11 @@ static safety_config tesla_legacy_init(uint16_t param) {
     ? BUILD_SAFETY_CFG(tesla_legacy_rx_checks_external, TESLA_LEGACY_TX_MSGS_LONG)
     : BUILD_SAFETY_CFG(tesla_legacy_rx_checks_main, TESLA_LEGACY_TX_MSGS_LATERAL);
 
-  // Critical for XNOR: external panda must NOT forward.
-  // Main panda forwards only when AP HW exists.
-  ret.disable_forwarding = tesla_legacy_external_panda || !tesla_legacy_has_ap_hw;
+  // The external panda MUST forward (vanilla parity): it bridges the powertrain bus to the AP's
+  // powertrain interface (bus6), keeping the AP fed with vehicle dynamics so it does not assert
+  // AEB-unavailable. Disabling it was the cold-boot IC-flash root cause. Only disable forwarding
+  // when there is no AP hardware at all.
+  ret.disable_forwarding = !tesla_legacy_has_ap_hw;
   return ret;
 }
 
