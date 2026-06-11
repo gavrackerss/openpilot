@@ -102,3 +102,5 @@ panda/board/obj/
 *.o
 libpanda.so
 gitversion.h
+
+prebuilt
