@@ -625,6 +625,14 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // scrub WAS the bug. We keep ONLY the DAS_control (0x2B9/0x2BF) AEB-event handling here -- that is
   // longitudinal actuation, not the IC HUD, and matches the stock-AEB intent.
   if (bus_num == 2) {
+    // OPTION A (blue-D ownership): while OP owns the HUD (controls_allowed == engaged), BLOCK the
+    // stock DAS_status (0x399) / DAS_status2 (0x389) forward so the IC's only DAS_status source is
+    // OP's transmitted frame (autopilotStatus=5 -> blue Autopilot 'D'). When disengaged, forward
+    // the stock frames unchanged so the stock AP owns the HUD again. Single coherent source either
+    // way -- no dual rolling-counter competition.
+    if ((addr == 0x399) || (addr == 0x389)) {
+      return controls_allowed;
+    }
     // Forward stock DAS_control (0x2B9) to the IC UNCHANGED -- like vanilla-xnor, which has NO
     // fwd_msg scrub at all and never flashes. The rlog (cold-jun) proved this scrub was live:
     // the AP's aeb=2 on bus2 was being forced to aeb=0 on the IC bus, while the sibling 0x2BF on
