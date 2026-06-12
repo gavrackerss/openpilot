@@ -105,7 +105,7 @@ class TeslaCANRaven:
     values = {
       "DAS_accSpeedLimit": acc_speed_limit,
       "DAS_activationFailureStatus": 0,                      # AEB/activation HUD trigger -> hold 0
-      "DAS_longCollisionWarning": 0x01 if fcw else 0x0F,     # 0x0F = no warning (Unity-parity)
+      "DAS_longCollisionWarning": 0x01 if fcw else 0x03,     # 0x03 = SNA no warning (Unity-parity)
       "DAS_ACC_report": 1,
       "DAS_robState": 2,                                     # active
       "DAS_status2Counter": counter,
