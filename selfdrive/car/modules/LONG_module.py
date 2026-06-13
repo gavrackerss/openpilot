@@ -178,6 +178,7 @@ class LongController:
   _ROADWORKS_CAP_MAX_AGE_MS = 120_000
   _ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS = 8_000
   _ROADWORKS_CAP_HIGHER_LIMIT_MARGIN_MS = 4.0 * CV.MPH_TO_MS
+  _ROADWORKS_CAP_FAR_HIGHER_LIMIT_MS = 12.0 * CV.MPH_TO_MS   # posted this far above the cap => cap is stale/wrong, ignore immediately (no grace)
   _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 40.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
@@ -216,6 +217,8 @@ class LongController:
   _LEAD_HOLD_PERSIST_MS = 560
   _LEAD_HOLD_RELEASE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
   _LEAD_OPENING_VREL_MS = 0.12
+  _LEAD_OPENING_INFERRED_RATE_MS = 1.2     # dRel growing faster than this => lead opening (backup to vRel reading ~0)
+  _LEAD_OPENING_ACTIVE_GAP_FACTOR = 0.6    # when actively opening, release at this fraction of the full opening gap (don't let the gap balloon)
   _LEAD_OPENING_GAP_MIN_M = 24.0
   _LEAD_OPENING_TIME_GAP_S = 1.85
   _LEAD_CONSTRAIN_CLOSING_VREL_MS = -0.15
@@ -544,6 +547,9 @@ class LongController:
     self._lead_drel: float = 0.0
     self._lead_vrel: float = 0.0
     self._lead_yrel: float = 0.0
+    self._lead_drel_rate_ms: float = 0.0          # smoothed d(dRel)/dt -- infers opening when vRel mis-reads ~0
+    self._lead_drel_rate_prev_drel: float = 0.0
+    self._lead_drel_rate_prev_ms: int = 0
     self._mapd_suggested_ms: Optional[float] = None
     self._mapd_speed_limit_ms: Optional[float] = None
     # Point 2: speed-limit-target flicker debounce state
@@ -1364,11 +1370,17 @@ class LongController:
     if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
       return True
 
+    # A steadily growing gap (dRel rate) means the lead is pulling away even when vRel mis-reads ~0.
+    actively_opening = float(self._lead_drel_rate_ms) >= float(self._LEAD_OPENING_INFERRED_RATE_MS)
     opening_gap_m = max(float(self._LEAD_OPENING_GAP_MIN_M), float(v_ego_ms) * float(self._LEAD_OPENING_TIME_GAP_S))
-    lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
+    if actively_opening:
+      # Don't wait for the full opening gap before releasing -- accelerate to keep pace instead of
+      # letting the gap balloon (the 38mph-held-while-lead-opened-14->34m case).
+      opening_gap_m = max(float(self._LEAD_OPENING_GAP_MIN_M), float(opening_gap_m) * float(self._LEAD_OPENING_ACTIVE_GAP_FACTOR))
+    lead_speed_ms = max(0.0, float(v_ego_ms) + max(float(self._lead_vrel), float(self._lead_drel_rate_ms) if actively_opening else 0.0))
     planner_not_decel = float(self._lp_a_target) >= float(self._LEAD_OPENING_RELAX_ATARGET_MS2)
     opening_gap_ok = float(self._lead_drel) >= float(opening_gap_m)
-    opening_speed_ok = float(self._lead_vrel) >= float(self._LEAD_OPENING_VREL_MS)
+    opening_speed_ok = bool(float(self._lead_vrel) >= float(self._LEAD_OPENING_VREL_MS) or actively_opening)
 
     return bool(
       opening_speed_ok
@@ -1788,6 +1800,21 @@ class LongController:
 
       if raw_lead_present:
         self._lead_raw_seen_ms = int(now_ms)
+        # Infer the lead-opening rate from the dRel trend as a backup to vRel (which can stick at
+        # ~0 while the gap clearly grows -- a pulling-away lead the radar mis-reads, which blocked
+        # the lead-follow release: 38mph held while the lead opened 14->34m). Smoothed; resets on a
+        # dropout (>600ms) or a re-acquisition jump (large dRel step) so it can't go stale.
+        gap_ms = int(now_ms) - int(self._lead_drel_rate_prev_ms)
+        if int(self._lead_drel_rate_prev_ms) > 0 and 0 < gap_ms <= 600 and float(self._lead_drel_rate_prev_drel) > 0.1:
+          inst_rate = (float(raw_d_rel) - float(self._lead_drel_rate_prev_drel)) / (float(gap_ms) / 1000.0)
+          if abs(inst_rate) < 12.0:
+            self._lead_drel_rate_ms = (0.6 * float(self._lead_drel_rate_ms)) + (0.4 * float(inst_rate))
+          else:
+            self._lead_drel_rate_ms = 0.0
+        else:
+          self._lead_drel_rate_ms = 0.0
+        self._lead_drel_rate_prev_drel = float(raw_d_rel)
+        self._lead_drel_rate_prev_ms = int(now_ms)
         self._lead_present = True
         self._lead_drel = raw_d_rel
         self._lead_vrel = raw_v_rel
@@ -1982,6 +2009,12 @@ class LongController:
     cap_ms = float(kph) * CV.KPH_TO_MS
     if int(age_ms) > int(self._ROADWORKS_CAP_MAX_AGE_MS):
       return None, "roadworks_cap_stale"
+
+    # If the authoritative posted limit is FAR above the roadworks cap, the cap is almost certainly
+    # stale/wrong (e.g. a ~50 cap on the 70 M27) -- ignore it immediately, without waiting out the
+    # grace window (which never elapses if the cap file keeps being rewritten).
+    if posted_limit_ms is not None and float(posted_limit_ms) > (float(cap_ms) + float(self._ROADWORKS_CAP_FAR_HIGHER_LIMIT_MS)):
+      return None, "roadworks_cap_ignored_far_higher_limit"
 
     if (
       posted_limit_ms is not None
@@ -3913,7 +3946,13 @@ class LongController:
 
     speed_limit_target_ms, set_speed_limit_active, ceiling_src = self._resolve_speed_limit_target_ms(CS, speed_units=speed_units, now_ms=int(now), now_ns=int(now_ns))
     posted_limit_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
-    roadworks_cap_ms, roadworks_cap_src = self._roadworks_cap_ms(now_ms=int(now), posted_limit_ms=posted_limit_ms)
+    # The roadworks-cap "ignore when the real limit is higher" check must see the AUTHORITATIVE
+    # posted limit. mapd's posted limit is often None on motorways (the M27=70 reads None), which
+    # left a stale ~50 roadworks cap pinning the speed below the real 70 limit. Feed it the higher
+    # of mapd-posted and the resolved (mpp / CarState) speed-limit target.
+    resolved_posted_ms = float(speed_limit_target_ms) if (set_speed_limit_active and speed_limit_target_ms is not None) else None
+    posted_for_roadworks_ms = max([v for v in (posted_limit_ms, resolved_posted_ms) if v is not None], default=None)
+    roadworks_cap_ms, roadworks_cap_src = self._roadworks_cap_ms(now_ms=int(now), posted_limit_ms=posted_for_roadworks_ms)
 
     if set_speed_limit_active and speed_limit_target_ms is not None:
       base_target_ms = float(speed_limit_target_ms)

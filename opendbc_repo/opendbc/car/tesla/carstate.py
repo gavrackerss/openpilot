@@ -481,11 +481,16 @@ class CarState(CarStateBase):
         base_map = float(getattr(self, "baseMapSpeedLimitMPS", 0.0) or 0.0)
         gps_mpp = float(gps.get("UI_mppSpeedLimit", 0.0) or 0.0)
 
+        # UI_mppSpeedLimit (gps_mpp) is the stable Tesla map/nav posted limit -- on this car it
+        # sits steady at the real value, while the road-sign-derived base_map can flicker between
+        # adjacent limits and drive the 40<->30 SET oscillation. Prefer mpp as the primary source;
+        # fall back to the road-sign base_map only when mpp is unavailable. (Revert: swap the order.)
+        mpp_ms = gps_mpp * map_uom_to_ms if gps_mpp > 0.0 else 0.0
         live_map_limit_ms = 0.0
-        if base_map > 0.0 and (speed_limit_type != 0x1F or base_map >= 5.56):
+        if mpp_ms > 0.0:
+          live_map_limit_ms = float(mpp_ms)
+        elif base_map > 0.0 and (speed_limit_type != 0x1F or base_map >= 5.56):
           live_map_limit_ms = float(base_map)
-        elif gps_mpp > 0.0:
-          live_map_limit_ms = gps_mpp * map_uom_to_ms
 
         if live_map_limit_ms > 0.0:
           self.lastValidMapSpeedLimitMPS = float(live_map_limit_ms)
@@ -594,14 +599,11 @@ class CarState(CarStateBase):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
 
     eac_status = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacStatus"].get(int(epas_status["EPAS3S_eacStatus"]), None)
-    eac_error_code = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacErrorCode"].get(int(epas_status["EPAS3S_eacErrorCode"]), None)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    # XNOR/Unity parity: a transient EAC_ERROR_TMP_FAULT inhibit must NOT raise steerFaultTemporary,
-    # or a brief EPAS temp-fault drops OP mid-drive (controls mismatch / steer-temp). Unity's original
-    # logic excluded EAC_ERROR_TMP_FAULT from the steer fault; mirror that here.
-    ret.steerFaultTemporary = (eac_status == "EAC_INHIBITED") and (eac_error_code != "EAC_ERROR_TMP_FAULT")
+    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
 
     # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
+    eac_error_code = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacErrorCode"].get(int(epas_status["EPAS3S_eacErrorCode"]), None)
     if self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
@@ -976,14 +978,11 @@ class CarState(CarStateBase):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
 
     eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
-    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    # XNOR/Unity parity: a transient EAC_ERROR_TMP_FAULT inhibit must NOT raise steerFaultTemporary,
-    # or a brief EPAS temp-fault drops OP mid-drive (controls mismatch / steer-temp). Unity's original
-    # logic excluded EAC_ERROR_TMP_FAULT from the steer fault; mirror that here.
-    ret.steerFaultTemporary = (eac_status == "EAC_INHIBITED") and (eac_error_code != "EAC_ERROR_TMP_FAULT")
+    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
 
     # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
+    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
     if self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
