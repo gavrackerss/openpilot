@@ -83,7 +83,7 @@ class TeslaCANRaven:
     # overrides the stock 0x399 and the IC keeps flashing AEB/FCW.
     values = {
       "autopilotStatus": op_status,                          # 0-4 low nibble; 5 ~ engaged
-      "DAS_forwardCollisionWarning": 1 if fcw else 0,        # AEB/FCW HUD bit -> hold 0
+      "DAS_forwardCollisionWarning": 0x01 if fcw else 0x03,  # 0x03 = SNA = no warning (match stock AP / 0x389 longColl SNA parity). 0=NONE renders the AEB/FCW icon on this IC.
       "DAS_blindSpotRearLeft": 1 if blind_left else 0,
       "DAS_blindSpotRearRight": 1 if blind_right else 0,
       "DAS_fusedSpeedLimit": speed_limit,
@@ -105,7 +105,7 @@ class TeslaCANRaven:
     values = {
       "DAS_accSpeedLimit": acc_speed_limit,
       "DAS_activationFailureStatus": 0,                      # AEB/activation HUD trigger -> hold 0
-      "DAS_longCollisionWarning": 0x01 if fcw else 0x03,     # 0x03 = SNA no warning (Unity-parity)
+      "DAS_longCollisionWarning": 0x01 if fcw else 0x0F,     # 0x0F = no warning (Unity-parity)
       "DAS_ACC_report": 1,
       "DAS_robState": 2,                                     # active
       "DAS_status2Counter": counter,
