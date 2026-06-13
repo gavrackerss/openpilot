@@ -388,27 +388,61 @@ class CarController(CarControllerBase):
     return max(0.0, limit_ms * (CV.MS_TO_KPH if units == "KPH" else CV.MS_TO_MPH))
 
   def _process_hud_status(self, CC, CS, can_sends, human_control: bool) -> None:
-    # OPTION A (blue-D ownership): while OP is engaged, transmit our own DAS_status (0x399) /
-    # DAS_status2 (0x389) with autopilotStatus=5 (ACTIVE) so the IC renders the blue Autopilot 'D'.
-    # MUST be paired with tesla_legacy.h blocking the stock 0x399/0x389 forward while
-    # controls_allowed -- otherwise OP's frame and the forwarded stock frame compete on two rolling
-    # counters and the IC can latch (the historical flash). When disengaged, OP stays silent and the
-    # panda forwards the stock HUD again, so the stock AP owns the IC. create_das_status computes the
-    # correct Tesla CRC/counter, so the IC accepts it as a single coherent source.
+    # DISABLED (vanilla-xnor parity): OP no longer transmits its own DAS_status (0x399) /
+    # DAS_status2 (0x389). Vanilla-xnor sends NO HUD and forwards the stock frames unchanged, and
+    # never flashes. Transmitting our own frame put a second 0x399 (different rolling counter) on the
+    # IC bus competing with the forwarded stock frame -- part of what latched the AEB warning. The
+    # panda now forwards the authentic stock HUD unchanged (tesla_legacy.h), so the IC has a single
+    # coherent source. Do not transmit.
+    return
+    # --- unreachable legacy HUD-transmit path kept below for reference ---
+    # AEB/FCW HUD-flash suppression by transmit-ownership (legacy HW2, external panda).
+    #
+    # The factory AEB/FCW flash is the IC rendering the stock DAS_status (0x399) /
+    # DAS_status2 (0x389) warning fields. On an external panda those stock frames reach the
+    # IC without traversing the panda, so they can't be scrubbed in transit. Instead we
+    # transmit a complete, clean copy of BOTH frames from userspace every cycle so OP becomes
+    # the most-recent coherent source the IC latches: warning fields held at 0/clean, counter
+    # rolling 0-15, checksum computed in Python (external panda does not recompute on TX).
+    #
+    # Unity-style full ownership: transmit the clean DAS_status group CONTINUOUSLY -- disengaged
+    # too -- so OP is always the IC's coherent source and the factory AEB/FCW never shows or
+    # latches. The earlier engaged-only guard avoided a blue/white IC oscillation, but that came
+    # from OP asserting an "engaged" state (autopilotStatus=5) that disagreed with the stock /
+    # forward-scrubbed frame. We avoid it by emitting a benign autopilotStatus=2 when disengaged
+    # (5 when engaged), which MATCHES the panda forward-scrub (tesla_legacy_scrub_fcw_only also
+    # writes autopilotStatus=2). Both sources agree -> no oscillation, and the IC drops the latch.
+    enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    self._hud_prev_enabled = enabled
+
+    # Only the legacy builders own the clean DAS group; non-legacy path is unaffected.
     if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
       return
 
-    enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    self._hud_prev_enabled = enabled
-    if not enabled:
-      return  # blue D only while engaged; disengaged -> panda forwards stock 0x399/0x389
+    # Ownership mode (TinklaAutopilotDisabled): Unity AP-car parity. The panda now FORWARDS the
+    # stock 0x399/0x389 with a counter-preserving lean scrub (warnings zeroed, stock counter kept)
+    # -- it does NOT block them, and OP does NOT transmit its own copy. A second OP frame on a
+    # different rolling counter would reintroduce exactly the counter discontinuity we're removing,
+    # so in ownership mode we DO NOT emit 0x399/0x389 here; the panda's scrubbed stock stream is the
+    # sole, counter-continuous IC source. (The 0x659 ownership carrier is still sent in
+    # _emit_internal_0x659.)
+    ap_disabled = bool(self._cached_autopilot_disabled)
+    if ap_disabled:
+      return
 
-    # 50 Hz (every other frame) to meet/beat the ~25 Hz stock cadence.
+    # Strict-passthrough mode (toggle off): transmit our clean DAS group only while ENGAGED. When
+    # disengaged the stock AP owns 0x399 on its own counter and the panda forward-scrub keeps it
+    # clean; emitting our own rolling-counter frame alongside the stock one would make the IC reject
+    # it as a counter discontinuity.
+    if not enabled:
+      return
+
+    # 50 Hz (every other frame) to meet/beat the ~25 Hz stock cadence so OP latches last.
     if self.frame % 2 != 0:
       return
 
     counter = (self.frame // 2) % 16
-    op_status = 5  # ACTIVE_NAVIGATE_ON_AUTOPILOT -> blue Autopilot indicator
+    op_status = 5  # engaged
 
     cs_out = getattr(CS, "out", None)
     blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
