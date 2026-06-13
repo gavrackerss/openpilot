@@ -625,14 +625,17 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // scrub WAS the bug. We keep ONLY the DAS_control (0x2B9/0x2BF) AEB-event handling here -- that is
   // longitudinal actuation, not the IC HUD, and matches the stock-AEB intent.
   if (bus_num == 2) {
-    // OPTION A (blue-D ownership): while OP owns the HUD (controls_allowed == engaged), BLOCK the
-    // stock DAS_status (0x399) / DAS_status2 (0x389) forward so the IC's only DAS_status source is
-    // OP's transmitted frame (autopilotStatus=5 -> blue Autopilot 'D'). When disengaged, forward
-    // the stock frames unchanged so the stock AP owns the HUD again. Single coherent source either
-    // way -- no dual rolling-counter competition.
-    if ((addr == 0x399) || (addr == 0x389)) {
-      return controls_allowed;
-    }
+    // OPTION A v2 (blue-D via authentic-frame injection): while engaged (controls_allowed), forward
+    // the STOCK DAS_status (0x399) but flip ONLY the autopilotStatus low nibble to 5 -> blue
+    // Autopilot 'D'. Every other field (FCW, side-collision, LDW, speed-limit, the high nibble of
+    // byte0 ...) keeps its authentic stock value, so NONE of them can default to 0 and render a
+    // warning -- that whole-frame rebuild by OP was what flashed the AEB only at engage. When
+    // disengaged, forward unchanged. 0x389 is forwarded unchanged in all cases (stock longColl is
+    // already SNA/clean). OP transmits NO 0x399/0x389 in this mode (carcontroller HUD stays off),
+    // so there is a single coherent source. Additive checksum verified for 0x399 (12/12 frames).
+    // NO blue-D: forward stock DAS_status (0x399) and DAS_status2 (0x389) UNCHANGED. Asserting
+    // autopilotStatus=5 on this car (autopilot-disabled mode) makes the IC render the AEB/FCW
+    // warning because it couples that indicator to the collision HUD -- so we do not touch 0x399.
     // DAS_control (0x2B9) AEB scrub -- suppress the spurious "AEB-unavailable" STATUS only.
     //   - aeb_event == 2 or 3: the AP's spurious "AEB temporarily unavailable" status (set while
     //     OP is engaged and HELD even after disengage). Scrub -> 0 so the IC never renders it,
