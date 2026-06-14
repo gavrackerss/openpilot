@@ -740,13 +740,8 @@ class CarController(CarControllerBase):
           self.tesla_can.create_steering_control(self.apply_angle_last, lat_active)
         )
 
-    # EPS allow (legacy) -- DISABLED as an AEB test. APS_eacMonitor (0x27D, APS_eacAllow=1) is the
-    # newer-Tesla EPAS steering-authorization handshake. Unity (which runs flash-free on this AP1/HW2
-    # car) does NOT send it at all, so the AP1 EPAS does not require it -- and sending an unexpected
-    # 0x27D at engage is a prime suspect for making the AP fault its AEB (DAS_aebEvent=2=AEB_FAULT).
-    # If steering still authorizes and the engage-AEB clears, 0x27D was the trigger. Re-enable by
-    # restoring `if (self.CP.carFingerprint ...` if steering fails to engage.
-    if False and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
+    # EPS allow (legacy)
+    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
       counter = (self.frame // 10) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
