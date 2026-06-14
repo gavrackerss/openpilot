@@ -636,24 +636,13 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     // NO blue-D: forward stock DAS_status (0x399) and DAS_status2 (0x389) UNCHANGED. Asserting
     // autopilotStatus=5 on this car (autopilot-disabled mode) makes the IC render the AEB/FCW
     // warning because it couples that indicator to the collision HUD -- so we do not touch 0x399.
-    // DAS_control (0x2B9) AEB scrub -- suppress the spurious "AEB-unavailable" STATUS only.
-    //   - aeb_event == 2 or 3: the AP's spurious "AEB temporarily unavailable" status (set while
-    //     OP is engaged and HELD even after disengage). Scrub -> 0 so the IC never renders it,
-    //     regardless of controls_allowed. This closes the DISENGAGE leak: the engaged-only gate
-    //     stopped scrubbing the instant OP dropped, exposing the AP's still-held aeb=2 until
-    //     re-engage. Suppressing 2/3 unconditionally covers engaged, disengaging, and disengaged.
-    //   - aeb_event == 1: a REAL stock AEB braking event -- NEVER scrubbed; always reaches the IC
-    //     (safety preserved).
-    //   - aeb_event == 0: idle -- untouched.
-    // Cold-boot safe: at boot the external-panda bridge keeps the AP at aeb=0, so nothing is
-    // rewritten before first engagement; and the additive checksum is verified correct for 0x2B9
-    // (8/8 real frames), so the scrubbed frame is valid -- the latch was the bridge bug, not this.
+    // VANILLA PARITY: forward stock DAS_control (0x2B9) to the IC UNCHANGED -- do NOT rewrite the
+    // aeb_event or recompute the checksum. Vanilla-xnor has no fwd_msg hook and forwards 0x2B9 raw;
+    // it never flashes. This bisect tests whether OUR rewrite of the AP's authentic aeb=2 frame
+    // (even with a correct checksum) is what the IC latches at engage, where the authentic frame is
+    // handled gracefully. Observe the event for diagnostics only; the frame is not modified.
     if (addr == tesla_legacy_das_control_addr) {
-      const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
-      tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if ((aeb_event == 2) || (aeb_event == 3)) {
-        tesla_legacy_scrub_das_control_aeb(to_fwd);
-      }
+      tesla_legacy_note_aeb_hud_warning((int)(to_fwd->data[2] & 0x03U));
     }
 
     if (!controls_allowed) {
