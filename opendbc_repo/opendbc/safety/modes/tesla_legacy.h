@@ -423,12 +423,14 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return !tesla_legacy_external_panda;   // main panda: allow on bus0; external panda: block on bus4
   }
 
-  // Unity parity: on AP hardware cars, block OP actuation unless stock AP is disabled
-  if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
-    if ((addr == 0x488) || (addr == 0x27D) || (addr == tesla_legacy_das_control_addr)) {
-      return false;
-    }
-  }
+  // REMOVED (vanilla parity): the Unity-ported "block OP actuation unless stock AP is disabled"
+  // gate. Vanilla-xnor has NO such gate and steers fine in normal mode (autopilot_disabled OFF) by
+  // gating only on the real safety checks below. That gate is the sole reason normal-mode steering
+  // was blocked in the merged build (0x488 dropped -> EPAS EAC_INHIBITED -> "steering unavailable").
+  // The per-message safety checks remain: the 0x488 branch still runs steer_angle_cmd_checks_vm and
+  // the stock-LKAS conflict guard; the external/long branch still runs the accel limits. So OP can
+  // steer in BOTH modes -- normal (engage via stock cruise, >17mph) and autopilot_disabled (stalk,
+  // any speed) -- with no change to autopilot_disabled mode (that gate was already bypassed there).
 
   // Main panda (lateral)
   if (!tesla_legacy_external_panda) {

@@ -681,9 +681,12 @@ class CarController(CarControllerBase):
 
     self._speed_limit_sync(CC, CS, can_sends)
 
+    # NOTE: dropped the `autopilot_disabled` requirement (vanilla parity). Vanilla gates lateral only
+    # on CC.latActive + hands-on, so OP steers in normal mode too. Requiring autopilot_disabled here
+    # was the carcontroller half of why normal-mode steering produced nothing. In autopilot_disabled
+    # mode CC.latActive is still true when engaged, so that mode is unchanged.
     lat_active = (
       bool(CC.latActive) and
-      autopilot_disabled and
       (not CS.out.cruiseState.standstill) and
       (not human_control) and
       (not steer_inhibit)
