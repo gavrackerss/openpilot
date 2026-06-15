@@ -161,7 +161,7 @@ static bool tesla_legacy_hud_takeover_owner(void) {
   return tesla_legacy_op_autopilot_disabled && tesla_legacy_stock_ap_idle();
 }
 
-static bool __attribute__((unused)) tesla_legacy_should_scrub_aeb_event(int aeb_event) {  // [VANILLA-TEST] callers disabled
+static bool __attribute__((unused)) tesla_legacy_should_scrub_aeb_event(int aeb_event) {  // [VANILLA-BASELINE] callers disabled
   if (aeb_event == 1) {
     return tesla_legacy_vehicle_stopped_or_unknown();
   }
@@ -170,7 +170,7 @@ static bool __attribute__((unused)) tesla_legacy_should_scrub_aeb_event(int aeb_
           (tesla_legacy_hud_takeover_owner() || tesla_legacy_aeb_hud_scrub_active()));
 }
 
-static void __attribute__((unused)) tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {  // [VANILLA-TEST] callers disabled
+static void __attribute__((unused)) tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {  // [VANILLA-BASELINE] callers disabled
   msg->data[2] &= 0xFCU;
   tesla_legacy_set_last_byte_checksum(msg);
 }
@@ -278,7 +278,10 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       brake_pressed = (st == 2U);
     } else if (addr == id_distate) {  // DI_state
       const uint8_t cruise_state = (msg->data[1] >> 4) & 0x0FU;
-      const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U);
+      // [VANILLA-BASELINE] match vanilla's engaged set (2,3,4,6,7) so panda controls_allowed
+      // does not disagree with userspace cruiseState.enabled (OVERRIDE/PRE_* states).
+      const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U) ||
+                                  (cruise_state == 4U) || (cruise_state == 6U) || (cruise_state == 7U);
       vehicle_moving = (cruise_state != 3U);
 
       if (!tesla_legacy_op_autopilot_disabled) {
@@ -361,9 +364,11 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (!tesla_legacy_external_panda && (addr == 0x488)) {
       const int steer_control_type = (int)((msg->data[2] >> 6) & 0x03);
       tesla_legacy_stock_lkas = (steer_control_type == 2) || (steer_control_type == 3);
-      if (tesla_legacy_stock_lkas) {
-        controls_allowed = false;
-      }
+      // [VANILLA-BASELINE] RX controls_allowed knockdown REMOVED (vanilla/Unity have none).
+      // Flag still set above; tx_hook/fwd still use it. Only the controls kill is gone.
+      // if (tesla_legacy_stock_lkas) {
+      //   controls_allowed = false;
+      // }
     } else if (tesla_legacy_external_panda && (addr == tesla_legacy_das_control_addr)) {
       const int aeb_event = (int)(msg->data[2] & 0x03);
       tesla_legacy_stock_aeb = (aeb_event == 1);
@@ -377,17 +382,19 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       if (addr == 0x399) {
         const uint8_t st = msg->data[0] & 0x0FU;  // AutopilotStatus is the LOW nibble on this DBC
         tesla_legacy_autopilot_enabled = (st == 3U) || (st == 4U) || (st == 5U);
-        if (tesla_legacy_autopilot_enabled) {
-          controls_allowed = false;
-        }
+        // [VANILLA-BASELINE] RX controls_allowed knockdown REMOVED (0x399 AutopilotStatus).
+        // if (tesla_legacy_autopilot_enabled) {
+        //   controls_allowed = false;
+        // }
       } else if (addr == 0x219) {
         const int eac_status = (int)((msg->data[1] >> 2) & 0x0FU);
         const int psc_status = (int)((msg->data[0] >> 1) & 0x1FU);
         tesla_legacy_eac_enabled = (eac_status == 2) || (eac_status == 3);
         tesla_legacy_autopark_enabled = (psc_status == 14) || ((psc_status >= 1) && (psc_status <= 8));
-        if (tesla_legacy_autopilot_enabled || tesla_legacy_eac_enabled || tesla_legacy_autopark_enabled) {
-          controls_allowed = false;
-        }
+        // [VANILLA-BASELINE] RX controls_allowed knockdown REMOVED (0x219 EAC/autopark).
+        // if (tesla_legacy_autopilot_enabled || tesla_legacy_eac_enabled || tesla_legacy_autopark_enabled) {
+        //   controls_allowed = false;
+        // }
       } else {
       }
     }
@@ -566,8 +573,8 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if ((bus_num == 2) && (addr == tesla_legacy_das_control_addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      // [VANILLA-TEST] external-panda DAS_control AEB scrub DISABLED -- forward the stock
-      // frame UNCHANGED so any AEB state is observable on the IC.
+      // [VANILLA-BASELINE] external-panda DAS_control AEB scrub DISABLED (forward unchanged so
+      // the AEB/PMM state stays observable for the bisection).
       // if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
       //   tesla_legacy_scrub_das_control_aeb(to_fwd);
       //   return false;
@@ -655,7 +662,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (addr == tesla_legacy_das_control_addr) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      // [VANILLA-TEST] DAS_control (0x2B9) AEB scrub DISABLED -- forward UNCHANGED.
+      // [VANILLA-BASELINE] DAS_control (0x2B9) AEB scrub DISABLED -- forward unchanged.
       // if ((aeb_event == 2) || (aeb_event == 3)) {
       //   tesla_legacy_scrub_das_control_aeb(to_fwd);
       // }
@@ -668,10 +675,8 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     // on, sev=0 off). Force it to 0 (PMM_NONE). REAL PMM states (1..5: IMMINENT/CRASH/BRAKE_REQUEST)
     // are passed UNCHANGED so a genuine warning still reaches the IC. In normal mode sev is never 6,
     // so this is a no-op there. Additive checksum verified for 0x389 (10/10).
-    // [VANILLA-TEST] DAS_status2 (0x389) PMM-severity scrub DISABLED -- forward the stock
-    // DAS_pmmObstacleSeverity UNCHANGED so the sev=6 AEB/PMM flash is OBSERVABLE. This is the
-    // whole point of the diagnostic: if vanilla steering still produces the flash, it is the
-    // factory DAS asserting it; if it does not, the ownership-mode TX was provoking it.
+    // [VANILLA-BASELINE] DAS_status2 (0x389) PMM-severity scrub DISABLED -- forward the stock
+    // DAS_pmmObstacleSeverity UNCHANGED so the sev=6 flash is OBSERVABLE during the bisection.
     // if (addr == 0x389) {
     //   const int pmm_sev = (int)((to_fwd->data[1] >> 2) & 0x07U);
     //   if (pmm_sev == 6) {

@@ -26,7 +26,7 @@ from opendbc.car import Bus
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.lateral import apply_std_steer_angle_limits
-# [VANILLA-TEST] vehicle-model angle limiter + VehicleModel (vanilla-xnor parity)
+# [VANILLA-BASELINE] vehicle-model angle limiter + VehicleModel (vanilla parity)
 from opendbc.car.lateral import apply_steer_angle_limits_vm
 from opendbc.car.vehicle_model import VehicleModel
 
@@ -106,8 +106,7 @@ class CarController(CarControllerBase):
     self._roadworks_main_pulls_ms: list[int] = []
     self._roadworks_toggle_latch_until_ms = 0
 
-    # [VANILLA-TEST] default vehicle model for the VM angle limiter; legacy overrides below.
-    # Deferred import (matches vanilla) to avoid a circular import with interface.py.
+    # [VANILLA-BASELINE] vehicle model for the VM angle limiter; legacy overrides below.
     from opendbc.car.tesla.interface import CarInterface as _XnorCI
     self.VM = VehicleModel(_XnorCI.get_non_essential_params("TESLA_MODEL_Y"))
 
@@ -121,7 +120,7 @@ class CarController(CarControllerBase):
         CANBUS.powertrain: CANPacker(dbc_names[Bus.pt]),
       }
       self.tesla_can = TeslaCANLegacy(self.packers)
-      # [VANILLA-TEST] HW2/HW3 legacy: VM params match the panda steer_angle_cmd_checks_vm
+      # [VANILLA-BASELINE] HW2/HW3 legacy VM params (match panda steer_angle_cmd_checks_vm)
       self.VM = VehicleModel(_XnorCI.get_non_essential_params("TESLA_MODEL_S_HW3"))
 
       # STW_ACTN_RQ needs CRC/counter; legacy helper doesn't implement it.
@@ -662,7 +661,7 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
-    # [VANILLA-TEST] do NOT emit the 0x659 ownership carrier (vanilla sends no such frame).
+    # [VANILLA-BASELINE / RE-ENABLE STEP 4] 0x659 ownership carrier OFF.
     # self._emit_internal_0x659(CS, can_sends)
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)
@@ -686,22 +685,21 @@ class CarController(CarControllerBase):
         pass
     self._op_enabled_prev = bool(op_enabled)
 
-    # [VANILLA-TEST] do NOT emit virtual stalk (STW_ACTN_RQ 0x45) presses (vanilla sends none).
+    # [VANILLA-BASELINE / RE-ENABLE STEP 3] virtual stalk (0x45) OFF.
     # self._process_stalk_actions(CS, can_sends)
-    self._process_body_controls(CS, can_sends)          # no-op on LEGACY_CARS (early return)
-    self._process_hud_status(CC, CS, can_sends, human_control)  # already a no-op (returns immediately)
-
-    # [VANILLA-TEST] do NOT drive the cruise-stalk speed-limit sync (emits 0x45).
+    self._process_body_controls(CS, can_sends)          # no-op on LEGACY_CARS
+    self._process_hud_status(CC, CS, can_sends, human_control)  # already a no-op
+    # [VANILLA-BASELINE / RE-ENABLE STEP 3] cruise-stalk speed sync (0x45) OFF.
     # self._speed_limit_sync(CC, CS, can_sends)
 
     # NOTE: dropped the `autopilot_disabled` requirement (vanilla parity). Vanilla gates lateral only
     # on CC.latActive + hands-on, so OP steers in normal mode too. Requiring autopilot_disabled here
     # was the carcontroller half of why normal-mode steering produced nothing. In autopilot_disabled
     # mode CC.latActive is still true when engaged, so that mode is unchanged.
-    # [VANILLA-TEST] vanilla gates lateral ONLY on latActive + hands-on (< 3).
+    # [VANILLA-BASELINE] vanilla gates lateral ONLY on latActive + hands-on (< 3).
     lat_active = bool(CC.latActive) and (float(getattr(CS, "hands_on_level", 0.0)) < 3.0)
 
-    # [VANILLA-TEST] do NOT emit DAS_lanes (0x239) / DAS_telemetry (0x3A9) (vanilla sends neither).
+    # [VANILLA-BASELINE / RE-ENABLE STEP 1] DAS_lanes/telemetry (0x239/0x3A9) OFF.
     # self._process_lane_telemetry(CS, can_sends, lat_active)
 
     # Steering warm-up: for a short window after lateral becomes active, command current wheel angle.
@@ -711,11 +709,8 @@ class CarController(CarControllerBase):
     self._lat_active_prev = bool(lat_active)
 
     # Steering (50Hz)
-    # [VANILLA-TEST] vanilla steering: VM angle limiter only. No curve-assist amplifier
-    # (_lane_positioned_target_angle), no std limiter, no measured-angle guard clip, and no
-    # warm-up hold. The VM limiter ramps to the measured angle when lat_active is False, so
-    # no separate hold branch is needed. This keeps every commanded angle inside the panda's
-    # steer_angle_cmd_checks_vm envelope (the reason vanilla never gets the command rejected).
+    # [VANILLA-BASELINE / RE-ENABLE STEP 2] vanilla VM limiter only (no curve-assist amplifier,
+    # no std limiter, no guard clip, no warm-up hold).
     if self.frame % 2 == 0:
       self.apply_angle_last = apply_steer_angle_limits_vm(
         actuators.steeringAngleDeg,
