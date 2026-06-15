@@ -161,7 +161,7 @@ static bool tesla_legacy_hud_takeover_owner(void) {
   return tesla_legacy_op_autopilot_disabled && tesla_legacy_stock_ap_idle();
 }
 
-static bool tesla_legacy_should_scrub_aeb_event(int aeb_event) {
+static bool __attribute__((unused)) tesla_legacy_should_scrub_aeb_event(int aeb_event) {  // [VANILLA-TEST] callers disabled
   if (aeb_event == 1) {
     return tesla_legacy_vehicle_stopped_or_unknown();
   }
@@ -170,7 +170,7 @@ static bool tesla_legacy_should_scrub_aeb_event(int aeb_event) {
           (tesla_legacy_hud_takeover_owner() || tesla_legacy_aeb_hud_scrub_active()));
 }
 
-static void tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {
+static void __attribute__((unused)) tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {  // [VANILLA-TEST] callers disabled
   msg->data[2] &= 0xFCU;
   tesla_legacy_set_last_byte_checksum(msg);
 }
