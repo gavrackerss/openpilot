@@ -566,10 +566,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if ((bus_num == 2) && (addr == tesla_legacy_das_control_addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
-        tesla_legacy_scrub_das_control_aeb(to_fwd);
-        return false;
-      }
+      // [VANILLA-TEST] external-panda DAS_control AEB scrub DISABLED -- forward the stock
+      // frame UNCHANGED so any AEB state is observable on the IC.
+      // if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
+      //   tesla_legacy_scrub_das_control_aeb(to_fwd);
+      //   return false;
+      // }
       if (!controls_allowed) {
         return false;
       }
@@ -653,9 +655,10 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (addr == tesla_legacy_das_control_addr) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if ((aeb_event == 2) || (aeb_event == 3)) {
-        tesla_legacy_scrub_das_control_aeb(to_fwd);
-      }
+      // [VANILLA-TEST] DAS_control (0x2B9) AEB scrub DISABLED -- forward UNCHANGED.
+      // if ((aeb_event == 2) || (aeb_event == 3)) {
+      //   tesla_legacy_scrub_das_control_aeb(to_fwd);
+      // }
     }
 
     // DAS_status2 (0x389): scrub the spurious DAS_pmmObstacleSeverity = 6 (PMM_ACCEL_LIMIT) that the
@@ -665,13 +668,17 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     // on, sev=0 off). Force it to 0 (PMM_NONE). REAL PMM states (1..5: IMMINENT/CRASH/BRAKE_REQUEST)
     // are passed UNCHANGED so a genuine warning still reaches the IC. In normal mode sev is never 6,
     // so this is a no-op there. Additive checksum verified for 0x389 (10/10).
-    if (addr == 0x389) {
-      const int pmm_sev = (int)((to_fwd->data[1] >> 2) & 0x07U);
-      if (pmm_sev == 6) {
-        to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);  // pmmObstacleSeverity -> 0 (PMM_NONE)
-        tesla_legacy_set_last_byte_checksum(to_fwd);
-      }
-    }
+    // [VANILLA-TEST] DAS_status2 (0x389) PMM-severity scrub DISABLED -- forward the stock
+    // DAS_pmmObstacleSeverity UNCHANGED so the sev=6 AEB/PMM flash is OBSERVABLE. This is the
+    // whole point of the diagnostic: if vanilla steering still produces the flash, it is the
+    // factory DAS asserting it; if it does not, the ownership-mode TX was provoking it.
+    // if (addr == 0x389) {
+    //   const int pmm_sev = (int)((to_fwd->data[1] >> 2) & 0x07U);
+    //   if (pmm_sev == 6) {
+    //     to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);  // pmmObstacleSeverity -> 0 (PMM_NONE)
+    //     tesla_legacy_set_last_byte_checksum(to_fwd);
+    //   }
+    // }
 
     if (!controls_allowed) {
       tesla_legacy_hide_errors_armed = false;

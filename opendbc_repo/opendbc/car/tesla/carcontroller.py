@@ -26,6 +26,9 @@ from opendbc.car import Bus
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.lateral import apply_std_steer_angle_limits
+# [VANILLA-TEST] vehicle-model angle limiter + VehicleModel (vanilla-xnor parity)
+from opendbc.car.lateral import apply_steer_angle_limits_vm
+from opendbc.car.vehicle_model import VehicleModel
 
 from opendbc.car.tesla.teslacan import TeslaCAN
 try:
@@ -103,6 +106,11 @@ class CarController(CarControllerBase):
     self._roadworks_main_pulls_ms: list[int] = []
     self._roadworks_toggle_latch_until_ms = 0
 
+    # [VANILLA-TEST] default vehicle model for the VM angle limiter; legacy overrides below.
+    # Deferred import (matches vanilla) to avoid a circular import with interface.py.
+    from opendbc.car.tesla.interface import CarInterface as _XnorCI
+    self.VM = VehicleModel(_XnorCI.get_non_essential_params("TESLA_MODEL_Y"))
+
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
         CANBUS.powertrain = CANBUS.party
@@ -113,6 +121,8 @@ class CarController(CarControllerBase):
         CANBUS.powertrain: CANPacker(dbc_names[Bus.pt]),
       }
       self.tesla_can = TeslaCANLegacy(self.packers)
+      # [VANILLA-TEST] HW2/HW3 legacy: VM params match the panda steer_angle_cmd_checks_vm
+      self.VM = VehicleModel(_XnorCI.get_non_essential_params("TESLA_MODEL_S_HW3"))
 
       # STW_ACTN_RQ needs CRC/counter; legacy helper doesn't implement it.
       self._action_can_by_bus = {int(bus): TeslaCAN(pkr) for bus, pkr in self.packers.items()}
@@ -652,7 +662,8 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
-    self._emit_internal_0x659(CS, can_sends)
+    # [VANILLA-TEST] do NOT emit the 0x659 ownership carrier (vanilla sends no such frame).
+    # self._emit_internal_0x659(CS, can_sends)
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)
 
@@ -675,24 +686,23 @@ class CarController(CarControllerBase):
         pass
     self._op_enabled_prev = bool(op_enabled)
 
-    self._process_stalk_actions(CS, can_sends)
-    self._process_body_controls(CS, can_sends)
-    self._process_hud_status(CC, CS, can_sends, human_control)
+    # [VANILLA-TEST] do NOT emit virtual stalk (STW_ACTN_RQ 0x45) presses (vanilla sends none).
+    # self._process_stalk_actions(CS, can_sends)
+    self._process_body_controls(CS, can_sends)          # no-op on LEGACY_CARS (early return)
+    self._process_hud_status(CC, CS, can_sends, human_control)  # already a no-op (returns immediately)
 
-    self._speed_limit_sync(CC, CS, can_sends)
+    # [VANILLA-TEST] do NOT drive the cruise-stalk speed-limit sync (emits 0x45).
+    # self._speed_limit_sync(CC, CS, can_sends)
 
     # NOTE: dropped the `autopilot_disabled` requirement (vanilla parity). Vanilla gates lateral only
     # on CC.latActive + hands-on, so OP steers in normal mode too. Requiring autopilot_disabled here
     # was the carcontroller half of why normal-mode steering produced nothing. In autopilot_disabled
     # mode CC.latActive is still true when engaged, so that mode is unchanged.
-    lat_active = (
-      bool(CC.latActive) and
-      (not CS.out.cruiseState.standstill) and
-      (not human_control) and
-      (not steer_inhibit)
-    )
+    # [VANILLA-TEST] vanilla gates lateral ONLY on latActive + hands-on (< 3).
+    lat_active = bool(CC.latActive) and (float(getattr(CS, "hands_on_level", 0.0)) < 3.0)
 
-    self._process_lane_telemetry(CS, can_sends, lat_active)
+    # [VANILLA-TEST] do NOT emit DAS_lanes (0x239) / DAS_telemetry (0x3A9) (vanilla sends neither).
+    # self._process_lane_telemetry(CS, can_sends, lat_active)
 
     # Steering warm-up: for a short window after lateral becomes active, command current wheel angle.
     # This prevents an initial command step (EPS inhibit) when engaging with the wheel turned.
@@ -701,37 +711,21 @@ class CarController(CarControllerBase):
     self._lat_active_prev = bool(lat_active)
 
     # Steering (50Hz)
+    # [VANILLA-TEST] vanilla steering: VM angle limiter only. No curve-assist amplifier
+    # (_lane_positioned_target_angle), no std limiter, no measured-angle guard clip, and no
+    # warm-up hold. The VM limiter ramps to the measured angle when lat_active is False, so
+    # no separate hold branch is needed. This keeps every commanded angle inside the panda's
+    # steer_angle_cmd_checks_vm envelope (the reason vanilla never gets the command rejected).
     if self.frame % 2 == 0:
-      if (not lat_active) or human_control or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
-        apply_angle = float(CS.out.steeringAngleDeg)
-      else:
-        desired_angle = self._lane_positioned_target_angle(
-          float(actuators.steeringAngleDeg),
-          float(CS.out.steeringAngleDeg),
-          float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
-        )
-        apply_angle = float(apply_std_steer_angle_limits(
-          float(desired_angle),
-          float(self.apply_angle_last),
-          float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
-          float(CS.out.steeringAngleDeg),
-          lat_active,
-          CarControllerParams.ANGLE_LIMITS,
-        ))
-        steer_guard_deg = float(np.interp(
-          float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
-          [0.0, 10.0, 20.0, 30.0],
-          [34.0, 42.0, 52.0, 62.0],
-        ))
-        # Keep a measured-angle guard, but widen it with speed so the car can
-        # build angle earlier into sharper corners instead of washing wide.
-        apply_angle = float(np.clip(
-          apply_angle,
-          float(CS.out.steeringAngleDeg) - steer_guard_deg,
-          float(CS.out.steeringAngleDeg) + steer_guard_deg,
-        ))
-
-      self.apply_angle_last = float(apply_angle)
+      self.apply_angle_last = apply_steer_angle_limits_vm(
+        actuators.steeringAngleDeg,
+        self.apply_angle_last,
+        float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
+        CS.out.steeringAngleDeg,
+        lat_active,
+        CarControllerParams,
+        self.VM,
+      )
 
       if self.CP.carFingerprint in LEGACY_CARS:
         counter = (self.frame // 2) % 16
