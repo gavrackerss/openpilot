@@ -161,7 +161,7 @@ static bool tesla_legacy_hud_takeover_owner(void) {
   return tesla_legacy_op_autopilot_disabled && tesla_legacy_stock_ap_idle();
 }
 
-static bool __attribute__((unused)) tesla_legacy_should_scrub_aeb_event(int aeb_event) {  // [VANILLA-BASELINE] callers disabled
+static bool tesla_legacy_should_scrub_aeb_event(int aeb_event) {
   if (aeb_event == 1) {
     return tesla_legacy_vehicle_stopped_or_unknown();
   }
@@ -170,7 +170,7 @@ static bool __attribute__((unused)) tesla_legacy_should_scrub_aeb_event(int aeb_
           (tesla_legacy_hud_takeover_owner() || tesla_legacy_aeb_hud_scrub_active()));
 }
 
-static void __attribute__((unused)) tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {  // [VANILLA-BASELINE] callers disabled
+static void tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {
   msg->data[2] &= 0xFCU;
   tesla_legacy_set_last_byte_checksum(msg);
 }
@@ -278,10 +278,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       brake_pressed = (st == 2U);
     } else if (addr == id_distate) {  // DI_state
       const uint8_t cruise_state = (msg->data[1] >> 4) & 0x0FU;
-      // [VANILLA-BASELINE] match vanilla's engaged set (2,3,4,6,7) so panda controls_allowed
-      // does not disagree with userspace cruiseState.enabled (OVERRIDE/PRE_* states).
-      const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U) ||
-                                  (cruise_state == 4U) || (cruise_state == 6U) || (cruise_state == 7U);
+      const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U);
       vehicle_moving = (cruise_state != 3U);
 
       if (!tesla_legacy_op_autopilot_disabled) {
@@ -364,11 +361,9 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (!tesla_legacy_external_panda && (addr == 0x488)) {
       const int steer_control_type = (int)((msg->data[2] >> 6) & 0x03);
       tesla_legacy_stock_lkas = (steer_control_type == 2) || (steer_control_type == 3);
-      // [VANILLA-BASELINE] RX controls_allowed knockdown REMOVED (vanilla/Unity have none).
-      // Flag still set above; tx_hook/fwd still use it. Only the controls kill is gone.
-      // if (tesla_legacy_stock_lkas) {
-      //   controls_allowed = false;
-      // }
+      if (tesla_legacy_stock_lkas) {
+        controls_allowed = false;
+      }
     } else if (tesla_legacy_external_panda && (addr == tesla_legacy_das_control_addr)) {
       const int aeb_event = (int)(msg->data[2] & 0x03);
       tesla_legacy_stock_aeb = (aeb_event == 1);
@@ -382,19 +377,17 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       if (addr == 0x399) {
         const uint8_t st = msg->data[0] & 0x0FU;  // AutopilotStatus is the LOW nibble on this DBC
         tesla_legacy_autopilot_enabled = (st == 3U) || (st == 4U) || (st == 5U);
-        // [VANILLA-BASELINE] RX controls_allowed knockdown REMOVED (0x399 AutopilotStatus).
-        // if (tesla_legacy_autopilot_enabled) {
-        //   controls_allowed = false;
-        // }
+        if (tesla_legacy_autopilot_enabled) {
+          controls_allowed = false;
+        }
       } else if (addr == 0x219) {
         const int eac_status = (int)((msg->data[1] >> 2) & 0x0FU);
         const int psc_status = (int)((msg->data[0] >> 1) & 0x1FU);
         tesla_legacy_eac_enabled = (eac_status == 2) || (eac_status == 3);
         tesla_legacy_autopark_enabled = (psc_status == 14) || ((psc_status >= 1) && (psc_status <= 8));
-        // [VANILLA-BASELINE] RX controls_allowed knockdown REMOVED (0x219 EAC/autopark).
-        // if (tesla_legacy_autopilot_enabled || tesla_legacy_eac_enabled || tesla_legacy_autopark_enabled) {
-        //   controls_allowed = false;
-        // }
+        if (tesla_legacy_autopilot_enabled || tesla_legacy_eac_enabled || tesla_legacy_autopark_enabled) {
+          controls_allowed = false;
+        }
       } else {
       }
     }
@@ -430,14 +423,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return !tesla_legacy_external_panda;   // main panda: allow on bus0; external panda: block on bus4
   }
 
-  // REMOVED (vanilla parity): the Unity-ported "block OP actuation unless stock AP is disabled"
-  // gate. Vanilla-xnor has NO such gate and steers fine in normal mode (autopilot_disabled OFF) by
-  // gating only on the real safety checks below. That gate is the sole reason normal-mode steering
-  // was blocked in the merged build (0x488 dropped -> EPAS EAC_INHIBITED -> "steering unavailable").
-  // The per-message safety checks remain: the 0x488 branch still runs steer_angle_cmd_checks_vm and
-  // the stock-LKAS conflict guard; the external/long branch still runs the accel limits. So OP can
-  // steer in BOTH modes -- normal (engage via stock cruise, >17mph) and autopilot_disabled (stalk,
-  // any speed) -- with no change to autopilot_disabled mode (that gate was already bypassed there).
+  // Unity parity: on AP hardware cars, block OP actuation unless stock AP is disabled
+  if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
+    if ((addr == 0x488) || (addr == 0x27D) || (addr == tesla_legacy_das_control_addr)) {
+      return false;
+    }
+  }
 
   // Main panda (lateral)
   if (!tesla_legacy_external_panda) {
@@ -573,16 +564,26 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if ((bus_num == 2) && (addr == tesla_legacy_das_control_addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      // [VANILLA-BASELINE] external-panda DAS_control AEB scrub DISABLED (forward unchanged so
-      // the AEB/PMM state stays observable for the bisection).
-      // if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
-      //   tesla_legacy_scrub_das_control_aeb(to_fwd);
-      //   return false;
-      // }
+      if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
+        tesla_legacy_scrub_das_control_aeb(to_fwd);
+        return false;
+      }
       if (!controls_allowed) {
         return false;
       }
       return !tesla_legacy_stock_aeb;
+    }
+    // [BUS-128 FIX] The external panda forwards the high-rate, IC-facing copy of DAS_status2
+    // (0x389). The main-panda bus2->bus0 scrub never touches it, so the spurious
+    // DAS_pmmObstacleSeverity = 6 (PMM_ACCEL_LIMIT) reaches the IC here and flashes the AEB icon.
+    // Scrub it on this path too (same mask + checksum as the main-panda scrub). REAL PMM states
+    // (1..5) pass unchanged; only the spurious 6 is forced to 0 (PMM_NONE).
+    if (addr == 0x389) {
+      const int pmm_sev = (int)((to_fwd->data[1] >> 2) & 0x07U);
+      if (pmm_sev == 6) {
+        to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);  // pmmObstacleSeverity -> 0
+        tesla_legacy_set_last_byte_checksum(to_fwd);
+      }
     }
     // Vanilla parity: forward everything else on the external panda. This bridges the powertrain
     // bus (local bus0) to the AP-powertrain bus (local bus2 = global bus6), feeding the AP ~134k
@@ -662,10 +663,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (addr == tesla_legacy_das_control_addr) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      // [VANILLA-BASELINE] DAS_control (0x2B9) AEB scrub DISABLED -- forward unchanged.
-      // if ((aeb_event == 2) || (aeb_event == 3)) {
-      //   tesla_legacy_scrub_das_control_aeb(to_fwd);
-      // }
+      if ((aeb_event == 2) || (aeb_event == 3)) {
+        tesla_legacy_scrub_das_control_aeb(to_fwd);
+      }
     }
 
     // DAS_status2 (0x389): scrub the spurious DAS_pmmObstacleSeverity = 6 (PMM_ACCEL_LIMIT) that the
@@ -675,15 +675,13 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     // on, sev=0 off). Force it to 0 (PMM_NONE). REAL PMM states (1..5: IMMINENT/CRASH/BRAKE_REQUEST)
     // are passed UNCHANGED so a genuine warning still reaches the IC. In normal mode sev is never 6,
     // so this is a no-op there. Additive checksum verified for 0x389 (10/10).
-    // [VANILLA-BASELINE] DAS_status2 (0x389) PMM-severity scrub DISABLED -- forward the stock
-    // DAS_pmmObstacleSeverity UNCHANGED so the sev=6 flash is OBSERVABLE during the bisection.
-    // if (addr == 0x389) {
-    //   const int pmm_sev = (int)((to_fwd->data[1] >> 2) & 0x07U);
-    //   if (pmm_sev == 6) {
-    //     to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);  // pmmObstacleSeverity -> 0 (PMM_NONE)
-    //     tesla_legacy_set_last_byte_checksum(to_fwd);
-    //   }
-    // }
+    if (addr == 0x389) {
+      const int pmm_sev = (int)((to_fwd->data[1] >> 2) & 0x07U);
+      if (pmm_sev == 6) {
+        to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);  // pmmObstacleSeverity -> 0 (PMM_NONE)
+        tesla_legacy_set_last_byte_checksum(to_fwd);
+      }
+    }
 
     if (!controls_allowed) {
       tesla_legacy_hide_errors_armed = false;
