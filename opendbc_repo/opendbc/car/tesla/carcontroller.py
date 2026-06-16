@@ -394,6 +394,17 @@ class CarController(CarControllerBase):
     # IC bus competing with the forwarded stock frame -- part of what latched the AEB warning. The
     # panda now forwards the authentic stock HUD unchanged (tesla_legacy.h), so the IC has a single
     # coherent source. Do not transmit.
+    #
+    # [PMM FIX] EXCEPTION: re-enable transmitting ONLY DAS_status2 (0x389) with a clean PMM state.
+    # The panda forward-scrub can't reach the IC's copy (it arrives via the factory gateway / src2),
+    # so we override it the Unity way -- by owning the 0x389 frame: sev=0 + the full healthy-DAS
+    # field set (radarTelemetry, csaState, robState, ppOffsetDesiredRamp). We do NOT transmit
+    # DAS_status (0x399): autopilotStatus=5 re-triggers the IC warning (per Option A v2).
+    if hasattr(self.tesla_can, "create_das_status2"):
+      op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+      if op_enabled and (self.frame % 2 == 0):   # 50 Hz, beats the ~25 Hz stock cadence so OP latches last
+        counter = (self.frame // 2) % 16
+        can_sends.append(self.tesla_can.create_das_status2(counter, self._hud_speed_limit_uom(CS), False))
     return
     # --- unreachable legacy HUD-transmit path kept below for reference ---
     # AEB/FCW HUD-flash suppression by transmit-ownership (legacy HW2, external panda).

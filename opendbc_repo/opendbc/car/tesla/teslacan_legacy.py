@@ -104,10 +104,23 @@ class TeslaCANRaven:
   def create_das_status2(self, counter, acc_speed_limit, fcw):
     values = {
       "DAS_accSpeedLimit": acc_speed_limit,
+      # [PMM FIX] full Unity-parity 'healthy DAS' frame so the IC latches THIS (sev=0) over the
+      # factory's spurious sev=6. Missing radarTelemetry/csaState/ppOffsetDesiredRamp were why the
+      # earlier clean-frame transmit (Option A) didn't override the factory copy.
+      "DAS_pmmObstacleSeverity": 0,                          # PMM_NONE (explicit)
+      "DAS_pmmLoggingRequest": 0,
       "DAS_activationFailureStatus": 0,                      # AEB/activation HUD trigger -> hold 0
-      "DAS_longCollisionWarning": 0x01 if fcw else 0x0F,     # 0x0F = no warning (Unity-parity)
+      "DAS_pmmUltrasonicsFaultReason": 0,
+      "DAS_pmmRadarFaultReason": 0,
+      "DAS_pmmSysFaultReason": 0,
+      "DAS_pmmCameraFaultReason": 0,
       "DAS_ACC_report": 1,
-      "DAS_robState": 2,                                     # active
+      "DAS_csaState": 2,                                     # CSA_EXTERNAL_STATE_ENABLE (Unity, engaged)
+      "DAS_radarTelemetry": 1,                               # RADAR_TELEMETRY_NORMAL (Unity)
+      "DAS_robState": 2,                                     # ROB_STATE_ACTIVE
+      "DAS_driverInteractionLevel": 0,
+      "DAS_ppOffsetDesiredRamp": 0x80,                       # PP_NO_OFFSET (Unity)
+      "DAS_longCollisionWarning": 0x01 if fcw else 0x0F,     # 0x0F = SNA = no warning (Unity)
       "DAS_status2Counter": counter,
       "DAS_status2Checksum": 0,
     }
