@@ -400,11 +400,23 @@ class CarController(CarControllerBase):
     # so we override it the Unity way -- by owning the 0x389 frame: sev=0 + the full healthy-DAS
     # field set (radarTelemetry, csaState, robState, ppOffsetDesiredRamp). We do NOT transmit
     # DAS_status (0x399): autopilotStatus=5 re-triggers the IC warning (per Option A v2).
-    if hasattr(self.tesla_can, "create_das_status2"):
-      op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-      if op_enabled and (self.frame % 2 == 0):   # 50 Hz, beats the ~25 Hz stock cadence so OP latches last
-        counter = (self.frame // 2) % 16
+    has_builder = hasattr(self.tesla_can, "create_das_status2")
+    op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    # [PMM DIAG] ~1 Hz heartbeat so the next rlog/console SHOWS whether this path runs and why not.
+    if self.frame % 100 == 0:
+      cloudlog.warning("[PMM_DIAG] hud_status: has_builder=%s op_enabled=%s ap_disabled=%s tesla_can=%s" %
+                       (has_builder, op_enabled, bool(self._cached_autopilot_disabled), type(self.tesla_can).__name__))
+    if has_builder and op_enabled and (self.frame % 2 == 0):   # 50 Hz, beats the ~25 Hz stock cadence
+      counter = (self.frame // 2) % 16
+      try:
         can_sends.append(self.tesla_can.create_das_status2(counter, self._hud_speed_limit_uom(CS), False))
+        if self.frame % 100 == 0:
+          cloudlog.warning("[PMM_DIAG] DAS_status2 (0x389) sev=0 APPENDED to can_sends")
+      except Exception as e:
+        # Most likely a partial deploy: new builder sets DAS_csaState but the OLD tesla_can.dbc
+        # still has DAS_lssState at those bits -> CANPacker raises and nothing is sent.
+        if self.frame % 50 == 0:
+          cloudlog.error("[PMM_DIAG] create_das_status2 FAILED (deploy tesla_can.dbc too!): %r" % (e,))
     return
     # --- unreachable legacy HUD-transmit path kept below for reference ---
     # AEB/FCW HUD-flash suppression by transmit-ownership (legacy HW2, external panda).
