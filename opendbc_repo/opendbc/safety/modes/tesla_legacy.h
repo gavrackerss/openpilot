@@ -423,6 +423,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return !tesla_legacy_external_panda;   // main panda: allow on bus0; external panda: block on bus4
   }
 
+  // Vanilla-xnor HUD ownership: userspace must not transmit competing DAS_status/DAS_status2.
+  // Stock AP/DAS frames are forwarded below, with only narrow safety scrubs where needed.
+  if ((addr == 0x399) || (addr == 0x389)) {
+    return false;
+  }
+
   // Unity parity: on AP hardware cars, block OP actuation unless stock AP is disabled
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
     if ((addr == 0x488) || (addr == 0x27D) || (addr == tesla_legacy_das_control_addr)) {
@@ -486,11 +492,6 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
   // External panda (longitudinal)
   if (tesla_legacy_external_panda) {
-    // HUD-ownership status frames carry no actuation; permit if a single-panda/rerouted
-    // build ever sends them here. Primary path is the main panda (CANBUS.party=0).
-    if ((addr == 0x399) || (addr == 0x389)) {
-      return true;
-    }
     if (addr != tesla_legacy_das_control_addr) {  // external: only DAS_control (0x2BF) past here
       return false;
     }
@@ -611,10 +612,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // bus0 -> bus2: block IC/HUD frames only while OP owns the HUD/status path.
+  // bus0 -> bus2: preserve vanilla forwarding, but keep the Unity EPAS_eacStatus rewrite
+  // that prevents stock AP from declaring steering temporarily unavailable while OP steers.
   if (bus_num == 0) {
-    // Do not block stock HUD/status traffic when OP is not actively controlling.
-    // Letting stock frames recover cleanly prevents AP/AEB unavailable from latching across OP restarts.
 
     if (addr == 0x370) {
       const uint8_t b6 = to_fwd->data[6];
@@ -728,11 +728,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x27D, 0, 3, .check_relay = false},  // APS_eacMonitor
     {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
-    // AEB/FCW HUD-flash suppression via transmit-ownership. These ride CANBUS.party (=0),
-    // so userspace emits them through THIS (main/internal) panda onto the chassis/IC bus.
-    // tx_hook main branch permits them via its fall-through return-true (no actuation fields).
-    {0x399, 0, 8, .check_relay = false},  // DAS_status  (clean copy: warning fields zeroed)
-    {0x389, 0, 8, .check_relay = false},  // DAS_status2 (clean copy: warning fields zeroed)
+    // Vanilla-xnor HUD ownership: do not allow userspace DAS_status/DAS_status2 TX.
 
   };
 
@@ -740,10 +736,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x2BF, 0, 8, .check_relay = false},  // DAS_longControl
     {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
-    // Defensive only: HUD frames normally route to the main panda (CANBUS.party=0). Listed
-    // here so a single-panda/rerouted build can still TX them; permitted in tx_hook below.
-    {0x399, 0, 8, .check_relay = false},  // DAS_status
-    {0x389, 0, 8, .check_relay = false},  // DAS_status2
+    // Vanilla-xnor HUD ownership: do not allow userspace DAS_status/DAS_status2 TX.
 
   };
 

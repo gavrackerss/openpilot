@@ -388,111 +388,14 @@ class CarController(CarControllerBase):
     return max(0.0, limit_ms * (CV.MS_TO_KPH if units == "KPH" else CV.MS_TO_MPH))
 
   def _process_hud_status(self, CC, CS, can_sends, human_control: bool) -> None:
-    # DISABLED (vanilla-xnor parity): OP no longer transmits its own DAS_status (0x399) /
-    # DAS_status2 (0x389). Vanilla-xnor sends NO HUD and forwards the stock frames unchanged, and
-    # never flashes. Transmitting our own frame put a second 0x399 (different rolling counter) on the
-    # IC bus competing with the forwarded stock frame -- part of what latched the AEB warning. The
-    # panda now forwards the authentic stock HUD unchanged (tesla_legacy.h), so the IC has a single
-    # coherent source. Do not transmit.
-    #
-    # [PMM FIX] EXCEPTION: re-enable transmitting ONLY DAS_status2 (0x389) with a clean PMM state.
-    # The panda forward-scrub can't reach the IC's copy (it arrives via the factory gateway / src2),
-    # so we override it the Unity way -- by owning the 0x389 frame: sev=0 + the full healthy-DAS
-    # field set (radarTelemetry, csaState, robState, ppOffsetDesiredRamp). We do NOT transmit
-    # DAS_status (0x399): autopilotStatus=5 re-triggers the IC warning (per Option A v2).
-    has_builder = hasattr(self.tesla_can, "create_das_status2")
-    op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    # [PMM DIAG] ~1 Hz heartbeat so the next rlog/console SHOWS whether this path runs and why not.
-    if self.frame % 100 == 0:
-      cloudlog.warning("[PMM_DIAG] hud_status: has_builder=%s op_enabled=%s ap_disabled=%s tesla_can=%s" %
-                       (has_builder, op_enabled, bool(self._cached_autopilot_disabled), type(self.tesla_can).__name__))
-    if has_builder and op_enabled and (self.frame % 2 == 0):   # 50 Hz, beats the ~25 Hz stock cadence
-      counter = (self.frame // 2) % 16
-      try:
-        can_sends.append(self.tesla_can.create_das_status2(counter, self._hud_speed_limit_uom(CS), False))
-        if self.frame % 100 == 0:
-          cloudlog.warning("[PMM_DIAG] DAS_status2 (0x389) sev=0 APPENDED to can_sends")
-      except Exception as e:
-        # Most likely a partial deploy: new builder sets DAS_csaState but the OLD tesla_can.dbc
-        # still has DAS_lssState at those bits -> CANPacker raises and nothing is sent.
-        if self.frame % 50 == 0:
-          cloudlog.error("[PMM_DIAG] create_das_status2 FAILED (deploy tesla_can.dbc too!): %r" % (e,))
+    """Preserve vanilla-xnor HUD ownership.
+
+    Stock AP/DAS remains the only source for DAS_status/DAS_status2. The panda
+    forward path may scrub known false AEB/PMM status bits, but userspace must
+    not transmit a competing HUD status stream.
+    """
     return
-    # --- unreachable legacy HUD-transmit path kept below for reference ---
-    # AEB/FCW HUD-flash suppression by transmit-ownership (legacy HW2, external panda).
-    #
-    # The factory AEB/FCW flash is the IC rendering the stock DAS_status (0x399) /
-    # DAS_status2 (0x389) warning fields. On an external panda those stock frames reach the
-    # IC without traversing the panda, so they can't be scrubbed in transit. Instead we
-    # transmit a complete, clean copy of BOTH frames from userspace every cycle so OP becomes
-    # the most-recent coherent source the IC latches: warning fields held at 0/clean, counter
-    # rolling 0-15, checksum computed in Python (external panda does not recompute on TX).
-    #
-    # Unity-style full ownership: transmit the clean DAS_status group CONTINUOUSLY -- disengaged
-    # too -- so OP is always the IC's coherent source and the factory AEB/FCW never shows or
-    # latches. The earlier engaged-only guard avoided a blue/white IC oscillation, but that came
-    # from OP asserting an "engaged" state (autopilotStatus=5) that disagreed with the stock /
-    # forward-scrubbed frame. We avoid it by emitting a benign autopilotStatus=2 when disengaged
-    # (5 when engaged), which MATCHES the panda forward-scrub (tesla_legacy_scrub_fcw_only also
-    # writes autopilotStatus=2). Both sources agree -> no oscillation, and the IC drops the latch.
-    enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    self._hud_prev_enabled = enabled
 
-    # Only the legacy builders own the clean DAS group; non-legacy path is unaffected.
-    if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
-      return
-
-    # Ownership mode (TinklaAutopilotDisabled): Unity AP-car parity. The panda now FORWARDS the
-    # stock 0x399/0x389 with a counter-preserving lean scrub (warnings zeroed, stock counter kept)
-    # -- it does NOT block them, and OP does NOT transmit its own copy. A second OP frame on a
-    # different rolling counter would reintroduce exactly the counter discontinuity we're removing,
-    # so in ownership mode we DO NOT emit 0x399/0x389 here; the panda's scrubbed stock stream is the
-    # sole, counter-continuous IC source. (The 0x659 ownership carrier is still sent in
-    # _emit_internal_0x659.)
-    ap_disabled = bool(self._cached_autopilot_disabled)
-    if ap_disabled:
-      return
-
-    # Strict-passthrough mode (toggle off): transmit our clean DAS group only while ENGAGED. When
-    # disengaged the stock AP owns 0x399 on its own counter and the panda forward-scrub keeps it
-    # clean; emitting our own rolling-counter frame alongside the stock one would make the IC reject
-    # it as a counter discontinuity.
-    if not enabled:
-      return
-
-    # 50 Hz (every other frame) to meet/beat the ~25 Hz stock cadence so OP latches last.
-    if self.frame % 2 != 0:
-      return
-
-    counter = (self.frame // 2) % 16
-    op_status = 5  # engaged
-
-    cs_out = getattr(CS, "out", None)
-    blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
-    blind_right = bool(getattr(cs_out, "rightBlindspot", False)) if cs_out is not None else False
-    speed_limit = self._hud_speed_limit_uom(CS)
-
-    # Keep FCW wired to a genuine alert so a real collision warning still surfaces; suppress
-    # only the spurious AEB/activation flash. No genuine-FCW signal is plumbed here yet -> 0.
-    fcw = False
-
-    can_sends.append(self.tesla_can.create_das_status(
-      counter,
-      op_status,
-      fcw,
-      0,                              # DAS_laneDepartureWarning
-      self._hud_hands_on(CS),
-      self._hud_alca_state(CS),
-      blind_left,
-      blind_right,
-      speed_limit,
-      0,                              # DAS_fleetSpeedState
-    ))
-    can_sends.append(self.tesla_can.create_das_status2(
-      counter,
-      speed_limit,
-      fcw,
-    ))
 
   def _hud_hands_on(self, CS) -> int:
     return 0
