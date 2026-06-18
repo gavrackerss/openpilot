@@ -388,13 +388,68 @@ class CarController(CarControllerBase):
     return max(0.0, limit_ms * (CV.MS_TO_KPH if units == "KPH" else CV.MS_TO_MPH))
 
   def _process_hud_status(self, CC, CS, can_sends, human_control: bool) -> None:
-    """Preserve vanilla-xnor HUD ownership.
+    """Publish full Unity-style HUD status for panda-side stock-frame overlay.
 
-    Stock AP/DAS remains the only source for DAS_status/DAS_status2. The panda
-    forward path may scrub known false AEB/PMM status bits, but userspace must
-    not transmit a competing HUD status stream.
+    The safety hook consumes these 0x399/0x389 frames and blocks direct TX. Their
+    payload is merged onto the stock AP frames in the panda forward path, keeping
+    stock timing/counters while clearing the false PMM/AEB HUD state.
     """
-    return
+    if self.CP.carFingerprint not in LEGACY_CARS:
+      return
+    if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):
+      return
+
+    op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    prev_enabled = bool(getattr(self, "_hud_prev_enabled", False))
+    stock_ap_enabled = bool(getattr(CS, "autopilot_enabled", False))
+    ap_disabled = bool(getattr(CS, "autopilot_disabled", False) or getattr(self, "_cached_autopilot_disabled", False))
+
+    if stock_ap_enabled:
+      self._hud_prev_enabled = op_enabled
+      return
+
+    should_send = op_enabled or prev_enabled or ap_disabled
+    edge_send = prev_enabled and not op_enabled
+    if not should_send:
+      self._hud_prev_enabled = op_enabled
+      return
+    if not edge_send and (self.frame % 10 != 0):
+      self._hud_prev_enabled = op_enabled
+      return
+
+    cs_out = getattr(CS, "out", None)
+    cruise_state = getattr(cs_out, "cruiseState", None) if cs_out is not None else None
+
+    speed_limit = float(self._hud_speed_limit_uom(CS))
+    cruise_speed = speed_limit
+    try:
+      cruise_speed = max(0.0, float(getattr(cruise_state, "speed", 0.0) or 0.0) * CV.MS_TO_MPH)
+    except (TypeError, ValueError):
+      cruise_speed = speed_limit
+
+    op_status = 5 if op_enabled else 2
+    hands_on_state = 3 if bool(human_control) and op_enabled else 2
+    alca_state = int(self._hud_alca_state(CS))
+    blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
+    blind_right = bool(getattr(cs_out, "rightBlindspot", False)) if cs_out is not None else False
+    fleet_state = int(getattr(CS, "fleet_speed_state", 0) or 0)
+
+    counter = 1
+    can_sends.append(self.tesla_can.create_das_status(
+      counter,
+      op_status,
+      False,
+      0,
+      hands_on_state,
+      alca_state,
+      blind_left,
+      blind_right,
+      speed_limit,
+      fleet_state,
+    ))
+    can_sends.append(self.tesla_can.create_das_status2(counter, cruise_speed, False))
+
+    self._hud_prev_enabled = op_enabled
 
 
   def _hud_hands_on(self, CS) -> int:

@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V167_AEB_ONLY_EARLY_BASE 1
+#define XNOR_V168_UNITY_HUD_OVERLAY 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V167_AEB_ONLY_EARLY_BASE";
+    "XNOR_V168_UNITY_HUD_OVERLAY";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -173,6 +173,122 @@ static bool tesla_legacy_should_scrub_aeb_event(int aeb_event) {
 static void tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {
   msg->data[2] &= 0xFCU;
   tesla_legacy_set_last_byte_checksum(msg);
+}
+
+static bool tesla_legacy_is_hud_status_msg(int addr) {
+  return (addr == 0x399) || (addr == 0x389);
+}
+
+typedef struct {
+  int addr;
+  int source_bus;
+  int forward_bus;
+  int len;
+  uint32_t expected_timestep_us;
+  uint32_t counter_mask_h;
+  uint32_t counter_mask_l;
+  uint32_t data_h;
+  uint32_t data_l;
+  uint32_t last_capture_ts;
+  uint32_t last_apply_ts;
+  bool valid;
+} TeslaLegacyHudForwardData;
+
+static TeslaLegacyHudForwardData tesla_legacy_hud_forward_data[] = {
+  {0x399, 2, 0, 8, 500000U, 0x00F8031FU, 0xFF3FFFF0U, 0U, 0U, 0U, 0U, false},
+  {0x389, 2, 0, 8, 500000U, 0x00F0FF3CU, 0xFFFF3FFFU, 0U, 0U, 0U, 0U, false},
+};
+
+static uint32_t tesla_legacy_get_u32_le(const uint8_t *data) {
+  return ((uint32_t)data[0]) |
+         ((uint32_t)data[1] << 8) |
+         ((uint32_t)data[2] << 16) |
+         ((uint32_t)data[3] << 24);
+}
+
+static void tesla_legacy_set_u32_le(uint8_t *data, uint32_t value) {
+  data[0] = (uint8_t)(value & 0xFFU);
+  data[1] = (uint8_t)((value >> 8) & 0xFFU);
+  data[2] = (uint8_t)((value >> 16) & 0xFFU);
+  data[3] = (uint8_t)((value >> 24) & 0xFFU);
+}
+
+static bool tesla_legacy_hud_tx_has_valid_counter(const CANPacket_t *msg, const TeslaLegacyHudForwardData *fwd) {
+  const uint32_t data_l = tesla_legacy_get_u32_le(&msg->data[0]);
+  const uint32_t data_h = tesla_legacy_get_u32_le(&msg->data[4]);
+  return ((fwd->counter_mask_h | fwd->counter_mask_l) == 0U) ||
+         (((data_h & fwd->counter_mask_h) | (data_l & fwd->counter_mask_l)) != 0U);
+}
+
+static bool tesla_legacy_capture_hud_tx(const CANPacket_t *msg, bool violation) {
+  const int addr = (int)msg->addr;
+  if (!tesla_legacy_is_hud_status_msg(addr)) {
+    return false;
+  }
+
+  const int len = GET_LEN(msg);
+  const uint32_t now = microsecond_timer_get();
+  const int fwd_len = (int)(sizeof(tesla_legacy_hud_forward_data) / sizeof(tesla_legacy_hud_forward_data[0]));
+
+  for (int i = 0; i < fwd_len; i++) {
+    TeslaLegacyHudForwardData *fwd = &tesla_legacy_hud_forward_data[i];
+    if ((addr == fwd->addr) && ((int)msg->bus == fwd->forward_bus) && (len == fwd->len)) {
+      fwd->last_capture_ts = now;
+      if (!violation && tesla_legacy_hud_tx_has_valid_counter(msg, fwd)) {
+        const uint32_t data_l = tesla_legacy_get_u32_le(&msg->data[0]);
+        const uint32_t data_h = tesla_legacy_get_u32_le(&msg->data[4]);
+        fwd->data_l = data_l & ~fwd->counter_mask_l;
+        fwd->data_h = data_h & ~fwd->counter_mask_h;
+        fwd->valid = true;
+      } else {
+        fwd->data_l = 0U;
+        fwd->data_h = 0U;
+        fwd->valid = false;
+      }
+      return true;
+    }
+  }
+
+  return true;
+}
+
+static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num) {
+  const int addr = (int)to_fwd->addr;
+  const int len = GET_LEN(to_fwd);
+  const int fwd_len = (int)(sizeof(tesla_legacy_hud_forward_data) / sizeof(tesla_legacy_hud_forward_data[0]));
+
+  if (!tesla_legacy_is_hud_status_msg(addr)) {
+    return false;
+  }
+
+  for (int i = 0; i < fwd_len; i++) {
+    TeslaLegacyHudForwardData *fwd = &tesla_legacy_hud_forward_data[i];
+    if ((addr == fwd->addr) && (bus_num == fwd->source_bus) && (len == fwd->len)) {
+      const uint32_t now = microsecond_timer_get();
+      const bool fresh = fwd->valid &&
+                         (fwd->last_capture_ts != 0U) &&
+                         (fwd->last_capture_ts != fwd->last_apply_ts) &&
+                         (get_ts_elapsed(now, fwd->last_capture_ts) <= fwd->expected_timestep_us);
+      if (!fresh) {
+        return false;
+      }
+
+      const uint32_t stock_l = tesla_legacy_get_u32_le(&to_fwd->data[0]);
+      const uint32_t stock_h = tesla_legacy_get_u32_le(&to_fwd->data[4]);
+      tesla_legacy_set_u32_le(&to_fwd->data[0], fwd->data_l | (stock_l & fwd->counter_mask_l));
+      tesla_legacy_set_u32_le(&to_fwd->data[4], fwd->data_h | (stock_h & fwd->counter_mask_h));
+
+      if (addr == 0x389) {
+        to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);
+      }
+
+      tesla_legacy_set_last_byte_checksum(to_fwd);
+      fwd->last_apply_ts = fwd->last_capture_ts;
+      return true;
+    }
+  }
+
+  return false;
 }
 
 static void __attribute__((unused)) tesla_legacy_scrub_status2_warnings(CANPacket_t *msg) {
@@ -376,7 +492,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (!tesla_legacy_external_panda && tesla_legacy_has_ap_hw) {
       if (addr == 0x399) {
         const uint8_t st = msg->data[0] & 0x0FU;  // AutopilotStatus is the LOW nibble on this DBC
-        tesla_legacy_autopilot_enabled = (st == 3U) || (st == 4U) || (st == 5U);
+        tesla_legacy_autopilot_enabled = (st == 3U) || (st == 4U);
         if (tesla_legacy_autopilot_enabled) {
           controls_allowed = false;
         }
@@ -423,9 +539,9 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return !tesla_legacy_external_panda;   // main panda: allow on bus0; external panda: block on bus4
   }
 
-  // Vanilla-xnor HUD ownership: userspace must not transmit competing DAS_status/DAS_status2.
-  // Stock AP/DAS frames are forwarded below, with only narrow safety scrubs where needed.
-  if ((addr == 0x399) || (addr == 0x389)) {
+  // Unity-style HUD ownership: consume OP HUD status frames, but never transmit them directly.
+  // The cached payload is merged onto stock AP frames in fwd_msg so the IC sees one coherent stream.
+  if (tesla_legacy_capture_hud_tx(msg, false)) {
     return false;
   }
 
@@ -615,6 +731,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // bus0 -> bus2: preserve vanilla forwarding, but keep the Unity EPAS_eacStatus rewrite
   // that prevents stock AP from declaring steering temporarily unavailable while OP steers.
   if (bus_num == 0) {
+    if (tesla_legacy_is_hud_status_msg(addr)) {
+      return true;
+    }
 
     if (addr == 0x370) {
       const uint8_t b6 = to_fwd->data[6];
@@ -628,26 +747,15 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // bus2 -> bus0: forward the stock 0x399/0x389 (DAS_status/DAS_status2) UNCHANGED, exactly like
-  // vanilla-xnor -- which has NO packet-modifying fwd_msg hook and never flashes on this car. The
-  // empirical result (cold11 trace + the vanilla baseline) is that REWRITING these frames is what
-  // causes the flash: modifying the warning/status bits and recomputing the checksum makes the IC
-  // reject / mis-render the frame and latch the AEB/FCW warning, whereas the authentic AP frame
-  // (its own counter + checksum, its own SNA->NONE recovery) is handled correctly and clears. The
-  // scrub WAS the bug. We keep ONLY the DAS_control (0x2B9/0x2BF) AEB-event handling here -- that is
-  // longitudinal actuation, not the IC HUD, and matches the stock-AEB intent.
+  // bus2 -> bus0: Unity-style HUD overlay.
+  // OP's userspace 0x399/0x389 is cached in tx_hook and blocked from direct TX. When the stock AP
+  // 0x399/0x389 arrives here, selected OP-owned payload bits are overlaid while preserving the stock
+  // counter/timing bits, then the Tesla additive checksum is recomputed.
   if (bus_num == 2) {
-    // OPTION A v2 (blue-D via authentic-frame injection): while engaged (controls_allowed), forward
-    // the STOCK DAS_status (0x399) but flip ONLY the autopilotStatus low nibble to 5 -> blue
-    // Autopilot 'D'. Every other field (FCW, side-collision, LDW, speed-limit, the high nibble of
-    // byte0 ...) keeps its authentic stock value, so NONE of them can default to 0 and render a
-    // warning -- that whole-frame rebuild by OP was what flashed the AEB only at engage. When
-    // disengaged, forward unchanged. 0x389 is forwarded unchanged in all cases (stock longColl is
-    // already SNA/clean). OP transmits NO 0x399/0x389 in this mode (carcontroller HUD stays off),
-    // so there is a single coherent source. Additive checksum verified for 0x399 (12/12 frames).
-    // NO blue-D: forward stock DAS_status (0x399) and DAS_status2 (0x389) UNCHANGED. Asserting
-    // autopilotStatus=5 on this car (autopilot-disabled mode) makes the IC render the AEB/FCW
-    // warning because it couples that indicator to the collision HUD -- so we do not touch 0x399.
+    if (tesla_legacy_is_hud_status_msg(addr)) {
+      (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
+    }
+
     // DAS_control (0x2B9) AEB scrub -- suppress the spurious "AEB-unavailable" STATUS only.
     //   - aeb_event == 2 or 3: the AP's spurious "AEB temporarily unavailable" status (set while
     //     OP is engaged and HELD even after disengage). Scrub -> 0 so the IC never renders it,
@@ -726,17 +834,19 @@ static safety_config tesla_legacy_init(uint16_t param) {
   static const CanMsg TESLA_LEGACY_TX_MSGS_LATERAL[] = {
     {0x488, 0, 4, .check_relay = false},  // DAS_steeringControl
     {0x27D, 0, 3, .check_relay = false},  // APS_eacMonitor
-    {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
+    {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
-    // Vanilla-xnor HUD ownership: do not allow userspace DAS_status/DAS_status2 TX.
+    {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
+    {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
 
   };
 
   static const CanMsg TESLA_LEGACY_TX_MSGS_LONG[] = {
     {0x2BF, 0, 8, .check_relay = false},  // DAS_longControl
-    {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier (blocked in tx_hook)
+    {0x659, 0, 8, .check_relay = false},  // OP->safety internal carrier
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
-    // Vanilla-xnor HUD ownership: do not allow userspace DAS_status/DAS_status2 TX.
+    {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
+    {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
 
   };
 
