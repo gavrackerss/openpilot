@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V168_UNITY_HUD_OVERLAY 1
+#define XNOR_V169_IGNORE_STOCK_AEB 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V168_UNITY_HUD_OVERLAY";
+    "XNOR_V169_IGNORE_STOCK_AEB";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -16,7 +16,7 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 //
 // XNOR contract:
 //  - safetyParam uses TeslaSafetyFlags (opendbc_repo/opendbc/car/tesla/values.py):
-//      LONG_CONTROL=1, FSD_14=2 (non-legacy only), FLAG_EXTERNAL_PANDA=4, FLAG_HW1=8, FLAG_HW2=16, FLAG_HW3=32, OP_STALK_ENABLE=64
+//      LONG_CONTROL=1, FSD_14=2 (non-legacy only), FLAG_EXTERNAL_PANDA=4, FLAG_HW1=8, FLAG_HW2=16, FLAG_HW3=32, OP_STALK_ENABLE=64, IGNORE_STOCK_AEB=128
 //  - Main panda: lateral TX + stock LKAS passthrough + Unity forwarding mods
 //  - External panda: longitudinal TX + stock AEB passthrough
 
@@ -27,6 +27,7 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 #define TESLA_LEGACY_FLAG_HW2                0x10U
 #define TESLA_LEGACY_FLAG_HW3                0x20U
 #define TESLA_LEGACY_FLAG_OP_STALK_ENABLE    0x40U
+#define TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB  0x80U
 
 // --- Unity timing ---
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
@@ -37,6 +38,7 @@ static const uint32_t TESLA_LEGACY_AEB_HUD_SCRUB_US       = 3500000U;
 static bool tesla_legacy_external_panda = false;
 static bool tesla_legacy_has_ap_hw = false;
 static bool tesla_legacy_op_stalk_enable = false;
+static bool tesla_legacy_ignore_stock_aeb = false;
 static int tesla_legacy_chassis_bus = 0;
 // DAS_control lives in different ID namespaces per bus: 0x2B9 on the chassis/party bus (main
 // panda) and 0x2BF on the powertrain bus (external panda). Unity (das_control_addr) and vanilla
@@ -130,6 +132,10 @@ static void tesla_legacy_set_last_byte_checksum(CANPacket_t *msg) {
   }
 }
 
+static bool tesla_legacy_is_das_control_msg(int addr) {
+  return (addr == 0x2B9) || (addr == 0x2BF);
+}
+
 static bool tesla_legacy_vehicle_stopped_or_unknown(void) {
   const int speed_sample = vehicle_speed.values[0];
   return !vehicle_moving || ((speed_sample >= -500) && (speed_sample <= 500));
@@ -143,7 +149,7 @@ static bool tesla_legacy_stock_ap_idle(void) {
 
 static bool tesla_legacy_aeb_event_is_warning_only(int aeb_event) {
   return (aeb_event == 2) || (aeb_event == 3) ||
-         ((aeb_event == 1) && tesla_legacy_vehicle_stopped_or_unknown());
+         ((aeb_event == 1) && (tesla_legacy_ignore_stock_aeb || tesla_legacy_vehicle_stopped_or_unknown()));
 }
 
 static void tesla_legacy_note_aeb_hud_warning(int aeb_event) {
@@ -163,7 +169,7 @@ static bool tesla_legacy_hud_takeover_owner(void) {
 
 static bool tesla_legacy_should_scrub_aeb_event(int aeb_event) {
   if (aeb_event == 1) {
-    return tesla_legacy_vehicle_stopped_or_unknown();
+    return tesla_legacy_ignore_stock_aeb || tesla_legacy_vehicle_stopped_or_unknown();
   }
   return (aeb_event == 2) || (aeb_event == 3) ||
          ((aeb_event != 0) &&
@@ -455,7 +461,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     }
   }
 
-  if ((bus == 2) && (addr == tesla_legacy_das_control_addr)) {
+  if ((bus == 2) && tesla_legacy_is_das_control_msg(addr)) {
     tesla_legacy_note_aeb_hud_warning((int)(msg->data[2] & 0x03U));
   }
 
@@ -480,9 +486,9 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       if (tesla_legacy_stock_lkas) {
         controls_allowed = false;
       }
-    } else if (tesla_legacy_external_panda && (addr == tesla_legacy_das_control_addr)) {
+    } else if (tesla_legacy_external_panda && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(msg->data[2] & 0x03);
-      tesla_legacy_stock_aeb = (aeb_event == 1);
+      tesla_legacy_stock_aeb = (!tesla_legacy_ignore_stock_aeb) && (aeb_event == 1);
       if (tesla_legacy_stock_aeb) {
         controls_allowed = false;
       }
@@ -547,14 +553,14 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
   // Unity parity: on AP hardware cars, block OP actuation unless stock AP is disabled
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
-    if ((addr == 0x488) || (addr == 0x27D) || (addr == tesla_legacy_das_control_addr)) {
+    if ((addr == 0x488) || (addr == 0x27D) || tesla_legacy_is_das_control_msg(addr)) {
       return false;
     }
   }
 
   // Main panda (lateral)
   if (!tesla_legacy_external_panda) {
-    if (addr == tesla_legacy_das_control_addr) {  // main: block chassis DAS_control (0x2B9)
+    if (tesla_legacy_is_das_control_msg(addr)) {  // main: never transmit DAS_control directly
       return false;
     }
 
@@ -661,13 +667,25 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
+  // Scrub DAS_control AEB bits on every forwarding path, because AP1/HW2 can expose both
+  // 0x2B9 and 0x2BF on both main and external pandas. The latest rlogs showed bad 0x2BF
+  // DAS_aebEvent values on src0/src130 while the clean OP 0x2BF was on src132, so only
+  // scrubbing the configured per-panda DAS_control ID was insufficient.
+  if (tesla_legacy_is_das_control_msg(addr)) {
+    const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
+    tesla_legacy_note_aeb_hud_warning(aeb_event);
+    if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
+      tesla_legacy_scrub_das_control_aeb(to_fwd);
+    }
+  }
+
   // Prevent OP actuation echoes back to AP side.
   // Keep stock DAS_longControl (0x2BF) flowing before OP is actively controlling;
   // blocking that startup heartbeat can trigger transient AEB-unavailable on the IC.
   if ((bus_num == 0) && ((addr == 0x488) || (addr == 0x27D))) {
     return true;
   }
-  if ((bus_num == 0) && (addr == tesla_legacy_das_control_addr) && controls_allowed) {
+  if ((bus_num == 0) && tesla_legacy_is_das_control_msg(addr) && controls_allowed) {
     return true;
   }
 
@@ -678,11 +696,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // - While OP is actively controlling, keep the previous Unity-style behavior: block
   //   stock longControl except real stock AEB events.
   if (tesla_legacy_external_panda) {
-    if ((bus_num == 2) && (addr == tesla_legacy_das_control_addr)) {
+    if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
-      tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
-        tesla_legacy_scrub_das_control_aeb(to_fwd);
+      if (aeb_event == 0) {
         return false;
       }
       if (!controls_allowed) {
@@ -756,22 +772,13 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
     }
 
-    // DAS_control (0x2B9) AEB scrub -- suppress the spurious "AEB-unavailable" STATUS only.
-    //   - aeb_event == 2 or 3: the AP's spurious "AEB temporarily unavailable" status (set while
-    //     OP is engaged and HELD even after disengage). Scrub -> 0 so the IC never renders it,
-    //     regardless of controls_allowed. This closes the DISENGAGE leak: the engaged-only gate
-    //     stopped scrubbing the instant OP dropped, exposing the AP's still-held aeb=2 until
-    //     re-engage. Suppressing 2/3 unconditionally covers engaged, disengaging, and disengaged.
-    //   - aeb_event == 1: a REAL stock AEB braking event -- NEVER scrubbed; always reaches the IC
-    //     (safety preserved).
-    //   - aeb_event == 0: idle -- untouched.
-    // Cold-boot safe: at boot the external-panda bridge keeps the AP at aeb=0, so nothing is
-    // rewritten before first engagement; and the additive checksum is verified correct for 0x2B9
-    // (8/8 real frames), so the scrubbed frame is valid -- the latch was the bridge bug, not this.
-    if (addr == tesla_legacy_das_control_addr) {
+    // DAS_control AEB scrub -- covers both 0x2B9 and 0x2BF. The latest rlogs show 0x2BF
+    // DAS_aebEvent=1/2/3 reaching src0/src130 while the OP clean copy is on src132. Unity exposes
+    // this as an opt-in ignore-stock-AEB flag; when the flag is enabled, event=1 is also scrubbed.
+    if (tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if ((aeb_event == 2) || (aeb_event == 3)) {
+      if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
         tesla_legacy_scrub_das_control_aeb(to_fwd);
       }
     }
@@ -804,6 +811,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_external_panda = GET_FLAG(param, TESLA_LEGACY_FLAG_EXTERNAL_PANDA);
   tesla_legacy_op_stalk_enable = GET_FLAG(param, TESLA_LEGACY_FLAG_OP_STALK_ENABLE);
+  tesla_legacy_ignore_stock_aeb = GET_FLAG(param, TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB);
   tesla_legacy_has_ap_hw = GET_FLAG(param, TESLA_LEGACY_FLAG_HW2) || GET_FLAG(param, TESLA_LEGACY_FLAG_HW3);
   // chassis_bus: only the MAIN panda on HW3 (raven) reads chassis vehicle-state off bus 1. The
   // external (powertrain) panda always reads its frames off its local bus 0, and HW1/HW2 main read

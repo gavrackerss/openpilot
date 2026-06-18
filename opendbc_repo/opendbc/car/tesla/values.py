@@ -248,6 +248,7 @@ class TeslaSafetyFlags(IntFlag):
   FLAG_HW2 = 16
   FLAG_HW3 = 32
   OP_STALK_ENABLE = 64
+  IGNORE_STOCK_AEB = 128
 
 
 class TeslaFlags(IntFlag):

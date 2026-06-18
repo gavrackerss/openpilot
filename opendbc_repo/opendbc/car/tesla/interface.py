@@ -41,9 +41,14 @@ class CarInterface(CarInterfaceBase):
 
   @staticmethod
   def _apply_xnor_safety_flags(ret: structs.CarParams) -> None:
-    if Params().get_bool("TinklaAutopilotDisabled"):
+    params = Params()
+    if params.get_bool("TinklaAutopilotDisabled"):
       for cfg in ret.safetyConfigs:
         cfg.safetyParam |= int(TeslaSafetyFlags.OP_STALK_ENABLE)
+
+    if params.get_bool("TinklaIgnoreStockAeb"):
+      for cfg in ret.safetyConfigs:
+        cfg.safetyParam |= int(TeslaSafetyFlags.IGNORE_STOCK_AEB)
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
