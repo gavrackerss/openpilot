@@ -721,9 +721,9 @@ class CarController(CarControllerBase):
           self.tesla_can.create_steering_control(self.apply_angle_last, lat_active)
         )
 
-    # EPS allow (legacy)
-    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
-      counter = (self.frame // 10) % 16
+    # EPS allow (legacy): keep EPAS handshake continuous during relay/ownership handover.
+    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
+      counter = (self.frame // 2) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
     # Longitudinal (optional)

@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V169_IGNORE_STOCK_AEB 1
+#define XNOR_V170_STEERING_HANDOVER 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V169_IGNORE_STOCK_AEB";
+    "XNOR_V170_STEERING_HANDOVER";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -564,10 +564,8 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
       return false;
     }
 
-    if ((addr == 0x488) || (addr == 0x27D)) {
-      if (tesla_legacy_stock_lkas) {
-        return false;
-      }
+    if (addr == 0x27D) {
+      return true;
     }
 
     if (addr == 0x488) {
@@ -579,6 +577,9 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
       }
       if (steer_control_type == 0) {
         return true;
+      }
+      if (tesla_legacy_stock_lkas) {
+        return false;
       }
 
       const int raw_angle_can = (((int)(msg->data[0] & 0x7FU)) << 8) | (int)msg->data[1];

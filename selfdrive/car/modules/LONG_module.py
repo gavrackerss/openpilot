@@ -12,6 +12,8 @@ v66 fixes stale low suggested-speed / lead-release recovery after 30->40 transit
 
 v67 improves post-curve release and adds a shallow high-speed map-only early curve assist.
 
+v69 ports the later lead re-accel and roundabout-exit release guards from the local v95/v96 backup.
+v70 makes fresh roadworks caps authoritative and passes the capped target into ACC.
 v68 fixes low-target stickiness after curves, blocks stale posted-limit release after downshifts,
 and stops lead-release oscillation at short time gaps.
 
@@ -214,13 +216,13 @@ class LongController:
   _CURVE_PLANNER_RELEASE_PERSIST_MS = 180
   _CURVE_PLANNER_RELEASE_MAPD_TOLERANCE_MS = 5.5 * CV.MPH_TO_MS
   _CURVE_PLANNER_RELEASE_OVERRIDE_MS = 260
-  _LEAD_HOLD_PERSIST_MS = 560
+  _LEAD_HOLD_PERSIST_MS = 320
   _LEAD_HOLD_RELEASE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
   _LEAD_OPENING_VREL_MS = 0.12
-  _LEAD_OPENING_INFERRED_RATE_MS = 1.2     # dRel growing faster than this => lead opening (backup to vRel reading ~0)
-  _LEAD_OPENING_ACTIVE_GAP_FACTOR = 0.6    # when actively opening, release at this fraction of the full opening gap (don't let the gap balloon)
+  _LEAD_OPENING_INFERRED_RATE_MS = 0.65    # dRel growing faster than this => lead opening (backup to vRel reading ~0)
+  _LEAD_OPENING_ACTIVE_GAP_FACTOR = 0.48   # when actively opening, release at this fraction of the full opening gap (don't let the gap balloon)
   _LEAD_OPENING_GAP_MIN_M = 24.0
-  _LEAD_OPENING_TIME_GAP_S = 1.85
+  _LEAD_OPENING_TIME_GAP_S = 1.65
   _LEAD_CONSTRAIN_CLOSING_VREL_MS = -0.15
   _LEAD_CONSTRAIN_GAP_MIN_M = 22.0
   _LEAD_CONSTRAIN_TIME_GAP_S = 1.7
@@ -286,11 +288,25 @@ class LongController:
   _PLANNER_SET_TRACK_MARGIN_MS = 0.8 * CV.MPH_TO_MS
   _WEAK_LEAD_OWNER_VREL_MS = -0.35
   _WEAK_LEAD_OWNER_ATARGET_MS2 = -0.35
-  _WEAK_LEAD_OWNER_TIME_GAP_S = 2.2
-  _STALE_PLANNER_LEAD_CLEAR_MS = 900
+  _WEAK_LEAD_OWNER_TIME_GAP_S = 1.85
+  _STALE_PLANNER_LEAD_CLEAR_MS = 520
   _STALE_PLANNER_LEAD_MAX_ATARGET_MS2 = -0.20
   _STALE_PLANNER_LEAD_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _STALE_PLANNER_LEAD_MAX_LIVE_DROP_MS = 0.75 * CV.MPH_TO_MS
+
+  _LEAD_REACCEL_MIN_GAP_S = 2.05
+  _LEAD_REACCEL_EXTRA_GAP_S = 0.30
+  _LEAD_REACCEL_MIN_DREL_M = 26.0
+  _LEAD_REACCEL_MAX_CLOSING_MS = -0.10
+  _LEAD_REACCEL_MAX_DECEL_MS2 = -0.18
+  _LEAD_REACCEL_LARGE_GAP_S = 3.40
+  _LEAD_REACCEL_LARGE_DREL_M = 42.0
+  _LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS = -0.40
+  _LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2 = -0.35
+  _ROUNDABOUT_EXIT_CLEAR_HOLD_MS = 3500
+  _ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS = 1.0 * CV.MPH_TO_MS
+  _ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG = 4.0
+  _ROUNDABOUT_EXIT_STRAIGHT_RATE_DEG = 12.0
 
   _CURVE_FORCE_ENTRY_MIN_SPEED_MS = 15.0 * CV.MPH_TO_MS
   _CURVE_FORCE_ENTRY_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
@@ -567,6 +583,9 @@ class LongController:
     self._posted_limit_drop_block_until_ms: int = 0
     self._mapd_comfort_bias_active: bool = False
     self._roundabout_active: bool = False
+    self._roundabout_seen_ms: int = 0
+    self._roundabout_exit_clear_until_ms: int = 0
+    self._roundabout_last_name_blob: str = ""
 
     self._last_info_log_ms: int = 0
     self._enabled_since_ms: int = 0
@@ -1156,8 +1175,34 @@ class LongController:
       return None
     return float(max(candidates))
 
+  def _roundabout_exit_recently_clear(self, *, now_ms: int) -> bool:
+    return bool(int(now_ms) <= int(self._roundabout_exit_clear_until_ms))
+
+
+  @staticmethod
+  def _src_has_curve_or_roundabout_owner(src: str) -> bool:
+    src_text = str(src or "")
+    return any(
+      token in src_text
+      for token in (
+        "state[CURVE",
+        "curve_hold",
+        "curve_fused",
+        "curve_limit_guard",
+        "curve_force_entry",
+        "curve_accel_block",
+        "mapd_roundabout",
+        "roundabout",
+        "csa",
+        "lp_near[",
+      )
+    )
+
+
   def _should_hold_min_cruise_for_curve(self, *, now_ns: int, desired_ms: float, no_lead: bool) -> bool:
     if (not no_lead) or float(desired_ms) >= float(self.MIN_CRUISE_SPEED_MS):
+      return False
+    if self._roundabout_exit_recently_clear(now_ms=int(now_ns // 1_000_000)):
       return False
 
     if float(desired_ms) >= (float(self.MIN_CRUISE_SPEED_MS) - float(self._CURVE_MIN_CRUISE_HOLD_MARGIN_MS)):
@@ -1391,6 +1436,41 @@ class LongController:
         or str(self._lp_source or "") in ("cruise", "e2e")
       )
     )
+
+
+  def _lead_reaccel_allow(self, *, v_ego_ms: float, reference_ms: float, src: str, cs_out) -> bool:
+    if (not self._lead_present) or float(self._lead_drel) <= 0.0:
+      return False
+    if float(v_ego_ms) <= 0.1:
+      return False
+    if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
+      return True
+    if self._src_has_curve_or_roundabout_owner(str(src)):
+      return False
+    if bool(self._lat_limit_saturated):
+      return False
+
+    base_ms = float(reference_ms if reference_ms > 0.1 else max(float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS)))
+    if self._lead_is_constraining(base_target_ms=base_ms, v_ego_ms=float(v_ego_ms)):
+      return False
+
+    desired_follow_s = self._desired_follow_time_s(cs_out)
+    release_gap_s = max(float(self._LEAD_REACCEL_MIN_GAP_S), float(desired_follow_s) + float(self._LEAD_REACCEL_EXTRA_GAP_S))
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
+
+    normal_release = bool(
+      float(gap_s) >= float(release_gap_s)
+      and float(self._lead_drel) >= float(self._LEAD_REACCEL_MIN_DREL_M)
+      and float(self._lead_vrel) >= float(self._LEAD_REACCEL_MAX_CLOSING_MS)
+      and float(self._lp_a_target) >= float(self._LEAD_REACCEL_MAX_DECEL_MS2)
+    )
+    large_gap_release = bool(
+      float(gap_s) >= max(float(self._LEAD_REACCEL_LARGE_GAP_S), float(desired_follow_s) + 1.25)
+      and float(self._lead_drel) >= float(self._LEAD_REACCEL_LARGE_DREL_M)
+      and float(self._lead_vrel) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS)
+      and float(self._lp_a_target) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2)
+    )
+    return bool(normal_release or large_gap_release)
 
 
 
@@ -1905,8 +1985,22 @@ class LongController:
             _name_blob = ""
             for _attr in ("wayName", "roadName"):
               _name_blob += " " + str(getattr(mo, _attr, "") or "")
-            self._roundabout_active = bool(self._ROUNDABOUT_NAME_TOKEN in _name_blob.lower())
+            _name_blob = str(_name_blob).strip()
+            was_roundabout = bool(self._roundabout_active)
+            is_roundabout = bool(self._ROUNDABOUT_NAME_TOKEN in _name_blob.lower())
+            self._roundabout_active = bool(is_roundabout)
+            if bool(is_roundabout):
+              self._roundabout_seen_ms = int(now_ms)
+              self._roundabout_exit_clear_until_ms = 0
+              self._roundabout_last_name_blob = str(_name_blob)
+            elif bool(was_roundabout):
+              self._roundabout_exit_clear_until_ms = int(now_ms) + int(self._ROUNDABOUT_EXIT_CLEAR_HOLD_MS)
+              self._roundabout_last_name_blob = str(_name_blob)
+              self._reset_curve_hold()
+              self._reset_lead_curve_hold()
           except Exception:
+            if bool(self._roundabout_active):
+              self._roundabout_exit_clear_until_ms = int(now_ms) + int(self._ROUNDABOUT_EXIT_CLEAR_HOLD_MS)
             self._roundabout_active = False
     except Exception:
       pass
@@ -2006,24 +2100,13 @@ class LongController:
     if (not math.isfinite(kph)) or kph <= 0.1:
       return None, "invalid"
 
-    cap_ms = float(kph) * CV.KPH_TO_MS
     if int(age_ms) > int(self._ROADWORKS_CAP_MAX_AGE_MS):
       return None, "roadworks_cap_stale"
 
-    # If the authoritative posted limit is FAR above the roadworks cap, the cap is almost certainly
-    # stale/wrong (e.g. a ~50 cap on the 70 M27) -- ignore it immediately, without waiting out the
-    # grace window (which never elapses if the cap file keeps being rewritten).
-    if posted_limit_ms is not None and float(posted_limit_ms) > (float(cap_ms) + float(self._ROADWORKS_CAP_FAR_HIGHER_LIMIT_MS)):
-      return None, "roadworks_cap_ignored_far_higher_limit"
-
-    if (
-      posted_limit_ms is not None
-      and float(posted_limit_ms) > (float(cap_ms) + float(self._ROADWORKS_CAP_HIGHER_LIMIT_MARGIN_MS))
-      and int(age_ms) > int(self._ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS)
-    ):
-      return None, "roadworks_cap_ignored_higher_limit"
-
-    return float(cap_ms), "roadworks_cap"
+    # A fresh roadworks file is an explicit temporary ceiling. Do not compare it to the
+    # normal posted limit: roadworks are expected to be lower than the underlying road.
+    _ = posted_limit_ms
+    return float(kph) * CV.KPH_TO_MS, "roadworks_cap"
 
 
   def _lead_is_constraining(self, *, base_target_ms: float, v_ego_ms: float) -> bool:
@@ -3075,6 +3158,10 @@ class LongController:
     self._mapd_vision_curve_ms = None
     self._mapd_last_ns = 0
     self._mapd_comfort_bias_active = False
+    self._roundabout_active = False
+    self._roundabout_seen_ms = 0
+    self._roundabout_exit_clear_until_ms = 0
+    self._roundabout_last_name_blob = ""
     self._mapd_entry_candidate_since_ms = 0
     self._mapd_stale_block_until_ms = 0
     # Point 2: speed-limit flicker-debounce state
@@ -3210,6 +3297,8 @@ class LongController:
     min(). Fail-safe: any missing prerequisite returns (None, reason) and the cap does nothing."""
     if not self._ROUNDABOUT_ENABLE:
       return None, "roundabout_disabled"
+    if self._roundabout_exit_recently_clear(now_ms=int(now_ns // 1_000_000)):
+      return None, "roundabout_exit_clear"
     if not bool(self._roundabout_active):
       return None, "roundabout_none"
     if int(self._mapd_last_ns) <= 0:
@@ -3448,6 +3537,58 @@ class LongController:
     return float(target_ms), "+".join(owner_parts) if owner_parts else "curve"
 
 
+  def _roundabout_exit_release_target(
+    self,
+    *,
+    now_ms: int,
+    desired_ms: float,
+    src: str,
+    reference_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+    planner_near_ms: float,
+    no_lead: bool,
+    cs_out,
+  ) -> tuple[float, str, bool]:
+    if not bool(no_lead):
+      return float(desired_ms), str(src), False
+    if not self._roundabout_exit_recently_clear(now_ms=int(now_ms)):
+      return float(desired_ms), str(src), False
+    if bool(self._roundabout_active):
+      return float(desired_ms), str(src), False
+
+    reference_ms = max(float(reference_ms), float(current_set_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))
+    if float(desired_ms) >= (float(reference_ms) - float(self._ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS)):
+      return float(desired_ms), str(src), False
+
+    current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
+    steering_rate_deg = abs(float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0))
+    planner_clear = bool(float(planner_near_ms) >= (float(reference_ms) - max(float(self._CURVE_RELEASE_NEAR_TARGET_MARGIN_MS), 2.0 * CV.MPH_TO_MS)))
+    csa_clear = self._csa_confidently_flat(v_ego_ms=float(v_ego_ms))
+    straight_clear = bool(
+      float(current_angle_deg) <= float(self._ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG)
+      and float(steering_rate_deg) <= float(self._ROUNDABOUT_EXIT_STRAIGHT_RATE_DEG)
+    )
+    release_context = bool(
+      self._src_has_curve_or_roundabout_owner(str(src))
+      or "min_hold" in str(src)
+      or "CURVE_EXIT" in str(src)
+    )
+
+    if not bool(planner_clear or csa_clear or (straight_clear and release_context)):
+      return float(desired_ms), str(src), False
+
+    self._reset_curve_hold()
+    self._reset_lead_curve_hold()
+    self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+    self._arbitration_curve_target_ms = 0.0
+
+    release_ms = min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms), float(desired_ms)))
+    if release_ms < (float(reference_ms) - float(self._ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS)):
+      release_ms = float(reference_ms)
+    return float(release_ms), f"{src}+roundabout_exit_release", True
+
+
   def _arbitrate_target_state_machine(
     self,
     *,
@@ -3486,6 +3627,15 @@ class LongController:
     lead_opening_clear = bool(
       live_lead
       and self._lead_is_opening_clear(base_target_ms=float(reference_ms), v_ego_ms=float(v_ego_ms))
+    )
+    lead_reaccel_clear = bool(
+      live_lead
+      and self._lead_reaccel_allow(
+        v_ego_ms=float(v_ego_ms),
+        reference_ms=float(reference_ms),
+        src=str(src),
+        cs_out=cs_out,
+      )
     )
     lead_closing = bool(
       live_lead
@@ -3528,7 +3678,7 @@ class LongController:
       and bool(self._lp_has_lead)
       and bool(planner_lead_recent_context)
       and not stale_planner_lead
-      and not bool(far_lead_release)
+      and not bool(far_lead_release or lead_reaccel_clear)
     )
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_below_reference = bool(
@@ -3555,7 +3705,7 @@ class LongController:
     lead_critical = bool(
       live_lead
       and not bool(far_lead_release)
-      and not lead_opening_clear
+      and not bool(lead_opening_clear or lead_reaccel_clear)
       and (
         lead_time_gap_s <= float(lead_critical_gap_s)
         or (
@@ -3569,7 +3719,7 @@ class LongController:
     lead_follow = bool(
       live_lead
       and not bool(far_lead_release)
-      and not lead_opening_clear
+      and not bool(lead_opening_clear or lead_reaccel_clear)
       and (
         lead_critical
         or lead_closing
@@ -3588,6 +3738,7 @@ class LongController:
       live_lead
       and (
         bool(far_lead_release)
+        or bool(lead_reaccel_clear)
         or (
           not lead_closing
           and (
@@ -3748,6 +3899,9 @@ class LongController:
       if bool(far_lead_release):
         out_ms = max(float(out_ms), float(reference_ms))
         out_src = f"{out_src}+lead_far_release"
+      elif bool(lead_reaccel_clear):
+        out_ms = max(float(out_ms), float(reference_ms))
+        out_src = f"{out_src}+lead_reaccel_release"
       elif (
         ("planner[lead" in out_src or "lead_hold" in out_src or "lead_guard" in out_src)
         and float(out_ms) < (float(reference_ms) - float(self._CLEAR_NO_LEAD_STALE_OWNER_DROP_MS))
@@ -3946,13 +4100,16 @@ class LongController:
 
     speed_limit_target_ms, set_speed_limit_active, ceiling_src = self._resolve_speed_limit_target_ms(CS, speed_units=speed_units, now_ms=int(now), now_ns=int(now_ns))
     posted_limit_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
-    # The roadworks-cap "ignore when the real limit is higher" check must see the AUTHORITATIVE
-    # posted limit. mapd's posted limit is often None on motorways (the M27=70 reads None), which
-    # left a stale ~50 roadworks cap pinning the speed below the real 70 limit. Feed it the higher
-    # of mapd-posted and the resolved (mpp / CarState) speed-limit target.
-    resolved_posted_ms = float(speed_limit_target_ms) if (set_speed_limit_active and speed_limit_target_ms is not None) else None
-    posted_for_roadworks_ms = max([v for v in (posted_limit_ms, resolved_posted_ms) if v is not None], default=None)
-    roadworks_cap_ms, roadworks_cap_src = self._roadworks_cap_ms(now_ms=int(now), posted_limit_ms=posted_for_roadworks_ms)
+    roadworks_cap_ms, roadworks_cap_src = self._roadworks_cap_ms(now_ms=int(now), posted_limit_ms=posted_limit_ms)
+    acc_speed_limit_target_ms = speed_limit_target_ms
+    acc_set_speed_limit_active = bool(set_speed_limit_active)
+    if roadworks_cap_ms is not None:
+      acc_speed_limit_target_ms = (
+        float(roadworks_cap_ms)
+        if acc_speed_limit_target_ms is None
+        else min(float(acc_speed_limit_target_ms), float(roadworks_cap_ms))
+      )
+      acc_set_speed_limit_active = True
 
     if set_speed_limit_active and speed_limit_target_ms is not None:
       base_target_ms = float(speed_limit_target_ms)
@@ -4371,7 +4528,13 @@ class LongController:
     current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
     steering_rate_deg = abs(float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0))
     curve_lead_context = bool(self._lead_present) or int(now) <= int(self._lead_recently_cleared_until_ms)
-    curve_reference_ms = float(speed_limit_target_ms if (set_speed_limit_active and speed_limit_target_ms is not None) else max(float(desired_ms), float(current_set_ms), float(v_ego_ms)))
+    curve_reference_ms = float(
+      acc_speed_limit_target_ms
+      if (acc_set_speed_limit_active and acc_speed_limit_target_ms is not None)
+      else max(float(desired_ms), float(current_set_ms), float(v_ego_ms))
+    )
+    if roadworks_cap_ms is not None:
+      curve_reference_ms = min(float(curve_reference_ms), float(roadworks_cap_ms))
     stale_lead_curve_release = bool(
       bool(self._lead_curve_hold_active)
       and (not bool(self._lead_present))
@@ -4476,6 +4639,19 @@ class LongController:
     if curve_active_accel_blocked and "curve_accel_block[active]" not in src:
       src = f"{src}+curve_accel_block[active]"
 
+    no_lead_curve_context = (not self._lead_present) and (not self._lp_has_lead)
+    desired_ms, src, roundabout_exit_released = self._roundabout_exit_release_target(
+      now_ms=int(now),
+      desired_ms=float(desired_ms),
+      src=str(src),
+      reference_ms=float(curve_reference_ms),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+      planner_near_ms=float(planner_near_ms),
+      no_lead=bool(no_lead_curve_context),
+      cs_out=cs_out,
+    )
+
     desired_ms, lead_low_speed_blocked = self._low_speed_lead_block_target(
       now_ms=int(now),
       desired_ms=float(desired_ms),
@@ -4485,7 +4661,6 @@ class LongController:
     if lead_low_speed_blocked:
       src = f"{src}+lead_low_speed_block"
 
-    no_lead_curve_context = (not self._lead_present) and (not self._lp_has_lead)
     if not no_lead_curve_context:
       self._curve_limit_guard_active = False
       self._curve_limit_guard_candidate_since_ms = 0
@@ -4498,6 +4673,11 @@ class LongController:
       desired_ms = max(float(desired_ms), float(self.MIN_CRUISE_SPEED_MS))
       if "min_hold" not in src:
         src = f"{src}+min_hold"
+
+    if roadworks_cap_ms is not None and float(desired_ms) > float(roadworks_cap_ms):
+      desired_ms = float(roadworks_cap_ms)
+      if "roadworks_cap" not in src:
+        src = f"{src}+roadworks_cap"
 
     stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
     brake_pressed = bool(getattr(cs_out, "brakePressed", False))
@@ -4601,8 +4781,8 @@ class LongController:
       desired_speed_ms=float(desired_ms),
       cruise_buttons=cruise_buttons,
       brake_pressed=brake_pressed,
-      speed_limit_target_ms=speed_limit_target_ms,
-      set_speed_limit_active=bool(set_speed_limit_active),
+      speed_limit_target_ms=acc_speed_limit_target_ms,
+      set_speed_limit_active=bool(acc_set_speed_limit_active),
     )
 
     if decision.button is None or int(decision.button) == int(CruiseButtons.IDLE):
