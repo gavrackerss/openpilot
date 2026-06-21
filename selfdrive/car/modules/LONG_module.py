@@ -14,6 +14,7 @@ v67 improves post-curve release and adds a shallow high-speed map-only early cur
 
 v69 ports the later lead re-accel and roundabout-exit release guards from the local v95/v96 backup.
 v70 makes fresh roadworks caps authoritative and passes the capped target into ACC.
+v71 reduces motorway far-lead stickiness so ACC can resume once the lead is safely beyond the selected follow gap.
 v68 fixes low-target stickiness after curves, blocks stale posted-limit release after downshifts,
 and stops lead-release oscillation at short time gaps.
 
@@ -225,7 +226,7 @@ class LongController:
   _LEAD_OPENING_TIME_GAP_S = 1.65
   _LEAD_CONSTRAIN_CLOSING_VREL_MS = -0.15
   _LEAD_CONSTRAIN_GAP_MIN_M = 22.0
-  _LEAD_CONSTRAIN_TIME_GAP_S = 1.7
+  _LEAD_CONSTRAIN_TIME_GAP_S = 1.45
   _LEAD_OFFLANE_YREL_M = 2.2
   _LEAD_OPENING_RELAX_ATARGET_MS2 = -0.15
   _NO_LEAD_MAPD_CURRENT_GATE_MS = 0.5 * CV.MPH_TO_MS
@@ -294,15 +295,15 @@ class LongController:
   _STALE_PLANNER_LEAD_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _STALE_PLANNER_LEAD_MAX_LIVE_DROP_MS = 0.75 * CV.MPH_TO_MS
 
-  _LEAD_REACCEL_MIN_GAP_S = 2.05
-  _LEAD_REACCEL_EXTRA_GAP_S = 0.30
-  _LEAD_REACCEL_MIN_DREL_M = 26.0
-  _LEAD_REACCEL_MAX_CLOSING_MS = -0.10
-  _LEAD_REACCEL_MAX_DECEL_MS2 = -0.18
-  _LEAD_REACCEL_LARGE_GAP_S = 3.40
-  _LEAD_REACCEL_LARGE_DREL_M = 42.0
-  _LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS = -0.40
-  _LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2 = -0.35
+  _LEAD_REACCEL_MIN_GAP_S = 1.75
+  _LEAD_REACCEL_EXTRA_GAP_S = 0.00
+  _LEAD_REACCEL_MIN_DREL_M = 20.0
+  _LEAD_REACCEL_MAX_CLOSING_MS = -0.45
+  _LEAD_REACCEL_MAX_DECEL_MS2 = -0.50
+  _LEAD_REACCEL_LARGE_GAP_S = 2.85
+  _LEAD_REACCEL_LARGE_DREL_M = 34.0
+  _LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS = -0.80
+  _LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2 = -0.75
   _ROUNDABOUT_EXIT_CLEAR_HOLD_MS = 3500
   _ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS = 1.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG = 4.0
@@ -438,16 +439,16 @@ class LongController:
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
-  _FAR_LEAD_RELEASE_MIN_GAP_S = 2.85
-  _FAR_LEAD_RELEASE_MARGIN_S = 0.75
-  _FAR_LEAD_RELEASE_MIN_DREL_M = 28.0
-  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.70
-  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.30
+  _FAR_LEAD_RELEASE_MIN_GAP_S = 2.35
+  _FAR_LEAD_RELEASE_MARGIN_S = 0.25
+  _FAR_LEAD_RELEASE_MIN_DREL_M = 22.0
+  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.90
+  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.60
   _POSTED_LIMIT_RELEASE_MARGIN_MS = 3.0 * CV.MPH_TO_MS
-  _POSTED_LIMIT_RELEASE_MIN_DREL_M = 18.0
-  _POSTED_LIMIT_RELEASE_MIN_GAP_S = 2.45
-  _POSTED_LIMIT_RELEASE_MAX_CLOSING_MS = -0.65
-  _POSTED_LIMIT_RELEASE_MAX_DECEL_MS2 = -0.35
+  _POSTED_LIMIT_RELEASE_MIN_DREL_M = 16.0
+  _POSTED_LIMIT_RELEASE_MIN_GAP_S = 2.15
+  _POSTED_LIMIT_RELEASE_MAX_CLOSING_MS = -0.85
+  _POSTED_LIMIT_RELEASE_MAX_DECEL_MS2 = -0.60
   _POSTED_LIMIT_DROP_BLOCK_MS = 8_000
   _ROUNDABOUT_HARD_ENTRY_CAP_MS = 25.0 * CV.MPH_TO_MS
   _ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS = 20.0 * CV.MPH_TO_MS
@@ -1450,13 +1451,20 @@ class LongController:
     if bool(self._lat_limit_saturated):
       return False
 
-    base_ms = float(reference_ms if reference_ms > 0.1 else max(float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS)))
-    if self._lead_is_constraining(base_target_ms=base_ms, v_ego_ms=float(v_ego_ms)):
-      return False
-
     desired_follow_s = self._desired_follow_time_s(cs_out)
     release_gap_s = max(float(self._LEAD_REACCEL_MIN_GAP_S), float(desired_follow_s) + float(self._LEAD_REACCEL_EXTRA_GAP_S))
     gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
+
+    # Do not use _lead_is_constraining() as a hard veto here. On motorways, a lead can be
+    # safely beyond the selected follow gap but still look "constraining" because its absolute
+    # speed is below the set speed; in that case we should raise the cruise target and let ACC
+    # close gently instead of waiting for the lead to leave the lane.
+    dangerously_closing = bool(
+      float(self._lead_vrel) < -1.10
+      or float(self._lp_a_target) < -0.90
+    )
+    if dangerously_closing:
+      return False
 
     normal_release = bool(
       float(gap_s) >= float(release_gap_s)
@@ -1465,7 +1473,7 @@ class LongController:
       and float(self._lp_a_target) >= float(self._LEAD_REACCEL_MAX_DECEL_MS2)
     )
     large_gap_release = bool(
-      float(gap_s) >= max(float(self._LEAD_REACCEL_LARGE_GAP_S), float(desired_follow_s) + 1.25)
+      float(gap_s) >= max(float(self._LEAD_REACCEL_LARGE_GAP_S), float(desired_follow_s) + 0.65)
       and float(self._lead_drel) >= float(self._LEAD_REACCEL_LARGE_DREL_M)
       and float(self._lead_vrel) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS)
       and float(self._lp_a_target) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2)
