@@ -15,6 +15,7 @@ v67 improves post-curve release and adds a shallow high-speed map-only early cur
 v69 ports the later lead re-accel and roundabout-exit release guards from the local v95/v96 backup.
 v70 makes fresh roadworks caps authoritative and passes the capped target into ACC.
 v71 reduces motorway far-lead stickiness so ACC can resume once the lead is safely beyond the selected follow gap.
+v72 prevents mapd posted-limit release from overriding a fresh lower CarState cap and lowers far-lead re-accel gaps.
 v68 fixes low-target stickiness after curves, blocks stale posted-limit release after downshifts,
 and stops lead-release oscillation at short time gaps.
 
@@ -295,15 +296,15 @@ class LongController:
   _STALE_PLANNER_LEAD_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _STALE_PLANNER_LEAD_MAX_LIVE_DROP_MS = 0.75 * CV.MPH_TO_MS
 
-  _LEAD_REACCEL_MIN_GAP_S = 1.75
+  _LEAD_REACCEL_MIN_GAP_S = 1.55
   _LEAD_REACCEL_EXTRA_GAP_S = 0.00
-  _LEAD_REACCEL_MIN_DREL_M = 20.0
-  _LEAD_REACCEL_MAX_CLOSING_MS = -0.45
-  _LEAD_REACCEL_MAX_DECEL_MS2 = -0.50
-  _LEAD_REACCEL_LARGE_GAP_S = 2.85
-  _LEAD_REACCEL_LARGE_DREL_M = 34.0
-  _LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS = -0.80
-  _LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2 = -0.75
+  _LEAD_REACCEL_MIN_DREL_M = 16.0
+  _LEAD_REACCEL_MAX_CLOSING_MS = -0.65
+  _LEAD_REACCEL_MAX_DECEL_MS2 = -0.65
+  _LEAD_REACCEL_LARGE_GAP_S = 2.35
+  _LEAD_REACCEL_LARGE_DREL_M = 28.0
+  _LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS = -0.90
+  _LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2 = -0.85
   _ROUNDABOUT_EXIT_CLEAR_HOLD_MS = 3500
   _ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS = 1.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG = 4.0
@@ -433,17 +434,18 @@ class LongController:
   _FOLLOW_GAP_MIN_S = 1.25
   _FOLLOW_GAP_MAX_S = 3.35
   _FOLLOW_GAP_STALK_STEP_S = 0.35
-  _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.85
-  _FOLLOW_GAP_RELEASE_VREL_MS = 0.10
+  _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.35
+  _FOLLOW_GAP_RELEASE_VREL_MS = 0.05
+  _LEAD_RELEASE_MAX_FOLLOW_S = 2.05
   _RESUME_DECEL_GATE_MS2 = -0.5   # aEgo below this = actively decelerating; suppress upward SET restore (decel set-restore gate)
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
-  _FAR_LEAD_RELEASE_MIN_GAP_S = 2.35
-  _FAR_LEAD_RELEASE_MARGIN_S = 0.25
-  _FAR_LEAD_RELEASE_MIN_DREL_M = 22.0
-  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.90
-  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.60
+  _FAR_LEAD_RELEASE_MIN_GAP_S = 1.85
+  _FAR_LEAD_RELEASE_MARGIN_S = 0.05
+  _FAR_LEAD_RELEASE_MIN_DREL_M = 18.0
+  _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.80
+  _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.70
   _POSTED_LIMIT_RELEASE_MARGIN_MS = 3.0 * CV.MPH_TO_MS
   _POSTED_LIMIT_RELEASE_MIN_DREL_M = 16.0
   _POSTED_LIMIT_RELEASE_MIN_GAP_S = 2.15
@@ -582,6 +584,7 @@ class LongController:
     self._map_curve_persist_count: int = 0   # Q1-A: consecutive fresh arbitration cycles mapd-map has asked for a cap
     self._map_curve_persist_last_ns: int = 0
     self._posted_limit_drop_block_until_ms: int = 0
+    self._posted_limit_release_block_src: str = ""
     self._mapd_comfort_bias_active: bool = False
     self._roundabout_active: bool = False
     self._roundabout_seen_ms: int = 0
@@ -834,12 +837,28 @@ class LongController:
     current_set_ms: float,
     v_ego_ms: float,
   ) -> Optional[float]:
+    self._posted_limit_release_block_src = ""
     if int(now_ms) <= int(self._posted_limit_drop_block_until_ms):
+      self._posted_limit_release_block_src = "posted_release_blocked_recent_drop"
       return None
 
     posted_ms = self._mapd_posted_limit_ms(now_ns=int(now_ns))
     if posted_ms is None:
       return None
+
+    # If CarState is publishing a fresh, settled lower limit, it is authoritative.
+    # The 18:13 failure was: CarState target=30+offset while mapd posted=40; this
+    # stale-release path raised SET to 40 in the 30 zone. Only use mapd release when
+    # CarState is unsettled or unavailable, never to override a settled lower cap.
+    carstate_target_is_fresh = bool(
+      not bool(self._sl_flicker_latch)
+      and float(self._sl_stable_target_ms) > 0.1
+      and abs(float(current_target_ms) - float(self._sl_stable_target_ms)) <= float(self._SPEED_LIMIT_MATCH_TOL_MS)
+    )
+    if carstate_target_is_fresh and float(posted_ms) > (float(current_target_ms) + float(self._POSTED_LIMIT_RELEASE_MARGIN_MS)):
+      self._posted_limit_release_block_src = "posted_release_blocked_fresh_carstate_limit"
+      return None
+
     if float(posted_ms) <= (float(current_target_ms) + float(self._POSTED_LIMIT_RELEASE_MARGIN_MS)):
       return None
     if float(posted_ms) <= (float(current_set_ms) + (1.0 * CV.MPH_TO_MS)):
@@ -1452,7 +1471,8 @@ class LongController:
       return False
 
     desired_follow_s = self._desired_follow_time_s(cs_out)
-    release_gap_s = max(float(self._LEAD_REACCEL_MIN_GAP_S), float(desired_follow_s) + float(self._LEAD_REACCEL_EXTRA_GAP_S))
+    release_follow_s = min(float(desired_follow_s), float(self._LEAD_RELEASE_MAX_FOLLOW_S))
+    release_gap_s = max(float(self._LEAD_REACCEL_MIN_GAP_S), float(release_follow_s) + float(self._LEAD_REACCEL_EXTRA_GAP_S))
     gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1)
 
     # Do not use _lead_is_constraining() as a hard veto here. On motorways, a lead can be
@@ -1473,7 +1493,7 @@ class LongController:
       and float(self._lp_a_target) >= float(self._LEAD_REACCEL_MAX_DECEL_MS2)
     )
     large_gap_release = bool(
-      float(gap_s) >= max(float(self._LEAD_REACCEL_LARGE_GAP_S), float(desired_follow_s) + 0.65)
+      float(gap_s) >= max(float(self._LEAD_REACCEL_LARGE_GAP_S), float(release_follow_s) + 0.35)
       and float(self._lead_drel) >= float(self._LEAD_REACCEL_LARGE_DREL_M)
       and float(self._lead_vrel) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS)
       and float(self._lp_a_target) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2)
@@ -3623,14 +3643,15 @@ class LongController:
     )
     lead_time_gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1) if live_lead else 99.0
     desired_follow_s = self._desired_follow_time_s(cs_out)
+    release_follow_s = min(float(desired_follow_s), float(self._LEAD_RELEASE_MAX_FOLLOW_S))
     lead_critical_gap_s = min(
       float(self._ARBITRATION_LEAD_CRITICAL_TIME_GAP_S),
       max(1.05, float(desired_follow_s) - 0.85),
     )
-    lead_follow_gap_s = max(float(self._ARBITRATION_LEAD_FOLLOW_TIME_GAP_S), float(desired_follow_s))
+    lead_follow_gap_s = max(float(self._ARBITRATION_LEAD_FOLLOW_TIME_GAP_S), float(release_follow_s))
     lead_release_gap_s = min(
       float(self._FOLLOW_GAP_MAX_S) + 0.75,
-      float(desired_follow_s) + float(self._FOLLOW_GAP_RELEASE_HYSTERESIS_S),
+      float(release_follow_s) + float(self._FOLLOW_GAP_RELEASE_HYSTERESIS_S),
     )
     lead_opening_clear = bool(
       live_lead
@@ -3661,7 +3682,7 @@ class LongController:
     )
     far_lead_release_gap_s = max(
       float(self._FAR_LEAD_RELEASE_MIN_GAP_S),
-      float(desired_follow_s) + float(self._FAR_LEAD_RELEASE_MARGIN_S),
+      float(release_follow_s) + float(self._FAR_LEAD_RELEASE_MARGIN_S),
     )
     far_lead_release = bool(
       live_lead
@@ -3741,7 +3762,7 @@ class LongController:
         )
       )
     )
-    opening_recovery_gap_s = max(1.95, float(desired_follow_s) - 0.25)
+    opening_recovery_gap_s = max(1.70, float(release_follow_s) - 0.20)
     lead_clear_for_recovery = bool(
       live_lead
       and (
@@ -4137,6 +4158,8 @@ class LongController:
           ceiling_src = f"{ceiling_src}+mapd_posted_limit_release"
           if str(roadworks_cap_src).startswith("roadworks_cap_"):
             ceiling_src = f"{ceiling_src}+{roadworks_cap_src}"
+        elif str(self._posted_limit_release_block_src):
+          ceiling_src = f"{ceiling_src}+{self._posted_limit_release_block_src}"
 
       desired_ms = float(base_target_ms)
       src = f"speed_limit_target[{ceiling_src}]"

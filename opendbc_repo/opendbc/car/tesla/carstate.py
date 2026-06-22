@@ -35,6 +35,7 @@ class _TinklaConfig:
 
 class CarState(CarStateBase):
   DOUBLE_PULL_WINDOW_MS = 750
+  XNOR_CRUISE_SET_HOLD_MS = 8_000
   def __init__(self, CP):
     super().__init__(CP)
     self.msg_stw_actn_req = None
@@ -113,6 +114,9 @@ class CarState(CarStateBase):
     self.stock_cruise_enabled = False
     self.stock_cruise_state = ""
     self.stock_cruise_set_speed_ms = 0.0
+    self._last_valid_stock_cruise_set_speed_ms = 0.0
+    self._last_valid_stock_cruise_set_ms = 0
+    self._cruise_set_hold_src = ""
     self.leftBlinkerLamp = False
     self.rightBlinkerLamp = False
     # ALC/BLNK/HSO/ACC (Unity parity)
@@ -418,6 +422,61 @@ class CarState(CarStateBase):
 
     return 0.0, "none"
 
+  def _update_cruise_set_speed(
+    self,
+    ret: structs.CarState,
+    di_state: dict,
+    *,
+    v_ego_ms: float,
+    raw_cruise_enabled: bool,
+    cruise_state: str,
+    speed_units: str,
+  ) -> None:
+    """Keep a stable Tesla setpoint through transient DI_cruiseState drops.
+
+    In XNOR/Unity-style longitudinal control, OP can remain logically engaged while
+    Tesla DI_state reports STANDBY. Falling back to DI_digitalSpeed in that window
+    makes the set speed follow ego speed, so virtual stalk pulses look like they
+    do not stick. Hold the last trusted DI_cruiseSet briefly instead.
+    """
+    now_ms = int(time.monotonic_ns() // 1_000_000)
+    uom = speed_units if speed_units in ("KPH", "MPH") else "MPH"
+    conv = CV.KPH_TO_MS if uom == "KPH" else CV.MPH_TO_MS
+
+    cruise_set_u, src = self._pick_stock_cruise_set_u(di_state, float(v_ego_ms), bool(raw_cruise_enabled), uom)
+    picked_ms = float(cruise_set_u) * float(conv) if float(cruise_set_u) > 0.0 else 0.0
+
+    self._cruise_set_hold_src = ""
+    if bool(raw_cruise_enabled) and picked_ms > 0.1 and str(src).startswith("DI_cruiseSet"):
+      self._last_valid_stock_cruise_set_speed_ms = float(picked_ms)
+      self._last_valid_stock_cruise_set_ms = int(now_ms)
+
+    hold_age_ms = int(now_ms) - int(getattr(self, "_last_valid_stock_cruise_set_ms", 0) or 0)
+    hold_ms = float(getattr(self, "_last_valid_stock_cruise_set_speed_ms", 0.0) or 0.0)
+    hold_allowed = (
+      (not bool(raw_cruise_enabled))
+      and bool(getattr(self, "autopilot_disabled", False))
+      and bool(getattr(self, "cruiseEnabled", False))
+      and str(cruise_state or "") in ("STANDBY", "PRE_CANCEL", "PRE_FAULT")
+      and hold_ms > 0.1
+      and 0 <= hold_age_ms <= int(self.XNOR_CRUISE_SET_HOLD_MS)
+    )
+
+    if hold_allowed:
+      self.stock_cruise_set_speed_ms = float(hold_ms)
+      ret.cruiseState.speed = max(float(hold_ms), 1e-3)
+      self._cruise_set_src = "DI_cruiseSet_hold_last_valid"
+      self._cruise_set_hold_src = f"hold_last_valid:{hold_age_ms}ms"
+      return
+
+    if picked_ms > 0.0:
+      self.stock_cruise_set_speed_ms = float(picked_ms)
+      ret.cruiseState.speed = max(float(picked_ms), 1e-3)
+    else:
+      self.stock_cruise_set_speed_ms = 0.0
+      ret.cruiseState.speed = max(float(v_ego_ms), 1e-3)
+    self._cruise_set_src = str(src)
+
 
   def _update_speed_limit(self, can_parsers) -> None:
     """Unity-parity speed limit parsing (map/sign + DAS fallback) into m/s."""
@@ -522,6 +581,8 @@ class CarState(CarStateBase):
           f"[XNOR_CS] uom={uom} src={getattr(self, '_cruise_set_src', 'none')} "
           f"cruiseSet={float(getattr(self, 'stock_cruise_set_speed_ms', 0.0))*conv:.1f} "
           f"stockCruise={bool(getattr(self, 'stock_cruise_enabled', False))} "
+          f"stockState={str(getattr(self, 'stock_cruise_state', '') or '')} "
+          f"hold={str(getattr(self, '_cruise_set_hold_src', '') or '')} "
           f"speedLimit={float(getattr(self, 'speed_limit_ms', 0.0))*conv:.1f} das={float(getattr(self, 'speed_limit_ms_das', 0.0))*conv:.1f} "
           f"raw(gps_u={gps_units}, gps_mpp={gps_mpp}, rd_sign={rd_sign}, rd_base_mps={rd_base_mps}, map_type={map_type}, das_mph={das_mph})"
         )
@@ -621,15 +682,15 @@ class CarState(CarStateBase):
     self.update_autopark_state(autopark_state, cruise_enabled)
     # Cruise set speed (DI_state): pick correct decoded field without changing the DBC
     uom = speed_units if speed_units in ("KPH", "MPH") else "MPH"
-    cruise_set_u, src = self._pick_stock_cruise_set_u(cp_party.vl["DI_state"], float(ret.vEgo), bool(cruise_enabled), uom)
     self.stock_cruise_enabled = bool(cruise_enabled)
-    if cruise_set_u > 0.0:
-      self.stock_cruise_set_speed_ms = float(cruise_set_u) * (CV.KPH_TO_MS if uom == "KPH" else CV.MPH_TO_MS)
-      ret.cruiseState.speed = max(float(self.stock_cruise_set_speed_ms), 1e-3)
-    else:
-      self.stock_cruise_set_speed_ms = 0.0
-      ret.cruiseState.speed = max(float(ret.vEgo), 1e-3)
-    self._cruise_set_src = str(src)
+    self._update_cruise_set_speed(
+      ret,
+      cp_party.vl["DI_state"],
+      v_ego_ms=float(ret.vEgo),
+      raw_cruise_enabled=bool(cruise_enabled),
+      cruise_state=str(cruise_state or ""),
+      speed_units=uom,
+    )
     if self.autopilot_disabled:
       # Unity parity: allow engagement without Tesla cruise (low-speed lateral only)
       ret.cruiseState.available = True
@@ -999,15 +1060,15 @@ class CarState(CarStateBase):
     # Cruise set speed (DI_state): pick correct decoded field without changing the DBC
     ret.cruiseState.enabled = cruise_enabled
     uom = speed_units if speed_units in ("KPH", "MPH") else "MPH"
-    cruise_set_u, src = self._pick_stock_cruise_set_u(cp_chassis.vl["DI_state"], float(ret.vEgo), bool(cruise_enabled), uom)
     self.stock_cruise_enabled = bool(cruise_enabled)
-    if cruise_set_u > 0.0:
-      self.stock_cruise_set_speed_ms = float(cruise_set_u) * (CV.KPH_TO_MS if uom == "KPH" else CV.MPH_TO_MS)
-      ret.cruiseState.speed = max(float(self.stock_cruise_set_speed_ms), 1e-3)
-    else:
-      self.stock_cruise_set_speed_ms = 0.0
-      ret.cruiseState.speed = max(float(ret.vEgo), 1e-3)
-    self._cruise_set_src = str(src)
+    self._update_cruise_set_speed(
+      ret,
+      cp_chassis.vl["DI_state"],
+      v_ego_ms=float(ret.vEgo),
+      raw_cruise_enabled=bool(cruise_enabled),
+      cruise_state=str(cruise_state or ""),
+      speed_units=uom,
+    )
     ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
     ret.cruiseState.standstill = False  # This needs to be false, since we can resume from stop without sending anything special
     ret.standstill = cruise_state == "STANDSTILL"
