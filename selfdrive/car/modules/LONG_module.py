@@ -16,6 +16,7 @@ v69 ports the later lead re-accel and roundabout-exit release guards from the lo
 v70 makes fresh roadworks caps authoritative and passes the capped target into ACC.
 v71 reduces motorway far-lead stickiness so ACC can resume once the lead is safely beyond the selected follow gap.
 v72 prevents mapd posted-limit release from overriding a fresh lower CarState cap and lowers far-lead re-accel gaps.
+v73 releases stale planner-only curve ownership shortly after first engagement and adds clearer curve-owner source tags.
 v68 fixes low-target stickiness after curves, blocks stale posted-limit release after downshifts,
 and stops lead-release oscillation at short time gaps.
 
@@ -221,10 +222,10 @@ class LongController:
   _LEAD_HOLD_PERSIST_MS = 320
   _LEAD_HOLD_RELEASE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
   _LEAD_OPENING_VREL_MS = 0.12
-  _LEAD_OPENING_INFERRED_RATE_MS = 0.65    # dRel growing faster than this => lead opening (backup to vRel reading ~0)
-  _LEAD_OPENING_ACTIVE_GAP_FACTOR = 0.48   # when actively opening, release at this fraction of the full opening gap (don't let the gap balloon)
-  _LEAD_OPENING_GAP_MIN_M = 24.0
-  _LEAD_OPENING_TIME_GAP_S = 1.65
+  _LEAD_OPENING_INFERRED_RATE_MS = 0.42    # dRel growing faster than this => lead opening (backup to vRel reading ~0)
+  _LEAD_OPENING_ACTIVE_GAP_FACTOR = 0.40   # when actively opening, release at this fraction of the full opening gap (don't let the gap balloon)
+  _LEAD_OPENING_GAP_MIN_M = 18.0
+  _LEAD_OPENING_TIME_GAP_S = 1.45
   _LEAD_CONSTRAIN_CLOSING_VREL_MS = -0.15
   _LEAD_CONSTRAIN_GAP_MIN_M = 22.0
   _LEAD_CONSTRAIN_TIME_GAP_S = 1.45
@@ -290,21 +291,27 @@ class LongController:
   _PLANNER_SET_TRACK_MARGIN_MS = 0.8 * CV.MPH_TO_MS
   _WEAK_LEAD_OWNER_VREL_MS = -0.35
   _WEAK_LEAD_OWNER_ATARGET_MS2 = -0.35
-  _WEAK_LEAD_OWNER_TIME_GAP_S = 1.85
-  _STALE_PLANNER_LEAD_CLEAR_MS = 520
+  _WEAK_LEAD_OWNER_TIME_GAP_S = 1.65
+  _STALE_PLANNER_LEAD_CLEAR_MS = 420
   _STALE_PLANNER_LEAD_MAX_ATARGET_MS2 = -0.20
   _STALE_PLANNER_LEAD_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _STALE_PLANNER_LEAD_MAX_LIVE_DROP_MS = 0.75 * CV.MPH_TO_MS
 
-  _LEAD_REACCEL_MIN_GAP_S = 1.55
+  _LEAD_REACCEL_MIN_GAP_S = 1.38
   _LEAD_REACCEL_EXTRA_GAP_S = 0.00
-  _LEAD_REACCEL_MIN_DREL_M = 16.0
+  _LEAD_REACCEL_MIN_DREL_M = 13.5
   _LEAD_REACCEL_MAX_CLOSING_MS = -0.65
   _LEAD_REACCEL_MAX_DECEL_MS2 = -0.65
-  _LEAD_REACCEL_LARGE_GAP_S = 2.35
-  _LEAD_REACCEL_LARGE_DREL_M = 28.0
+  _LEAD_REACCEL_LARGE_GAP_S = 1.95
+  _LEAD_REACCEL_LARGE_DREL_M = 22.0
   _LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS = -0.90
   _LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2 = -0.85
+  _LEAD_ACCEL_AWAY_MIN_GAP_S = 1.28
+  _LEAD_ACCEL_AWAY_MIN_DREL_M = 12.0
+  _LEAD_ACCEL_AWAY_MIN_OPENING_MS = 0.22
+  _LEAD_ACCEL_AWAY_MAX_CLOSING_MS = -0.45
+  _LEAD_ACCEL_AWAY_MAX_DECEL_MS2 = -0.80
+  _STOCK_OVERRIDE_LOG_MARGIN_MS = 2.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EXIT_CLEAR_HOLD_MS = 3500
   _ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS = 1.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG = 4.0
@@ -400,7 +407,7 @@ class LongController:
   _LOW_SPEED_LEAD_BLOCK_TARGET_MARGIN_MS = 0.35 * CV.MPH_TO_MS
   _ARBITRATION_LEAD_CRITICAL_TIME_GAP_S = 1.35
   _LEAD_OFFPATH_CANCEL_MARGIN_M = 3.5   # radar |yRel| beyond the curvature-predicted lateral offset by this much => off-path lead; block hard CANCEL (still followed)
-  _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 2.15
+  _ARBITRATION_LEAD_FOLLOW_TIME_GAP_S = 1.75
   _ARBITRATION_LEAD_CLOSING_MS = -0.15
   _ARBITRATION_LEAD_PLANNER_DROP_MS = 1.5 * CV.MPH_TO_MS
   _ARBITRATION_STALE_LOW_TARGET_DROP_MS = 3.0 * CV.MPH_TO_MS
@@ -408,6 +415,12 @@ class LongController:
   _ARBITRATION_CURVE_EGO_DROP_MS = 1.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_MAP_VISION_DISAGREE_MS = 8.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EXIT_RELEASE_MS = 350   # lowered from 650: jump to CRUISE_SYNC (SET restored to max(set,v_ego)) sooner after a curve/roundabout exit (revert to 650 to restore)
+  _POST_ENGAGE_CURVE_RELEASE_WINDOW_MS = 12_000
+  _POST_ENGAGE_CURVE_RELEASE_MIN_MS = 350
+  _POST_ENGAGE_PLANNER_ONLY_DWELL_MS = 650
+  _POST_ENGAGE_PLANNER_ONLY_MIN_GAIN_MS = 5.0 * CV.MPH_TO_MS
+  _POST_ENGAGE_PLANNER_ONLY_STRAIGHT_STEER_DEG = 8.0
+  _POST_ENGAGE_PLANNER_ONLY_STRAIGHT_RATE_DEG = 18.0
   _ARBITRATION_CURVE_ENTRY_STEP_MS = 4.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EXIT_STEP_MS = 4.5 * CV.MPH_TO_MS   # raised from 3.6: quicker ramp-back of the curve target toward reference on exit (revert to 3.6 to restore)
   # Q1-A (persistence): a mapd-map curve cap must hold this many consecutive ~5Hz arbitration
@@ -434,16 +447,16 @@ class LongController:
   _FOLLOW_GAP_MIN_S = 1.25
   _FOLLOW_GAP_MAX_S = 3.35
   _FOLLOW_GAP_STALK_STEP_S = 0.35
-  _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.35
+  _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.18
   _FOLLOW_GAP_RELEASE_VREL_MS = 0.05
-  _LEAD_RELEASE_MAX_FOLLOW_S = 2.05
+  _LEAD_RELEASE_MAX_FOLLOW_S = 1.80
   _RESUME_DECEL_GATE_MS2 = -0.5   # aEgo below this = actively decelerating; suppress upward SET restore (decel set-restore gate)
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
   _CLEAR_NO_LEAD_STALE_OWNER_DROP_MS = 1.0 * CV.MPH_TO_MS
-  _FAR_LEAD_RELEASE_MIN_GAP_S = 1.85
+  _FAR_LEAD_RELEASE_MIN_GAP_S = 1.55
   _FAR_LEAD_RELEASE_MARGIN_S = 0.05
-  _FAR_LEAD_RELEASE_MIN_DREL_M = 18.0
+  _FAR_LEAD_RELEASE_MIN_DREL_M = 15.0
   _FAR_LEAD_RELEASE_MAX_CLOSING_MS = -0.80
   _FAR_LEAD_RELEASE_MAX_DECEL_MS2 = -0.70
   _POSTED_LIMIT_RELEASE_MARGIN_MS = 3.0 * CV.MPH_TO_MS
@@ -647,6 +660,7 @@ class LongController:
     self._arbitration_state_since_ms: int = 0
     self._arbitration_last_update_ms: int = 0
     self._arbitration_curve_target_ms: float = 0.0
+    self._post_engage_planner_curve_seen_ms: int = 0
 
 
   def _reset_lead_stuck_cancel(self) -> None:
@@ -1486,6 +1500,14 @@ class LongController:
     if dangerously_closing:
       return False
 
+    opening_rate_ms = max(float(self._lead_vrel), float(self._lead_drel_rate_ms))
+    accelerating_away_release = bool(
+      float(gap_s) >= float(self._LEAD_ACCEL_AWAY_MIN_GAP_S)
+      and float(self._lead_drel) >= float(self._LEAD_ACCEL_AWAY_MIN_DREL_M)
+      and float(opening_rate_ms) >= float(self._LEAD_ACCEL_AWAY_MIN_OPENING_MS)
+      and float(self._lead_vrel) >= float(self._LEAD_ACCEL_AWAY_MAX_CLOSING_MS)
+      and float(self._lp_a_target) >= float(self._LEAD_ACCEL_AWAY_MAX_DECEL_MS2)
+    )
     normal_release = bool(
       float(gap_s) >= float(release_gap_s)
       and float(self._lead_drel) >= float(self._LEAD_REACCEL_MIN_DREL_M)
@@ -1493,12 +1515,12 @@ class LongController:
       and float(self._lp_a_target) >= float(self._LEAD_REACCEL_MAX_DECEL_MS2)
     )
     large_gap_release = bool(
-      float(gap_s) >= max(float(self._LEAD_REACCEL_LARGE_GAP_S), float(release_follow_s) + 0.35)
+      float(gap_s) >= max(float(self._LEAD_REACCEL_LARGE_GAP_S), float(release_follow_s) + 0.20)
       and float(self._lead_drel) >= float(self._LEAD_REACCEL_LARGE_DREL_M)
       and float(self._lead_vrel) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_CLOSING_MS)
       and float(self._lp_a_target) >= float(self._LEAD_REACCEL_LARGE_GAP_MAX_DECEL_MS2)
     )
-    return bool(normal_release or large_gap_release)
+    return bool(accelerating_away_release or normal_release or large_gap_release)
 
 
 
@@ -3170,6 +3192,7 @@ class LongController:
     self._arbitration_state_since_ms = 0
     self._arbitration_last_update_ms = 0
     self._arbitration_curve_target_ms = 0.0
+    self._post_engage_planner_curve_seen_ms = 0
 
 
   def _reset_all_cached_state(self) -> None:
@@ -3617,6 +3640,91 @@ class LongController:
     return float(release_ms), f"{src}+roundabout_exit_release", True
 
 
+  @staticmethod
+  def _curve_owner_debug_source(curve_source: str) -> str:
+    source_text = str(curve_source or "curve")
+    if "curve_owner_" in source_text:
+      return source_text
+
+    owner_tags: list[str] = []
+    lowered = source_text.lower()
+    if "planner" in lowered:
+      owner_tags.append("curve_owner_planner")
+    if "mapd" in lowered:
+      owner_tags.append("curve_owner_mapd")
+    if "csa" in lowered:
+      owner_tags.append("curve_owner_csa")
+    if "roundabout" in lowered:
+      owner_tags.append("curve_owner_roundabout")
+
+    if not owner_tags:
+      return source_text
+    return f"{source_text}+{'+'.join(owner_tags)}"
+
+
+  def _post_engage_planner_curve_release(
+    self,
+    *,
+    now_ms: int,
+    curve_source: str,
+    src: str,
+    curve_candidate_ms: float,
+    reference_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+    no_live_lead: bool,
+    cs_out,
+  ) -> tuple[bool, str]:
+    if int(self._enabled_since_ms) <= 0:
+      self._post_engage_planner_curve_seen_ms = 0
+      return False, ""
+
+    since_enable_ms = int(now_ms) - int(self._enabled_since_ms)
+    if since_enable_ms < int(self._POST_ENGAGE_CURVE_RELEASE_MIN_MS):
+      return False, ""
+    if since_enable_ms > int(self._POST_ENGAGE_CURVE_RELEASE_WINDOW_MS):
+      self._post_engage_planner_curve_seen_ms = 0
+      return False, ""
+
+    source_text = f"{curve_source}+{src}".lower()
+    planner_only = bool(
+      "planner" in str(curve_source).lower()
+      and not any(token in source_text for token in ("mapd", "csa", "roundabout", "lat_sat", "hard_entry"))
+    )
+    if not planner_only or not bool(no_live_lead):
+      self._post_engage_planner_curve_seen_ms = 0
+      return False, ""
+
+    if bool(self._lat_limit_saturated):
+      self._post_engage_planner_curve_seen_ms = 0
+      return False, ""
+
+    target_gain_ms = float(reference_ms) - float(curve_candidate_ms)
+    if float(target_gain_ms) < float(self._POST_ENGAGE_PLANNER_ONLY_MIN_GAIN_MS):
+      self._post_engage_planner_curve_seen_ms = 0
+      return False, ""
+
+    current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
+    steering_rate_deg = abs(float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0))
+    if (
+      float(current_angle_deg) > float(self._POST_ENGAGE_PLANNER_ONLY_STRAIGHT_STEER_DEG)
+      or float(steering_rate_deg) > float(self._POST_ENGAGE_PLANNER_ONLY_STRAIGHT_RATE_DEG)
+    ):
+      self._post_engage_planner_curve_seen_ms = 0
+      return False, ""
+
+    if int(self._post_engage_planner_curve_seen_ms) <= 0:
+      self._post_engage_planner_curve_seen_ms = int(now_ms)
+      return False, "post_engage_planner_curve_pending"
+
+    if (int(now_ms) - int(self._post_engage_planner_curve_seen_ms)) < int(self._POST_ENGAGE_PLANNER_ONLY_DWELL_MS):
+      return False, "post_engage_planner_curve_pending"
+
+    return True, "post_engage_planner_curve_release"
+
+
+
+
   def _arbitrate_target_state_machine(
     self,
     *,
@@ -3762,7 +3870,7 @@ class LongController:
         )
       )
     )
-    opening_recovery_gap_s = max(1.70, float(release_follow_s) - 0.20)
+    opening_recovery_gap_s = max(1.42, float(release_follow_s) - 0.30)
     lead_clear_for_recovery = bool(
       live_lead
       and (
@@ -3836,6 +3944,30 @@ class LongController:
       return float(out_ms), out_src
 
     if curve_confirmed and float(curve_candidate_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
+      curve_source = self._curve_owner_debug_source(str(curve_source))
+      post_engage_curve_release, post_engage_curve_src = self._post_engage_planner_curve_release(
+        now_ms=int(now_ms),
+        curve_source=str(curve_source),
+        src=str(out_src),
+        curve_candidate_ms=float(curve_candidate_ms),
+        reference_ms=float(reference_ms),
+        current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms),
+        no_live_lead=bool(no_live_lead),
+        cs_out=cs_out,
+      )
+      if post_engage_curve_release:
+        self._reset_curve_hold()
+        self._reset_lead_curve_hold()
+        self._set_arbitration_state(state="CRUISE_SYNC", now_ms=int(now_ms))
+        self._arbitration_curve_target_ms = 0.0
+        self._post_engage_planner_curve_seen_ms = 0
+        out_ms = max(float(out_ms), min(float(reference_ms), max(float(current_set_ms), float(v_ego_ms))))
+        out_src = f"{out_src}+state[CRUISE_SYNC]+{post_engage_curve_src}"
+        return float(out_ms), out_src
+      if post_engage_curve_src:
+        curve_source = f"{curve_source}+{post_engage_curve_src}"
+
       state = "CURVE_ACTIVE" if str(self._arbitration_state).startswith("CURVE") else "CURVE_PRE_ENTRY"
       previous_update_ms = int(self._arbitration_last_update_ms)
       previous_curve_ms = float(self._arbitration_curve_target_ms) if float(self._arbitration_curve_target_ms) > 0.1 else float(out_ms)
@@ -3879,6 +4011,8 @@ class LongController:
       out_ms = min(float(out_ms), float(target_ms))
       out_src = f"{out_src}+state[{state}:{curve_source}]"
       return float(out_ms), out_src
+
+    self._post_engage_planner_curve_seen_ms = 0
 
     previous_curve_state = str(self._arbitration_state).startswith("CURVE")
     if previous_curve_state and no_live_lead:
@@ -4703,7 +4837,7 @@ class LongController:
     ):
       desired_ms = max(float(desired_ms), float(self.MIN_CRUISE_SPEED_MS))
       if "min_hold" not in src:
-        src = f"{src}+min_hold"
+        src = f"{src}+min_hold[curve_floor]"
 
     if roadworks_cap_ms is not None and float(desired_ms) > float(roadworks_cap_ms):
       desired_ms = float(roadworks_cap_ms)
@@ -4800,6 +4934,13 @@ class LongController:
     if a_ego_ms2 < float(self._RESUME_DECEL_GATE_MS2) and float(desired_ms) > float(current_set_ms):
       desired_ms = float(current_set_ms)
       src = f"{src}+decel_no_restore"
+
+    if (
+      str(stock_state) == "OVERRIDE"
+      and float(desired_ms) > (float(current_set_ms) + float(self._STOCK_OVERRIDE_LOG_MARGIN_MS))
+      and "stock_override_set_blocked" not in src
+    ):
+      src = f"{src}+stock_override_set_blocked"
 
     decision: AccDecision = self.acc.update(
       now_ms=now,
