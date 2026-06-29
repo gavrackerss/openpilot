@@ -17,6 +17,7 @@ import os
 import numpy as np
 import time
 
+from cereal import messaging
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.modules.LONG_module import LongController
@@ -53,6 +54,12 @@ BTN_DOWN1 = 32
 ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
 ROADWORKS_DEFAULT_KPH = 50.0 * CV.MPH_TO_KPH
+BELOW_FLOOR_DAS_SET_SPEED_FLAG_FILE = "/data/xnor_test_below_floor_das_set_speed"
+BELOW_FLOOR_CLIMB_FLAG_FILE = "/data/xnor_test_below_floor_climb"
+BELOW_FLOOR_CLIMB_TARGET_MPH = 18.0
+BELOW_FLOOR_CLIMB_RELEASE_MPH = 17.3
+BELOW_FLOOR_CLIMB_MIN_MPH = 2.0
+BELOW_FLOOR_CLIMB_ACCEL_MS2 = 0.28
 
 
 class CarController(CarControllerBase):
@@ -103,6 +110,12 @@ class CarController(CarControllerBase):
     self._roadworks_main_pulls_ms: list[int] = []
     self._roadworks_toggle_latch_until_ms = 0
 
+    self._long_plan_sock = messaging.sub_sock("longitudinalPlan", conflate=True)
+    self._long_plan_set_speed_kph = None
+    self._long_plan_set_speed_frame = -100000
+    self._below_floor_test_last_log_frame = -100000
+    self._below_floor_climb_last_log_frame = -100000
+
     if CP.carFingerprint in LEGACY_CARS:
       if CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1):
         CANBUS.powertrain = CANBUS.party
@@ -144,6 +157,101 @@ class CarController(CarControllerBase):
   @staticmethod
   def _now_ms() -> int:
     return int(time.monotonic_ns() // 1_000_000)
+
+  @staticmethod
+  def _below_floor_das_set_speed_test_enabled() -> bool:
+    return os.path.exists(BELOW_FLOOR_DAS_SET_SPEED_FLAG_FILE)
+
+  @staticmethod
+  def _below_floor_climb_test_enabled() -> bool:
+    return os.path.exists(BELOW_FLOOR_CLIMB_FLAG_FILE)
+
+  def _update_longitudinal_plan_set_speed(self) -> None:
+    if self._long_plan_sock is None:
+      return
+
+    try:
+      msg = messaging.recv_one_or_none(self._long_plan_sock)
+    except Exception:
+      msg = None
+
+    if msg is None:
+      return
+
+    plan = getattr(msg, "longitudinalPlan", None)
+    speeds = getattr(plan, "speeds", None)
+    if speeds is None:
+      return
+
+    try:
+      if len(speeds) <= 0:
+        return
+      speed_ms = float(speeds[-1])
+    except Exception:
+      return
+
+    if not np.isfinite(speed_ms):
+      return
+
+    self._long_plan_set_speed_kph = float(max(0.0, speed_ms) * CV.MS_TO_KPH)
+    self._long_plan_set_speed_frame = int(self.frame)
+
+  def _longitudinal_plan_set_speed_kph(self) -> float | None:
+    self._update_longitudinal_plan_set_speed()
+
+    if not self._below_floor_das_set_speed_test_enabled():
+      return None
+
+    if self._long_plan_set_speed_kph is None:
+      return None
+
+    if (int(self.frame) - int(self._long_plan_set_speed_frame)) > 25:
+      return None
+
+    return float(self._long_plan_set_speed_kph)
+
+  def _below_floor_climb_active(self, CC, CS, autopilot_disabled: bool, accel: float) -> bool:
+    if not self._below_floor_climb_test_enabled():
+      return False
+
+    if not autopilot_disabled:
+      return False
+
+    if self.CP.carFingerprint not in LEGACY_CARS:
+      return False
+
+    op_enabled = bool(
+      getattr(CC, "enabled", False) or
+      getattr(CC, "longActive", False) or
+      getattr(CC, "latActive", False)
+    )
+    if not op_enabled:
+      return False
+
+    cruise_control = getattr(CC, "cruiseControl", None)
+    if bool(getattr(cruise_control, "cancel", False)):
+      return False
+
+    out = getattr(CS, "out", None)
+    if out is None:
+      return False
+
+    if bool(getattr(out, "brakePressed", False)) or bool(getattr(out, "gasPressed", False)):
+      return False
+
+    v_ego_ms = float(getattr(out, "vEgo", 0.0) or 0.0)
+    v_ego_mph = v_ego_ms * CV.MS_TO_MPH
+    if v_ego_mph < BELOW_FLOOR_CLIMB_MIN_MPH:
+      return False
+
+    if v_ego_mph >= BELOW_FLOOR_CLIMB_RELEASE_MPH:
+      return False
+
+    # Do not override an explicit planner/controller decel request.
+    if float(accel) < -0.05:
+      return False
+
+    return True
 
 
   def _read_roadworks_file_float(self, path: str) -> float | None:
@@ -737,13 +845,44 @@ class CarController(CarControllerBase):
       counter = (self.frame // 4) % 8
       long_active = bool(CC.longActive) and (not autopilot_disabled)
 
+      set_speed_kph = self._longitudinal_plan_set_speed_kph() if long_active else None
+
+      below_floor_climb = self._below_floor_climb_active(CC, CS, autopilot_disabled, accel)
+      if below_floor_climb:
+        state = 4
+        long_active = True
+        set_speed_kph = BELOW_FLOOR_CLIMB_TARGET_MPH * CV.MPH_TO_KPH
+        accel = float(np.clip(
+          max(float(accel), BELOW_FLOOR_CLIMB_ACCEL_MS2),
+          0.0,
+          min(float(CarControllerParams.ACCEL_MAX), 0.45),
+        ))
+
+        if (int(self.frame) - int(self._below_floor_climb_last_log_frame)) >= 100:
+          self._below_floor_climb_last_log_frame = int(self.frame)
+          cloudlog.warning(
+            "[XNOR_BELOW_FLOOR_CLIMB] active vEgo=%.2f mph accel=%.3f setSpeed=%.2f kph CC.longActive=%s" %
+            (float(CS.out.vEgo) * CV.MS_TO_MPH, float(accel), float(set_speed_kph), bool(CC.longActive))
+          )
+      elif (
+        set_speed_kph is not None
+        and set_speed_kph < (17.1 * CV.MPH_TO_KPH)
+        and (int(self.frame) - int(self._below_floor_test_last_log_frame)) >= 100
+      ):
+        self._below_floor_test_last_log_frame = int(self.frame)
+        cloudlog.warning(
+          "[XNOR_BELOW_FLOOR_TEST] DAS_setSpeed=%.2f kph vEgo=%.2f mph accel=%.3f" %
+          (float(set_speed_kph), float(CS.out.vEgo) * CV.MS_TO_MPH, float(accel))
+        )
+
       can_sends.append(
         self.tesla_can.create_longitudinal_command(
           state,
           accel,
           counter,
           float(CS.out.vEgo),
-          long_active
+          long_active,
+          set_speed_kph=set_speed_kph,
         )
       )
 
