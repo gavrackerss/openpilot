@@ -16,6 +16,7 @@ v69 ports the later lead re-accel and roundabout-exit release guards from the lo
 v70 makes fresh roadworks caps authoritative and passes the capped target into ACC.
 v71 reduces motorway far-lead stickiness so ACC can resume once the lead is safely beyond the selected follow gap.
 v72 prevents mapd posted-limit release from overriding a fresh lower CarState cap and lowers far-lead re-accel gaps.
+v76 adds native TACC passthrough so Tesla TACC can own low-speed lead follow/stop-go while OP only adjusts the TACC set speed.
 v73 releases stale planner-only curve ownership shortly after first engagement and adds clearer curve-owner source tags.
 v74 releases accelerating-away leads earlier and logs stock OVERRIDE set-speed blocks.
 v75 broadens stale planner-only curve release after low-speed/roundabout exits.
@@ -181,6 +182,12 @@ class _CsaCanReader:
 
 class LongController:
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
+  _NATIVE_TACC_DISABLE_FILE = "/data/xnor_disable_native_tacc_passthrough"
+  _NATIVE_TACC_COOLDOWN_MS = 360
+  _NATIVE_TACC_STANDBY_COOLDOWN_MS = 900
+  _NATIVE_TACC_LOW_SPEED_MARGIN_MS = 1.0 * CV.MPH_TO_MS
+  _NATIVE_TACC_SET_TOLERANCE_MPH = 0.7
+  _NATIVE_TACC_SET_TOLERANCE_KPH = 1.0
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
   _ROADWORKS_CAP_MAX_AGE_MS = 120_000
   _ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS = 8_000
@@ -558,6 +565,8 @@ class LongController:
 
   def __init__(self) -> None:
     self.acc = ACCController()
+    self._native_tacc_last_button_ms = 0
+    self._native_tacc_last_button = int(CruiseButtons.IDLE)
     services = ["longitudinalPlan", "radarState", "controlsState"]
     self._has_mapd = "mapdOut" in SERVICE_LIST
     if self._has_mapd:
@@ -4257,6 +4266,126 @@ class LongController:
       reasons.append("planner_low")
     return reasons
 
+  def _native_tacc_passthrough_active(
+    self,
+    CS,
+    *,
+    stock_state: str,
+    current_set_ms: float,
+    v_ego_ms: float,
+  ) -> bool:
+    """Detect native Tesla TACC low-speed authority.
+
+    This deliberately uses live CAN-derived cruise state instead of the
+    TinklaAutopilotDisabled param. On this port that param is still required for
+    OP steering ownership, while newly-enabled Tesla TACC can still be the best
+    low-speed longitudinal actuator.
+    """
+    if os.path.exists(self._NATIVE_TACC_DISABLE_FILE):
+      return False
+
+    state = str(stock_state or "").upper()
+    if state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
+      return False
+
+    cs_out = getattr(CS, "out", None)
+    brake_pressed = bool(getattr(cs_out, "brakePressed", False)) if cs_out is not None else False
+    if brake_pressed:
+      return False
+
+    stock_enabled = bool(getattr(CS, "stock_cruise_enabled", False))
+    low_ego = float(v_ego_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
+    low_set = 0.1 < float(current_set_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
+
+    return bool(
+      low_set
+      or (stock_enabled and low_ego)
+      or state == "STANDSTILL"
+      or (state == "STANDBY" and low_ego and bool(getattr(CS, "cruiseEnabled", False)))
+    )
+
+
+  def _native_tacc_lead_only_src(self, src: str) -> bool:
+    src_l = str(src or "").lower()
+    has_lead = any(token in src_l for token in (
+      "lead",
+      "planner[lead",
+      "planner[lead_guard",
+      "lead_present",
+      "lead_follow",
+      "lead_low_speed",
+      "lead_constrain",
+    ))
+    has_curve_or_cap = any(token in src_l for token in (
+      "curve",
+      "roundabout",
+      "mapd_cap",
+      "csa",
+      "speed_limit_target",
+      "roadworks_cap",
+    ))
+    return bool(has_lead and not has_curve_or_cap)
+
+
+  def _native_tacc_sync_decision(
+    self,
+    *,
+    now_ms: int,
+    stock_state: str,
+    speed_units: str,
+    desired_ms: float,
+    reference_ms: float,
+    current_set_ms: float,
+    v_ego_ms: float,
+    src: str,
+  ) -> LongDecision:
+    state = str(stock_state or "").upper()
+    uom = str(speed_units or "MPH")
+    ms_to_u = CV.MS_TO_MPH if uom == "MPH" else CV.MS_TO_KPH
+    full_step_u = 5.0
+    half_step_u = 1.0
+    tolerance_u = float(self._NATIVE_TACC_SET_TOLERANCE_MPH if uom == "MPH" else self._NATIVE_TACC_SET_TOLERANCE_KPH)
+
+    target_ms = float(desired_ms)
+    if self._native_tacc_lead_only_src(src):
+      target_ms = max(float(target_ms), float(reference_ms))
+
+    target_u = max(0.0, float(target_ms) * float(ms_to_u))
+    current_u = max(0.0, float(current_set_ms) * float(ms_to_u))
+    offset_u = float(target_u) - float(current_u)
+
+    cooldown_ms = int(self._NATIVE_TACC_STANDBY_COOLDOWN_MS if state == "STANDBY" else self._NATIVE_TACC_COOLDOWN_MS)
+    if (int(now_ms) - int(self._native_tacc_last_button_ms)) < int(cooldown_ms):
+      return LongDecision(None, f"native_tacc_passthrough[cooldown] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
+
+    button: Optional[int] = None
+    if state == "STANDBY":
+      if target_u > max(current_u, float(v_ego_ms) * float(ms_to_u)) + tolerance_u:
+        button = int(CruiseButtons.RES_ACCEL)
+    elif offset_u >= (full_step_u - tolerance_u):
+      button = int(CruiseButtons.RES_ACCEL_2ND)
+    elif offset_u >= tolerance_u:
+      button = int(CruiseButtons.RES_ACCEL)
+    elif offset_u <= -(full_step_u - tolerance_u):
+      button = int(CruiseButtons.DECEL_2ND)
+    elif offset_u <= -tolerance_u:
+      button = int(CruiseButtons.DECEL_SET)
+
+    if button is None:
+      return LongDecision(None, f"native_tacc_passthrough[no-op] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
+
+    self._native_tacc_last_button_ms = int(now_ms)
+    self._native_tacc_last_button = int(button)
+
+    msg = (
+      f"[XNOR_CRUISE_SYNC] src={src}+native_tacc_passthrough uom={uom} "
+      f"tgt={target_u:.1f} cur={current_u:.1f} est={current_u + max(min(offset_u, full_step_u), -full_step_u):.1f} "
+      f"btn={int(button)} reason=native_tacc_setspeed"
+    )
+    self._rate_log(msg)
+    return LongDecision(int(button), msg)
+
+
   def update(self, CS, *, enabled: bool, frame: int, now_ms: Optional[int] = None) -> LongDecision:
     now = _mono_ms() if now_ms is None else int(now_ms)
     now_ns = int(now) * 1_000_000
@@ -4321,6 +4450,13 @@ class LongController:
     cruise_buttons = int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0)
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
+
+    native_tacc_passthrough = self._native_tacc_passthrough_active(
+      CS,
+      stock_state=str(stock_state),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+    )
 
     # Option 1: snapshot CSA from CarState (decoded off the party parser, no 2nd 'can' sock).
     # _csa_curve_target_ms reads self._csa_last_sample, so we mirror the xnor_csa_* attrs into
@@ -4566,7 +4702,8 @@ class LongController:
           src = f"{src}+{lead_context_curve_state}"
       elif self._lead_present and (self._lead_drel < 80.0) and (self._lead_vrel < -0.5):
         lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
-        desired_ms = min(float(base_target_ms), max(float(self.MIN_CRUISE_SPEED_MS), float(lead_speed_ms)))
+        native_floor_ms = 0.0 if bool(native_tacc_passthrough) else float(self.MIN_CRUISE_SPEED_MS)
+        desired_ms = min(float(base_target_ms), max(float(native_floor_ms), float(lead_speed_ms)))
         src = f"{src}+stale_lead"
       else:
         self._reset_curve_hold()
@@ -4803,7 +4940,8 @@ class LongController:
 
       if (not lp_fresh) and self._lead_present and (self._lead_drel < 80.0) and (self._lead_vrel < -0.5):
         lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
-        desired_ms = min(float(desired_ms), max(float(self.MIN_CRUISE_SPEED_MS), float(lead_speed_ms)))
+        native_floor_ms = 0.0 if bool(native_tacc_passthrough) else float(self.MIN_CRUISE_SPEED_MS)
+        desired_ms = min(float(desired_ms), max(float(native_floor_ms), float(lead_speed_ms)))
         src = f"{src}+stale_lead"
 
     current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
@@ -4946,7 +5084,7 @@ class LongController:
       self._curve_limit_guard_active = False
       self._curve_limit_guard_candidate_since_ms = 0
       self._curve_limit_guard_release_candidate_since_ms = 0
-    if self._should_hold_min_cruise_for_curve(
+    if (not bool(native_tacc_passthrough)) and self._should_hold_min_cruise_for_curve(
       now_ns=now_ns,
       desired_ms=float(desired_ms),
       no_lead=bool(no_lead_curve_context),
@@ -4962,6 +5100,18 @@ class LongController:
 
     stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
     brake_pressed = bool(getattr(cs_out, "brakePressed", False))
+
+    if bool(native_tacc_passthrough):
+      return self._native_tacc_sync_decision(
+        now_ms=int(now),
+        stock_state=str(stock_state),
+        speed_units=str(speed_units),
+        desired_ms=float(desired_ms),
+        reference_ms=float(curve_reference_ms),
+        current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms),
+        src=str(src),
+      )
 
     lead_offpath = self._lead_offpath_for_cancel()
     if stock_cruise_enabled and not lead_offpath and self._lead_approach_force_cancel_needed(
