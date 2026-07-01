@@ -17,6 +17,7 @@ v70 makes fresh roadworks caps authoritative and passes the capped target into A
 v71 reduces motorway far-lead stickiness so ACC can resume once the lead is safely beyond the selected follow gap.
 v72 prevents mapd posted-limit release from overriding a fresh lower CarState cap and lowers far-lead re-accel gaps.
 v76 adds native TACC passthrough so Tesla TACC can own low-speed lead follow/stop-go while OP only adjusts the TACC set speed.
+v77 adds a native-TACC handoff window above the old Tesla cruise floor so fake-ACC cancel logic cannot fire before TACC takes over.
 v73 releases stale planner-only curve ownership shortly after first engagement and adds clearer curve-owner source tags.
 v74 releases accelerating-away leads earlier and logs stock OVERRIDE set-speed blocks.
 v75 broadens stale planner-only curve release after low-speed/roundabout exits.
@@ -186,6 +187,12 @@ class LongController:
   _NATIVE_TACC_COOLDOWN_MS = 360
   _NATIVE_TACC_STANDBY_COOLDOWN_MS = 900
   _NATIVE_TACC_LOW_SPEED_MARGIN_MS = 1.0 * CV.MPH_TO_MS
+  _NATIVE_TACC_HANDOFF_WINDOW_MS = 6.0 * CV.MPH_TO_MS
+  _NATIVE_TACC_HANDOFF_MIN_SPEED_MS = 12.0 * CV.MPH_TO_MS
+  _NATIVE_TACC_HANDOFF_MAX_LEAD_GAP_M = 85.0
+  _NATIVE_TACC_HANDOFF_MAX_YREL_M = 2.4
+  _NATIVE_TACC_HANDOFF_DECEL_ATARGET_MS2 = -0.18
+  _NATIVE_TACC_HANDOFF_PLANNER_DROP_MS = 1.0 * CV.MPH_TO_MS
   _NATIVE_TACC_SET_TOLERANCE_MPH = 0.7
   _NATIVE_TACC_SET_TOLERANCE_KPH = 1.0
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
@@ -4305,6 +4312,65 @@ class LongController:
     )
 
 
+  def _native_tacc_handoff_pending_active(
+    self,
+    CS,
+    *,
+    stock_state: str,
+    current_set_ms: float,
+    v_ego_ms: float,
+  ) -> bool:
+    """Pre-arm native TACC before the old cruise-floor cancel path can fire.
+
+    Tesla TACC can continue stop/go below the old basic-cruise floor, but the
+    fake-ACC path can cancel around 17-22 mph before passthrough is detected.
+    This handoff state is intentionally limited to low-speed traffic/lead
+    context so clear-road basic cruise behavior remains unchanged.
+    """
+    if os.path.exists(self._NATIVE_TACC_DISABLE_FILE):
+      return False
+
+    state = str(stock_state or "").upper()
+    if state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
+      return False
+
+    cs_out = getattr(CS, "out", None)
+    brake_pressed = bool(getattr(cs_out, "brakePressed", False)) if cs_out is not None else False
+    gas_pressed = bool(getattr(cs_out, "gasPressed", False)) if cs_out is not None else False
+    if brake_pressed or gas_pressed:
+      return False
+
+    stock_enabled = bool(getattr(CS, "stock_cruise_enabled", False) or getattr(CS, "cruiseEnabled", False))
+    if not stock_enabled and state not in ("OVERRIDE", "STANDSTILL"):
+      return False
+
+    near_floor_upper_ms = float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)
+    if float(v_ego_ms) < float(self._NATIVE_TACC_HANDOFF_MIN_SPEED_MS) or float(v_ego_ms) > float(near_floor_upper_ms):
+      return False
+
+    live_lead = bool(
+      bool(self._lead_present)
+      and float(self._lead_drel) > 0.0
+      and float(self._lead_drel) <= float(self._NATIVE_TACC_HANDOFF_MAX_LEAD_GAP_M)
+      and abs(float(self._lead_yrel)) <= float(self._NATIVE_TACC_HANDOFF_MAX_YREL_M)
+    )
+    planner_lead = bool(self._lp_has_lead and str(self._lp_source or "") in ("cruise", "e2e", "lead0", "lead1"))
+    low_set = 0.1 < float(current_set_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS))
+    planner_decel = bool(
+      float(self._lp_a_target) <= float(self._NATIVE_TACC_HANDOFF_DECEL_ATARGET_MS2)
+      or (
+        self._lp_target_last_ms is not None
+        and float(self._lp_target_last_ms) < (float(current_set_ms) - float(self._NATIVE_TACC_HANDOFF_PLANNER_DROP_MS))
+      )
+    )
+
+    return bool(
+      state == "STANDSTILL"
+      or (low_set and (live_lead or planner_lead))
+      or ((live_lead or planner_lead) and planner_decel)
+    )
+
+
   def _native_tacc_lead_only_src(self, src: str) -> bool:
     src_l = str(src or "").lower()
     has_lead = any(token in src_l for token in (
@@ -4338,6 +4404,7 @@ class LongController:
     current_set_ms: float,
     v_ego_ms: float,
     src: str,
+    mode_tag: str = "native_tacc_passthrough",
   ) -> LongDecision:
     state = str(stock_state or "").upper()
     uom = str(speed_units or "MPH")
@@ -4356,7 +4423,7 @@ class LongController:
 
     cooldown_ms = int(self._NATIVE_TACC_STANDBY_COOLDOWN_MS if state == "STANDBY" else self._NATIVE_TACC_COOLDOWN_MS)
     if (int(now_ms) - int(self._native_tacc_last_button_ms)) < int(cooldown_ms):
-      return LongDecision(None, f"native_tacc_passthrough[cooldown] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
+      return LongDecision(None, f"{mode_tag}[cooldown] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
 
     button: Optional[int] = None
     if state == "STANDBY":
@@ -4372,15 +4439,15 @@ class LongController:
       button = int(CruiseButtons.DECEL_SET)
 
     if button is None:
-      return LongDecision(None, f"native_tacc_passthrough[no-op] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
+      return LongDecision(None, f"{mode_tag}[no-op] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
 
     self._native_tacc_last_button_ms = int(now_ms)
     self._native_tacc_last_button = int(button)
 
     msg = (
-      f"[XNOR_CRUISE_SYNC] src={src}+native_tacc_passthrough uom={uom} "
+      f"[XNOR_CRUISE_SYNC] src={src}+{mode_tag} uom={uom} "
       f"tgt={target_u:.1f} cur={current_u:.1f} est={current_u + max(min(offset_u, full_step_u), -full_step_u):.1f} "
-      f"btn={int(button)} reason=native_tacc_setspeed"
+      f"btn={int(button)} reason={mode_tag}_setspeed"
     )
     self._rate_log(msg)
     return LongDecision(int(button), msg)
@@ -4457,6 +4524,13 @@ class LongController:
       current_set_ms=float(current_set_ms),
       v_ego_ms=float(v_ego_ms),
     )
+    native_tacc_handoff_pending = (not bool(native_tacc_passthrough)) and self._native_tacc_handoff_pending_active(
+      CS,
+      stock_state=str(stock_state),
+      current_set_ms=float(current_set_ms),
+      v_ego_ms=float(v_ego_ms),
+    )
+    native_tacc_mode = bool(native_tacc_passthrough or native_tacc_handoff_pending)
 
     # Option 1: snapshot CSA from CarState (decoded off the party parser, no 2nd 'can' sock).
     # _csa_curve_target_ms reads self._csa_last_sample, so we mirror the xnor_csa_* attrs into
@@ -4702,7 +4776,7 @@ class LongController:
           src = f"{src}+{lead_context_curve_state}"
       elif self._lead_present and (self._lead_drel < 80.0) and (self._lead_vrel < -0.5):
         lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
-        native_floor_ms = 0.0 if bool(native_tacc_passthrough) else float(self.MIN_CRUISE_SPEED_MS)
+        native_floor_ms = 0.0 if bool(native_tacc_mode) else float(self.MIN_CRUISE_SPEED_MS)
         desired_ms = min(float(base_target_ms), max(float(native_floor_ms), float(lead_speed_ms)))
         src = f"{src}+stale_lead"
       else:
@@ -4940,7 +5014,7 @@ class LongController:
 
       if (not lp_fresh) and self._lead_present and (self._lead_drel < 80.0) and (self._lead_vrel < -0.5):
         lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
-        native_floor_ms = 0.0 if bool(native_tacc_passthrough) else float(self.MIN_CRUISE_SPEED_MS)
+        native_floor_ms = 0.0 if bool(native_tacc_mode) else float(self.MIN_CRUISE_SPEED_MS)
         desired_ms = min(float(desired_ms), max(float(native_floor_ms), float(lead_speed_ms)))
         src = f"{src}+stale_lead"
 
@@ -5071,20 +5145,25 @@ class LongController:
       cs_out=cs_out,
     )
 
-    desired_ms, lead_low_speed_blocked = self._low_speed_lead_block_target(
-      now_ms=int(now),
-      desired_ms=float(desired_ms),
-      current_set_ms=float(current_set_ms),
-      v_ego_ms=float(v_ego_ms),
-    )
-    if lead_low_speed_blocked:
-      src = f"{src}+lead_low_speed_block"
+    if bool(native_tacc_mode):
+      lead_low_speed_blocked = False
+      if "lead_low_speed" in str(src):
+        src = f"{src}+native_tacc_lead_low_speed_block_suppressed"
+    else:
+      desired_ms, lead_low_speed_blocked = self._low_speed_lead_block_target(
+        now_ms=int(now),
+        desired_ms=float(desired_ms),
+        current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms),
+      )
+      if lead_low_speed_blocked:
+        src = f"{src}+lead_low_speed_block"
 
     if not no_lead_curve_context:
       self._curve_limit_guard_active = False
       self._curve_limit_guard_candidate_since_ms = 0
       self._curve_limit_guard_release_candidate_since_ms = 0
-    if (not bool(native_tacc_passthrough)) and self._should_hold_min_cruise_for_curve(
+    if (not bool(native_tacc_mode)) and self._should_hold_min_cruise_for_curve(
       now_ns=now_ns,
       desired_ms=float(desired_ms),
       no_lead=bool(no_lead_curve_context),
@@ -5101,7 +5180,8 @@ class LongController:
     stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
     brake_pressed = bool(getattr(cs_out, "brakePressed", False))
 
-    if bool(native_tacc_passthrough):
+    if bool(native_tacc_mode):
+      mode_tag = "native_tacc_passthrough" if bool(native_tacc_passthrough) else "native_tacc_handoff_pending"
       return self._native_tacc_sync_decision(
         now_ms=int(now),
         stock_state=str(stock_state),
@@ -5111,6 +5191,7 @@ class LongController:
         current_set_ms=float(current_set_ms),
         v_ego_ms=float(v_ego_ms),
         src=str(src),
+        mode_tag=str(mode_tag),
       )
 
     lead_offpath = self._lead_offpath_for_cancel()
