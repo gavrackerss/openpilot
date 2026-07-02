@@ -189,6 +189,8 @@ class LongController:
   _NATIVE_TACC_DISABLE_FILE = "/data/xnor_disable_native_tacc_passthrough"
   _NATIVE_TACC_BOOTSTRAP_ENABLE_FILE = "/data/xnor_enable_native_tacc_setspeed_bootstrap"
   _NATIVE_TACC_BOOTSTRAP_DISABLE_FILE = "/data/xnor_disable_native_tacc_setspeed_bootstrap"
+  _ZERO_FLOOR_SET_SPEED_ENABLE_FILE = "/data/xnor_enable_zero_floor_setspeed"
+  _ZERO_FLOOR_SET_SPEED_DISABLE_FILE = "/data/xnor_disable_zero_floor_setspeed"
   _NATIVE_TACC_COOLDOWN_MS = 360
   _NATIVE_TACC_STANDBY_COOLDOWN_MS = 900
   _NATIVE_TACC_BOOTSTRAP_COOLDOWN_MS = 1800
@@ -584,6 +586,7 @@ class LongController:
     self._native_tacc_last_button_ms = 0
     self._native_tacc_last_button = int(CruiseButtons.IDLE)
     self._native_tacc_latched_until_ms = 0
+    self._zero_floor_setspeed_active = False
     services = ["longitudinalPlan", "radarState", "controlsState"]
     self._has_mapd = "mapdOut" in SERVICE_LIST
     if self._has_mapd:
@@ -1886,7 +1889,7 @@ class LongController:
         ],
       )
 
-    guarded_target_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(curve_target_ms) - float(extra_drop_ms))
+    guarded_target_ms = max(float(self._effective_set_speed_floor_ms()), float(curve_target_ms) - float(extra_drop_ms))
     return float(guarded_target_ms), True, str(guard_reason)
 
   @staticmethod
@@ -2317,7 +2320,7 @@ class LongController:
       return None, ""
 
     preview_cap_ms = max(
-      float(self.MIN_CRUISE_SPEED_MS),
+      float(self._effective_set_speed_floor_ms()),
       min(
         raw_low_ms + float(self._LEAD_CONTEXT_CURVE_CAP_TARGET_OFFSET_MS),
         reference_ms - min(
@@ -2460,7 +2463,7 @@ class LongController:
         return None, ""
 
       shallow_cap_ms = max(
-        float(self.MIN_CRUISE_SPEED_MS),
+        float(self._effective_set_speed_floor_ms()),
         min(
           float(raw_map_ms) + float(self._MAP_ONLY_EARLY_ENTRY_TARGET_OFFSET_MS),
           reference_ms - min(
@@ -2491,7 +2494,7 @@ class LongController:
       return None, ""
 
     cap_ms = max(
-      float(self.MIN_CRUISE_SPEED_MS),
+      float(self._effective_set_speed_floor_ms()),
       min(
         float(curve_specific_ms) + float(self._CURVE_FORCE_ENTRY_TARGET_OFFSET_MS),
         reference_ms - min(float(self._CURVE_FORCE_ENTRY_PREVIEW_DROP_MS), max(0.0, reference_ms - curve_specific_ms)),
@@ -2506,7 +2509,7 @@ class LongController:
 
     if bool(self._lat_limit_saturated) or int(now_ms) <= int(self._curve_steer_limit_hold_until_ms):
       self._curve_steer_limit_hold_until_ms = int(now_ms) + int(self._CURVE_STEER_LIMIT_HOLD_MS)
-      cap_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(cap_ms) - float(self._CURVE_STEER_LIMIT_HOLD_DROP_MS))
+      cap_ms = max(float(self._effective_set_speed_floor_ms()), float(cap_ms) - float(self._CURVE_STEER_LIMIT_HOLD_DROP_MS))
       state = f"{state}+curve_steer_limit_hold"
 
     if float(cap_ms) >= (desired_ms - (0.25 * CV.MPH_TO_MS)) and not steer_busy:
@@ -3491,7 +3494,7 @@ class LongController:
     if not (planner_curve_active or map_supports or vision_supports or csa_supports or roundabout_supports):
       if bool(self._lat_limit_saturated) and float(v_ego_ms) > float(self._LAT_SAT_HARD_MIN_SPEED_MS):
         lat_target_ms = max(
-          float(self.MIN_CRUISE_SPEED_MS),
+          float(self._effective_set_speed_floor_ms()),
           min(
             float(self._LAT_SAT_HARD_CAP_MS),
             float(v_ego_ms) - float(self._LAT_SAT_HARD_DROP_MS),
@@ -3613,7 +3616,7 @@ class LongController:
         comfort_bias_ms += float(self._CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS)
       target_ms = min(float(reference_ms), float(target_ms) + float(comfort_bias_ms))
 
-    target_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(target_ms))
+    target_ms = max(float(self._effective_set_speed_floor_ms()), float(target_ms))
 
     if float(target_ms) > (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS)):
       return None, "curve_too_small"
@@ -3646,7 +3649,7 @@ class LongController:
     if bool(self._roundabout_active):
       return float(desired_ms), str(src), False
 
-    reference_ms = max(float(reference_ms), float(current_set_ms), float(v_ego_ms), float(self.MIN_CRUISE_SPEED_MS))
+    reference_ms = max(float(reference_ms), float(current_set_ms), float(v_ego_ms), float(self._effective_set_speed_floor_ms()))
     if float(desired_ms) >= (float(reference_ms) - float(self._ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS)):
       return float(desired_ms), str(src), False
 
@@ -4113,7 +4116,7 @@ class LongController:
       previous_update_ms = int(self._arbitration_last_update_ms)
       previous_curve_ms = float(self._arbitration_curve_target_ms) if float(self._arbitration_curve_target_ms) > 0.1 else float(out_ms)
       self._set_arbitration_state(state=state, now_ms=int(now_ms))
-      target_ms = max(float(self.MIN_CRUISE_SPEED_MS), float(curve_candidate_ms))
+      target_ms = max(float(self._effective_set_speed_floor_ms()), float(curve_candidate_ms))
       hard_entry_context = bool("hard_entry" in out_src or "curve_pre_entry(hard)" in out_src)
       if bool(hard_entry_context) and float(v_ego_ms) >= float(self._ROUNDABOUT_HARD_ENTRY_MIN_EGO_MS):
         capped_target_ms = min(float(target_ms), float(self._ROUNDABOUT_HARD_ENTRY_CAP_MS))
@@ -4129,7 +4132,7 @@ class LongController:
       )
       if bool(lat_sat_context) and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS):
         capped_target_ms = max(
-          float(self.MIN_CRUISE_SPEED_MS),
+          float(self._effective_set_speed_floor_ms()),
           min(
             float(target_ms),
             float(self._LAT_SAT_HARD_CAP_MS),
@@ -4295,6 +4298,14 @@ class LongController:
     if os.path.exists(self._NATIVE_TACC_BOOTSTRAP_DISABLE_FILE):
       return False
     return os.path.exists(self._NATIVE_TACC_BOOTSTRAP_ENABLE_FILE)
+
+  def _zero_floor_setspeed_enabled(self) -> bool:
+    if os.path.exists(self._ZERO_FLOOR_SET_SPEED_DISABLE_FILE):
+      return False
+    return os.path.exists(self._ZERO_FLOOR_SET_SPEED_ENABLE_FILE)
+
+  def _effective_set_speed_floor_ms(self) -> float:
+    return 0.0 if bool(getattr(self, "_zero_floor_setspeed_active", False)) else float(self.MIN_CRUISE_SPEED_MS)
 
   def _native_tacc_mark_latch_if_active(self, *, now_ms: int, stock_state: str, current_set_ms: float, CS) -> None:
     state = str(stock_state or "").upper()
@@ -4622,6 +4633,7 @@ class LongController:
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
 
     native_tacc_feature_enabled = self._native_tacc_feature_enabled()
+    zero_floor_setspeed_enabled = bool(self._zero_floor_setspeed_enabled())
     if bool(native_tacc_feature_enabled):
       self._native_tacc_mark_latch_if_active(
         now_ms=int(now),
@@ -4667,6 +4679,8 @@ class LongController:
       )
     )
     native_tacc_mode = bool(native_tacc_passthrough or native_tacc_handoff_pending or native_tacc_setspeed_bootstrap or native_tacc_wait_for_latch)
+    self._zero_floor_setspeed_active = bool(native_tacc_mode or zero_floor_setspeed_enabled)
+    set_speed_floor_ms = float(self._effective_set_speed_floor_ms())
 
     # Option 1: snapshot CSA from CarState (decoded off the party parser, no 2nd 'can' sock).
     # _csa_curve_target_ms reads self._csa_last_sample, so we mirror the xnor_csa_* attrs into
@@ -4717,8 +4731,9 @@ class LongController:
         or (int(self._stable_plan_samples) < 2)
         or (float(planner_last_ms) <= 0.1)
         or (
-          float(v_ego_ms) > float(self.MIN_CRUISE_SPEED_MS)
-          and float(planner_last_ms) < max(float(self.MIN_CRUISE_SPEED_MS) * 0.90, float(current_set_ms) - (4.0 * CV.KPH_TO_MS))
+          float(set_speed_floor_ms) > 0.1
+          and float(v_ego_ms) > float(set_speed_floor_ms)
+          and float(planner_last_ms) < max(float(set_speed_floor_ms) * 0.90, float(current_set_ms) - (4.0 * CV.KPH_TO_MS))
         )
       )
     )
@@ -4908,12 +4923,11 @@ class LongController:
           current_angle_deg=abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0)),
         )
         if lead_context_curve_cap_ms is not None and float(lead_context_curve_cap_ms) < (float(desired_ms) - (0.25 * CV.MPH_TO_MS)):
-          desired_ms = max(float(self.MIN_CRUISE_SPEED_MS), min(float(desired_ms), float(lead_context_curve_cap_ms)))
+          desired_ms = max(float(set_speed_floor_ms), min(float(desired_ms), float(lead_context_curve_cap_ms)))
           src = f"{src}+{lead_context_curve_state}"
       elif self._lead_present and (self._lead_drel < 80.0) and (self._lead_vrel < -0.5):
         lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
-        native_floor_ms = 0.0 if bool(native_tacc_mode) else float(self.MIN_CRUISE_SPEED_MS)
-        desired_ms = min(float(base_target_ms), max(float(native_floor_ms), float(lead_speed_ms)))
+        desired_ms = min(float(base_target_ms), max(float(set_speed_floor_ms), float(lead_speed_ms)))
         src = f"{src}+stale_lead"
       else:
         self._reset_curve_hold()
@@ -5040,10 +5054,10 @@ class LongController:
 
           if curve_owner_parts:
             curve_state = f"{curve_state}|{'+'.join(curve_owner_parts)}"
-          if float(curve_target_ms) < float(self.MIN_CRUISE_SPEED_MS):
-            hold_floor_ms = float(self.MIN_CRUISE_SPEED_MS) - float(self._CURVE_MIN_CRUISE_HOLD_MARGIN_MS)
+          if float(set_speed_floor_ms) > 0.1 and float(curve_target_ms) < float(set_speed_floor_ms):
+            hold_floor_ms = float(set_speed_floor_ms) - float(self._CURVE_MIN_CRUISE_HOLD_MARGIN_MS)
             if float(curve_target_ms) >= float(hold_floor_ms):
-              curve_target_ms = float(self.MIN_CRUISE_SPEED_MS)
+              curve_target_ms = float(set_speed_floor_ms)
               curve_state = f"{curve_state}+min_hold"
 
           near_resume_tolerance_ms = max(
@@ -5150,8 +5164,7 @@ class LongController:
 
       if (not lp_fresh) and self._lead_present and (self._lead_drel < 80.0) and (self._lead_vrel < -0.5):
         lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
-        native_floor_ms = 0.0 if bool(native_tacc_mode) else float(self.MIN_CRUISE_SPEED_MS)
-        desired_ms = min(float(desired_ms), max(float(native_floor_ms), float(lead_speed_ms)))
+        desired_ms = min(float(desired_ms), max(float(set_speed_floor_ms), float(lead_speed_ms)))
         src = f"{src}+stale_lead"
 
     current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
@@ -5299,12 +5312,12 @@ class LongController:
       self._curve_limit_guard_active = False
       self._curve_limit_guard_candidate_since_ms = 0
       self._curve_limit_guard_release_candidate_since_ms = 0
-    if (not bool(native_tacc_mode)) and self._should_hold_min_cruise_for_curve(
+    if (not bool(self._zero_floor_setspeed_active)) and self._should_hold_min_cruise_for_curve(
       now_ns=now_ns,
       desired_ms=float(desired_ms),
       no_lead=bool(no_lead_curve_context),
     ):
-      desired_ms = max(float(desired_ms), float(self.MIN_CRUISE_SPEED_MS))
+      desired_ms = max(float(desired_ms), float(set_speed_floor_ms))
       if "min_hold" not in src:
         src = f"{src}+min_hold[curve_floor]"
 
@@ -5436,6 +5449,9 @@ class LongController:
     ):
       src = f"{src}+stock_override_set_blocked"
 
+    if bool(zero_floor_setspeed_enabled) and not bool(native_tacc_mode) and "zero_floor_setspeed" not in str(src):
+      src = f"{src}+zero_floor_setspeed"
+
     decision: AccDecision = self.acc.update(
       now_ms=now,
       enabled=True,
@@ -5449,6 +5465,7 @@ class LongController:
       brake_pressed=brake_pressed,
       speed_limit_target_ms=acc_speed_limit_target_ms,
       set_speed_limit_active=bool(acc_set_speed_limit_active),
+      zero_floor_setspeed=bool(zero_floor_setspeed_enabled and not bool(native_tacc_mode)),
     )
 
     if decision.button is None or int(decision.button) == int(CruiseButtons.IDLE):

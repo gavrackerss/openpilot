@@ -17,10 +17,12 @@ The acceleration side is tuned to feel more natural:
 - v66 uses time-gap/opening-rate lead release so ACC does not stay muted behind a pulling-away lead
 - v67 aligns ACC lead relevance with LONG's softer far-lead release
 v68 blocks close-lead acceleration pulses that caused speed hunting
+v80 adds an optional zero-floor set-speed test path via /data/xnor_enable_zero_floor_setspeed
 """
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -58,6 +60,8 @@ class AccDecision:
 
 class ACCController:
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
+  _ZERO_FLOOR_SET_SPEED_ENABLE_FILE = "/data/xnor_enable_zero_floor_setspeed"
+  _ZERO_FLOOR_SET_SPEED_DISABLE_FILE = "/data/xnor_disable_zero_floor_setspeed"
 
   _HUMAN_COOLDOWN_MS = 3000
   _AUTO_COOLDOWN_MS = 300
@@ -145,6 +149,17 @@ class ACCController:
     self.acc_speed_kph += float(speed_change_map.get(int(button), 0.0))
     self.acc_speed_kph = min(float(self.acc_speed_kph), 170.0)
     self.acc_speed_kph = max(float(self.acc_speed_kph), 0.0)
+
+
+  def _zero_floor_setspeed_enabled(self, *, override: bool = False) -> bool:
+    if bool(override):
+      return True
+    if os.path.exists(self._ZERO_FLOOR_SET_SPEED_DISABLE_FILE):
+      return False
+    return os.path.exists(self._ZERO_FLOOR_SET_SPEED_ENABLE_FILE)
+
+  def _effective_min_cruise_speed_ms(self, *, zero_floor_setspeed: bool = False) -> float:
+    return 0.0 if self._zero_floor_setspeed_enabled(override=bool(zero_floor_setspeed)) else float(self.MIN_CRUISE_SPEED_MS)
 
 
   def _recent_auto_button_direction(self, *, now_ms: int) -> int:
@@ -607,10 +622,12 @@ class ACCController:
     brake_pressed: bool = False,
     speed_limit_target_ms: Optional[float] = None,
     set_speed_limit_active: bool = False,
+    zero_floor_setspeed: bool = False,
   ) -> AccDecision:
     self.note_human_buttons(cruise_buttons, speed_units=speed_units, now_ms=now_ms)
     lead = self._poll_lead(now_ms=now_ms)
     self._note_lead_transition(lead=lead, now_ms=now_ms)
+    min_cruise_speed_ms = float(self._effective_min_cruise_speed_ms(zero_floor_setspeed=bool(zero_floor_setspeed)))
 
     self.prev_speed_limit_kph = float(self.speed_limit_kph)
     if bool(set_speed_limit_active) and speed_limit_target_ms is not None and float(speed_limit_target_ms) > 0.0:
@@ -737,7 +754,7 @@ class ACCController:
     if stock_state == "STANDBY":
       can_autoengage = (
         float(desired_speed_ms) >= float(v_ego_ms) - float(self._AUTOENGAGE_SPEED_WINDOW_MS)
-        and float(desired_speed_ms) >= (float(self.MIN_CRUISE_SPEED_MS) + float(self._AUTOENGAGE_MIN_TARGET_MARGIN_MS))
+        and float(desired_speed_ms) >= (float(min_cruise_speed_ms) + float(self._AUTOENGAGE_MIN_TARGET_MARGIN_MS))
         and self._no_human_action_for(now_ms=now_ms, milliseconds=self._HUMAN_COOLDOWN_MS)
         and self._no_automated_action_for(now_ms=now_ms, milliseconds=self._AUTO_COOLDOWN_MS)
         and self._should_autoengage_cc(now_ms=now_ms, v_ego_ms=v_ego_ms, brake_pressed=brake_pressed, lead=lead)
@@ -785,17 +802,18 @@ class ACCController:
     # Keep emergency/below-min handling narrow. On no-lead curve/map targets that dip a
     # little below Tesla's minimum set-speed, prefer holding MIN instead of dropping ACC.
     fast_decel_required = self._fast_decel_required(v_ego_ms=v_ego_ms, lead=lead)
-    min_cruise_kph = float(self.MIN_CRUISE_SPEED_MS) * CV.MS_TO_KPH
+    min_cruise_kph = float(min_cruise_speed_ms) * CV.MS_TO_KPH
 
     min_hold_active = (
       (not fast_decel_required)
-      and float(desired_speed_ms) < float(self.MIN_CRUISE_SPEED_MS)
-      and float(desired_speed_ms) >= (float(self.MIN_CRUISE_SPEED_MS) - float(self._MIN_CRUISE_HOLD_MARGIN_MS))
-      and float(v_ego_ms) >= (float(self.MIN_CRUISE_SPEED_MS) - float(self._MIN_CRUISE_CANCEL_VEGO_MARGIN_MS))
-      and float(current_set_speed_ms) >= (float(self.MIN_CRUISE_SPEED_MS) - (0.5 * CV.MPH_TO_MS))
+      and float(min_cruise_speed_ms) > 0.1
+      and float(desired_speed_ms) < float(min_cruise_speed_ms)
+      and float(desired_speed_ms) >= (float(min_cruise_speed_ms) - float(self._MIN_CRUISE_HOLD_MARGIN_MS))
+      and float(v_ego_ms) >= (float(min_cruise_speed_ms) - float(self._MIN_CRUISE_CANCEL_VEGO_MARGIN_MS))
+      and float(current_set_speed_ms) >= (float(min_cruise_speed_ms) - (0.5 * CV.MPH_TO_MS))
     )
 
-    target_speed_ms = max(float(desired_speed_ms), float(self.MIN_CRUISE_SPEED_MS)) if min_hold_active else float(desired_speed_ms)
+    target_speed_ms = max(float(desired_speed_ms), float(min_cruise_speed_ms)) if min_hold_active else float(desired_speed_ms)
     target_kph = float(target_speed_ms) * CV.MS_TO_KPH
 
     # A manual stalk-down hold is meant to be a real ceiling override until the driver
@@ -818,7 +836,7 @@ class ACCController:
 
     button: Optional[int] = None
 
-    if float(desired_speed_ms) < float(self.MIN_CRUISE_SPEED_MS) and (not min_hold_active):
+    if float(min_cruise_speed_ms) > 0.1 and float(desired_speed_ms) < float(min_cruise_speed_ms) and (not min_hold_active):
       button = int(CruiseButtons.CANCEL)
     elif fast_decel_required and self._seconds_to_collision(lead=lead) < 2.5 and float(current_kph) > 0.0:
       button = int(CruiseButtons.CANCEL)
@@ -828,7 +846,7 @@ class ACCController:
       button = int(CruiseButtons.DECEL_2ND)
     elif speed_offset_kph < (-0.9 * float(half_kph)) and current_kph > 0.0:
       button = int(CruiseButtons.DECEL_SET)
-    elif float(v_ego_ms) > float(self.MIN_CRUISE_SPEED_MS):
+    elif float(v_ego_ms) > float(min_cruise_speed_ms):
       button = self._choose_accel_button(
         now_ms=now_ms,
         speed_units=speed_units,
@@ -839,7 +857,7 @@ class ACCController:
       )
 
     if button is None:
-      reason = "no-op[min_hold]" if min_hold_active else "no-op"
+      reason = "no-op[min_hold]" if min_hold_active else ("no-op[zero_floor_setspeed]" if bool(zero_floor_setspeed) else "no-op")
       return AccDecision(None, reason, effective_target_kph, current_kph, current_kph)
 
     if button is not None and not CruiseButtons.is_accel(button):
