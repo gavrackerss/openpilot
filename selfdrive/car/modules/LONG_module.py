@@ -19,6 +19,7 @@ v72 prevents mapd posted-limit release from overriding a fresh lower CarState ca
 v76 adds native TACC passthrough so Tesla TACC can own low-speed lead follow/stop-go while OP only adjusts the TACC set speed.
 v77 adds a native-TACC handoff window above the old Tesla cruise floor so fake-ACC cancel logic cannot fire before TACC takes over.
 v78 adds param-gated native-TACC dynamic arbitration plus a low-speed TACC set-speed bootstrap before latch.
+v79 replaces strict Params keys with /data file toggles for native TACC passthrough/bootstrap.
 v73 releases stale planner-only curve ownership shortly after first engagement and adds clearer curve-owner source tags.
 v74 releases accelerating-away leads earlier and logs stock OVERRIDE set-speed blocks.
 v75 broadens stale planner-only curve release after low-speed/roundabout exits.
@@ -50,7 +51,6 @@ from typing import Optional
 
 from cereal import messaging
 from cereal.services import SERVICE_LIST
-from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.tesla.values import CruiseButtons
@@ -185,9 +185,10 @@ class _CsaCanReader:
 
 class LongController:
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
+  _NATIVE_TACC_ENABLE_FILE = "/data/xnor_enable_native_tacc_passthrough"
   _NATIVE_TACC_DISABLE_FILE = "/data/xnor_disable_native_tacc_passthrough"
-  _NATIVE_TACC_ENABLE_PARAM = "TinklaNativeTaccPassthrough"
-  _NATIVE_TACC_BOOTSTRAP_PARAM = "TinklaNativeTaccSetSpeedBootstrap"
+  _NATIVE_TACC_BOOTSTRAP_ENABLE_FILE = "/data/xnor_enable_native_tacc_setspeed_bootstrap"
+  _NATIVE_TACC_BOOTSTRAP_DISABLE_FILE = "/data/xnor_disable_native_tacc_setspeed_bootstrap"
   _NATIVE_TACC_COOLDOWN_MS = 360
   _NATIVE_TACC_STANDBY_COOLDOWN_MS = 900
   _NATIVE_TACC_BOOTSTRAP_COOLDOWN_MS = 1800
@@ -580,7 +581,6 @@ class LongController:
 
   def __init__(self) -> None:
     self.acc = ACCController()
-    self._params = Params()
     self._native_tacc_last_button_ms = 0
     self._native_tacc_last_button = int(CruiseButtons.IDLE)
     self._native_tacc_latched_until_ms = 0
@@ -4284,35 +4284,17 @@ class LongController:
     return reasons
 
 
-  @staticmethod
-  def _decode_param_bool(raw, default: bool = False) -> bool:
-    if raw is None:
-      return bool(default)
-    try:
-      if isinstance(raw, bytes):
-        raw_s = raw.decode("utf-8", errors="ignore")
-      else:
-        raw_s = str(raw)
-      return raw_s.strip().lower() in ("1", "true", "t", "yes", "y", "on")
-    except Exception:
-      return bool(default)
-
-  def _param_bool(self, name: str, default: bool = False) -> bool:
-    try:
-      return self._decode_param_bool(self._params.get(str(name)), default=bool(default))
-    except Exception:
-      return bool(default)
-
   def _native_tacc_feature_enabled(self) -> bool:
     if os.path.exists(self._NATIVE_TACC_DISABLE_FILE):
       return False
-    # Default-on preserves the previous v76/v77 behavior; set the param to false
-    # to disable without code changes.
-    return self._param_bool(self._NATIVE_TACC_ENABLE_PARAM, default=True)
+    return os.path.exists(self._NATIVE_TACC_ENABLE_FILE)
 
   def _native_tacc_bootstrap_enabled(self) -> bool:
-    # Only meaningful when native TACC passthrough itself is enabled.
-    return self._native_tacc_feature_enabled() and self._param_bool(self._NATIVE_TACC_BOOTSTRAP_PARAM, default=True)
+    if not self._native_tacc_feature_enabled():
+      return False
+    if os.path.exists(self._NATIVE_TACC_BOOTSTRAP_DISABLE_FILE):
+      return False
+    return os.path.exists(self._NATIVE_TACC_BOOTSTRAP_ENABLE_FILE)
 
   def _native_tacc_mark_latch_if_active(self, *, now_ms: int, stock_state: str, current_set_ms: float, CS) -> None:
     state = str(stock_state or "").upper()
