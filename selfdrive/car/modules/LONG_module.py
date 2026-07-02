@@ -18,6 +18,7 @@ v71 reduces motorway far-lead stickiness so ACC can resume once the lead is safe
 v72 prevents mapd posted-limit release from overriding a fresh lower CarState cap and lowers far-lead re-accel gaps.
 v76 adds native TACC passthrough so Tesla TACC can own low-speed lead follow/stop-go while OP only adjusts the TACC set speed.
 v77 adds a native-TACC handoff window above the old Tesla cruise floor so fake-ACC cancel logic cannot fire before TACC takes over.
+v78 adds param-gated native-TACC dynamic arbitration plus a low-speed TACC set-speed bootstrap before latch.
 v73 releases stale planner-only curve ownership shortly after first engagement and adds clearer curve-owner source tags.
 v74 releases accelerating-away leads earlier and logs stock OVERRIDE set-speed blocks.
 v75 broadens stale planner-only curve release after low-speed/roundabout exits.
@@ -49,6 +50,7 @@ from typing import Optional
 
 from cereal import messaging
 from cereal.services import SERVICE_LIST
+from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.tesla.values import CruiseButtons
@@ -184,8 +186,12 @@ class _CsaCanReader:
 class LongController:
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
   _NATIVE_TACC_DISABLE_FILE = "/data/xnor_disable_native_tacc_passthrough"
+  _NATIVE_TACC_ENABLE_PARAM = "TinklaNativeTaccPassthrough"
+  _NATIVE_TACC_BOOTSTRAP_PARAM = "TinklaNativeTaccSetSpeedBootstrap"
   _NATIVE_TACC_COOLDOWN_MS = 360
   _NATIVE_TACC_STANDBY_COOLDOWN_MS = 900
+  _NATIVE_TACC_BOOTSTRAP_COOLDOWN_MS = 1800
+  _NATIVE_TACC_STICKY_LATCH_MS = 2200
   _NATIVE_TACC_LOW_SPEED_MARGIN_MS = 1.0 * CV.MPH_TO_MS
   _NATIVE_TACC_HANDOFF_WINDOW_MS = 6.0 * CV.MPH_TO_MS
   _NATIVE_TACC_HANDOFF_MIN_SPEED_MS = 12.0 * CV.MPH_TO_MS
@@ -193,6 +199,8 @@ class LongController:
   _NATIVE_TACC_HANDOFF_MAX_YREL_M = 2.4
   _NATIVE_TACC_HANDOFF_DECEL_ATARGET_MS2 = -0.18
   _NATIVE_TACC_HANDOFF_PLANNER_DROP_MS = 1.0 * CV.MPH_TO_MS
+  _NATIVE_TACC_BOOTSTRAP_MAX_TARGET_MS = 25.0 * CV.MPH_TO_MS
+  _NATIVE_TACC_BOOTSTRAP_MIN_TARGET_MS = 8.0 * CV.MPH_TO_MS
   _NATIVE_TACC_SET_TOLERANCE_MPH = 0.7
   _NATIVE_TACC_SET_TOLERANCE_KPH = 1.0
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
@@ -572,8 +580,10 @@ class LongController:
 
   def __init__(self) -> None:
     self.acc = ACCController()
+    self._params = Params()
     self._native_tacc_last_button_ms = 0
     self._native_tacc_last_button = int(CruiseButtons.IDLE)
+    self._native_tacc_latched_until_ms = 0
     services = ["longitudinalPlan", "radarState", "controlsState"]
     self._has_mapd = "mapdOut" in SERVICE_LIST
     if self._has_mapd:
@@ -4273,26 +4283,66 @@ class LongController:
       reasons.append("planner_low")
     return reasons
 
+
+  @staticmethod
+  def _decode_param_bool(raw, default: bool = False) -> bool:
+    if raw is None:
+      return bool(default)
+    try:
+      if isinstance(raw, bytes):
+        raw_s = raw.decode("utf-8", errors="ignore")
+      else:
+        raw_s = str(raw)
+      return raw_s.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+    except Exception:
+      return bool(default)
+
+  def _param_bool(self, name: str, default: bool = False) -> bool:
+    try:
+      return self._decode_param_bool(self._params.get(str(name)), default=bool(default))
+    except Exception:
+      return bool(default)
+
+  def _native_tacc_feature_enabled(self) -> bool:
+    if os.path.exists(self._NATIVE_TACC_DISABLE_FILE):
+      return False
+    # Default-on preserves the previous v76/v77 behavior; set the param to false
+    # to disable without code changes.
+    return self._param_bool(self._NATIVE_TACC_ENABLE_PARAM, default=True)
+
+  def _native_tacc_bootstrap_enabled(self) -> bool:
+    # Only meaningful when native TACC passthrough itself is enabled.
+    return self._native_tacc_feature_enabled() and self._param_bool(self._NATIVE_TACC_BOOTSTRAP_PARAM, default=True)
+
+  def _native_tacc_mark_latch_if_active(self, *, now_ms: int, stock_state: str, current_set_ms: float, CS) -> None:
+    state = str(stock_state or "").upper()
+    stock_enabled = bool(getattr(CS, "stock_cruise_enabled", False) or getattr(CS, "cruiseEnabled", False))
+    if state in ("ENABLED", "OVERRIDE", "STANDSTILL") and (stock_enabled or float(current_set_ms) > 0.1):
+      self._native_tacc_latched_until_ms = int(now_ms) + int(self._NATIVE_TACC_STICKY_LATCH_MS)
+
+  def _native_tacc_recently_latched(self, now_ms: int) -> bool:
+    return int(now_ms) <= int(self._native_tacc_latched_until_ms)
+
   def _native_tacc_passthrough_active(
     self,
     CS,
     *,
+    now_ms: int,
     stock_state: str,
     current_set_ms: float,
     v_ego_ms: float,
   ) -> bool:
-    """Detect native Tesla TACC low-speed authority.
+    """Detect native Tesla TACC low-speed authority after it has latched.
 
-    This deliberately uses live CAN-derived cruise state instead of the
-    TinklaAutopilotDisabled param. On this port that param is still required for
-    OP steering ownership, while newly-enabled Tesla TACC can still be the best
-    low-speed longitudinal actuator.
+    STANDBY is intentionally not considered full passthrough anymore. Startup
+    STANDBY gets its own bootstrap/wait path so we avoid rapid RES spam that can
+    produce Tesla "Cruise Unavailable" warnings.
     """
-    if os.path.exists(self._NATIVE_TACC_DISABLE_FILE):
+    if not self._native_tacc_feature_enabled():
       return False
 
     state = str(stock_state or "").upper()
-    if state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
+    if state not in ("ENABLED", "OVERRIDE", "STANDSTILL"):
       return False
 
     cs_out = getattr(CS, "out", None)
@@ -4300,15 +4350,16 @@ class LongController:
     if brake_pressed:
       return False
 
-    stock_enabled = bool(getattr(CS, "stock_cruise_enabled", False))
+    stock_enabled = bool(getattr(CS, "stock_cruise_enabled", False) or getattr(CS, "cruiseEnabled", False))
     low_ego = float(v_ego_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
     low_set = 0.1 < float(current_set_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
+    recently_latched = self._native_tacc_recently_latched(int(now_ms))
 
     return bool(
       low_set
       or (stock_enabled and low_ego)
       or state == "STANDSTILL"
-      or (state == "STANDBY" and low_ego and bool(getattr(CS, "cruiseEnabled", False)))
+      or recently_latched
     )
 
 
@@ -4316,18 +4367,19 @@ class LongController:
     self,
     CS,
     *,
+    now_ms: int,
     stock_state: str,
     current_set_ms: float,
     v_ego_ms: float,
   ) -> bool:
     """Pre-arm native TACC before the old cruise-floor cancel path can fire.
 
-    Tesla TACC can continue stop/go below the old basic-cruise floor, but the
-    fake-ACC path can cancel around 17-22 mph before passthrough is detected.
-    This handoff state is intentionally limited to low-speed traffic/lead
-    context so clear-road basic cruise behavior remains unchanged.
+    v78 keeps this dynamic:
+    - lead/traffic near the old floor enters handoff before fake-ACC can cancel.
+    - a recently latched TACC session remains sticky through short STANDBY flickers.
+    - no-lead, low-speed STANDBY uses the bootstrap path instead of this one.
     """
-    if os.path.exists(self._NATIVE_TACC_DISABLE_FILE):
+    if not self._native_tacc_feature_enabled():
       return False
 
     state = str(stock_state or "").upper()
@@ -4341,11 +4393,12 @@ class LongController:
       return False
 
     stock_enabled = bool(getattr(CS, "stock_cruise_enabled", False) or getattr(CS, "cruiseEnabled", False))
-    if not stock_enabled and state not in ("OVERRIDE", "STANDSTILL"):
+    recently_latched = self._native_tacc_recently_latched(int(now_ms))
+    if not stock_enabled and not recently_latched and state not in ("OVERRIDE", "STANDSTILL"):
       return False
 
     near_floor_upper_ms = float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)
-    if float(v_ego_ms) < float(self._NATIVE_TACC_HANDOFF_MIN_SPEED_MS) or float(v_ego_ms) > float(near_floor_upper_ms):
+    if float(v_ego_ms) < 0.1 or float(v_ego_ms) > float(near_floor_upper_ms):
       return False
 
     live_lead = bool(
@@ -4365,11 +4418,65 @@ class LongController:
     )
 
     return bool(
-      state == "STANDSTILL"
+      recently_latched
+      or state == "STANDSTILL"
       or (low_set and (live_lead or planner_lead))
       or ((live_lead or planner_lead) and planner_decel)
     )
 
+  def _native_tacc_setspeed_bootstrap_active(
+    self,
+    CS,
+    *,
+    stock_state: str,
+    current_set_ms: float,
+    v_ego_ms: float,
+  ) -> bool:
+    """Allow a slow set-speed latch attempt before native TACC reports enabled.
+
+    User testing showed native TACC set speed can latch at ~1 mph even without a
+    lead. This path lets that happen, but it is rate-limited separately from
+    normal passthrough so it does not recreate startup Cruise Unavailable spam.
+    """
+    if not self._native_tacc_bootstrap_enabled():
+      return False
+
+    state = str(stock_state or "").upper()
+    if state != "STANDBY":
+      return False
+
+    cs_out = getattr(CS, "out", None)
+    brake_pressed = bool(getattr(cs_out, "brakePressed", False)) if cs_out is not None else False
+    gas_pressed = bool(getattr(cs_out, "gasPressed", False)) if cs_out is not None else False
+    if brake_pressed or gas_pressed:
+      return False
+
+    if float(v_ego_ms) < 0.5 * CV.MPH_TO_MS:
+      return False
+
+    if float(v_ego_ms) > (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)):
+      return False
+
+    # If Tesla already reports a meaningful low set speed, let passthrough/handoff
+    # pick it up after the stock state changes.
+    return bool(float(current_set_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)))
+
+  def _native_tacc_wait_for_latch_active(
+    self,
+    CS,
+    *,
+    stock_state: str,
+    v_ego_ms: float,
+  ) -> bool:
+    if not self._native_tacc_feature_enabled():
+      return False
+    state = str(stock_state or "").upper()
+    if state != "STANDBY":
+      return False
+    cs_out = getattr(CS, "out", None)
+    if bool(getattr(cs_out, "brakePressed", False)) or bool(getattr(cs_out, "gasPressed", False)):
+      return False
+    return float(v_ego_ms) <= (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS))
 
   def _native_tacc_lead_only_src(self, src: str) -> bool:
     src_l = str(src or "").lower()
@@ -4417,11 +4524,25 @@ class LongController:
     if self._native_tacc_lead_only_src(src):
       target_ms = max(float(target_ms), float(reference_ms))
 
+    if str(mode_tag) == "native_tacc_setspeed_bootstrap":
+      # Bootstrap should latch TACC gently at low speed, not immediately jump a
+      # 1 mph crawl to a 70 mph road target. Once Tesla reports ENABLED/OVERRIDE,
+      # normal passthrough raises/lower the set speed dynamically.
+      bootstrap_floor_ms = max(float(self._NATIVE_TACC_BOOTSTRAP_MIN_TARGET_MS), float(v_ego_ms) + 4.0 * CV.MPH_TO_MS)
+      target_ms = min(
+        float(target_ms),
+        float(self._NATIVE_TACC_BOOTSTRAP_MAX_TARGET_MS),
+      )
+      target_ms = max(float(target_ms), min(float(self._NATIVE_TACC_BOOTSTRAP_MAX_TARGET_MS), float(bootstrap_floor_ms)))
+
     target_u = max(0.0, float(target_ms) * float(ms_to_u))
     current_u = max(0.0, float(current_set_ms) * float(ms_to_u))
     offset_u = float(target_u) - float(current_u)
 
-    cooldown_ms = int(self._NATIVE_TACC_STANDBY_COOLDOWN_MS if state == "STANDBY" else self._NATIVE_TACC_COOLDOWN_MS)
+    if str(mode_tag) == "native_tacc_setspeed_bootstrap":
+      cooldown_ms = int(self._NATIVE_TACC_BOOTSTRAP_COOLDOWN_MS)
+    else:
+      cooldown_ms = int(self._NATIVE_TACC_STANDBY_COOLDOWN_MS if state == "STANDBY" else self._NATIVE_TACC_COOLDOWN_MS)
     if (int(now_ms) - int(self._native_tacc_last_button_ms)) < int(cooldown_ms):
       return LongDecision(None, f"{mode_tag}[cooldown] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
 
@@ -4518,19 +4639,52 @@ class LongController:
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
 
-    native_tacc_passthrough = self._native_tacc_passthrough_active(
+    native_tacc_feature_enabled = self._native_tacc_feature_enabled()
+    if bool(native_tacc_feature_enabled):
+      self._native_tacc_mark_latch_if_active(
+        now_ms=int(now),
+        stock_state=str(stock_state),
+        current_set_ms=float(current_set_ms),
+        CS=CS,
+      )
+
+    native_tacc_passthrough = bool(native_tacc_feature_enabled) and self._native_tacc_passthrough_active(
       CS,
+      now_ms=int(now),
       stock_state=str(stock_state),
       current_set_ms=float(current_set_ms),
       v_ego_ms=float(v_ego_ms),
     )
-    native_tacc_handoff_pending = (not bool(native_tacc_passthrough)) and self._native_tacc_handoff_pending_active(
+    native_tacc_handoff_pending = (not bool(native_tacc_passthrough)) and bool(native_tacc_feature_enabled) and self._native_tacc_handoff_pending_active(
       CS,
+      now_ms=int(now),
       stock_state=str(stock_state),
       current_set_ms=float(current_set_ms),
       v_ego_ms=float(v_ego_ms),
     )
-    native_tacc_mode = bool(native_tacc_passthrough or native_tacc_handoff_pending)
+    native_tacc_setspeed_bootstrap = (
+      (not bool(native_tacc_passthrough))
+      and (not bool(native_tacc_handoff_pending))
+      and bool(native_tacc_feature_enabled)
+      and self._native_tacc_setspeed_bootstrap_active(
+        CS,
+        stock_state=str(stock_state),
+        current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms),
+      )
+    )
+    native_tacc_wait_for_latch = (
+      (not bool(native_tacc_passthrough))
+      and (not bool(native_tacc_handoff_pending))
+      and (not bool(native_tacc_setspeed_bootstrap))
+      and bool(native_tacc_feature_enabled)
+      and self._native_tacc_wait_for_latch_active(
+        CS,
+        stock_state=str(stock_state),
+        v_ego_ms=float(v_ego_ms),
+      )
+    )
+    native_tacc_mode = bool(native_tacc_passthrough or native_tacc_handoff_pending or native_tacc_setspeed_bootstrap or native_tacc_wait_for_latch)
 
     # Option 1: snapshot CSA from CarState (decoded off the party parser, no 2nd 'can' sock).
     # _csa_curve_target_ms reads self._csa_last_sample, so we mirror the xnor_csa_* attrs into
@@ -5181,7 +5335,18 @@ class LongController:
     brake_pressed = bool(getattr(cs_out, "brakePressed", False))
 
     if bool(native_tacc_mode):
-      mode_tag = "native_tacc_passthrough" if bool(native_tacc_passthrough) else "native_tacc_handoff_pending"
+      if bool(native_tacc_wait_for_latch):
+        msg = f"[XNOR_CRUISE_SYNC] src={src}+native_tacc_wait_for_latch uom={speed_units} tgt={float(desired_ms) * (CV.MS_TO_MPH if speed_units == 'MPH' else CV.MS_TO_KPH):.1f} cur={float(current_set_ms) * (CV.MS_TO_MPH if speed_units == 'MPH' else CV.MS_TO_KPH):.1f} est=0.0 btn=0 reason=native_tacc_wait_for_latch"
+        self._rate_log(msg)
+        return LongDecision(None, msg)
+
+      if bool(native_tacc_passthrough):
+        mode_tag = "native_tacc_passthrough"
+      elif bool(native_tacc_handoff_pending):
+        mode_tag = "native_tacc_handoff_pending"
+      else:
+        mode_tag = "native_tacc_setspeed_bootstrap"
+
       return self._native_tacc_sync_decision(
         now_ms=int(now),
         stock_state=str(stock_state),
