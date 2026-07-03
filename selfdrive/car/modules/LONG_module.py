@@ -211,7 +211,7 @@ class LongController:
   _ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS = 8_000
   _ROADWORKS_CAP_HIGHER_LIMIT_MARGIN_MS = 4.0 * CV.MPH_TO_MS
   _ROADWORKS_CAP_FAR_HIGHER_LIMIT_MS = 12.0 * CV.MPH_TO_MS   # posted this far above the cap => cap is stale/wrong, ignore immediately (no grace)
-  _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 2.4 * CV.MPH_TO_MS
+  _LEAD_NIBBLE_HOLD_MAX_DROP_MS = 1.6 * CV.MPH_TO_MS
   _LEAD_NIBBLE_HOLD_MIN_DREL_M = 40.0
   _LEAD_NIBBLE_HOLD_MIN_VREL_MS = -1.35
   _LEAD_NIBBLE_HOLD_MAX_ATARGET_MS2 = -0.30
@@ -219,11 +219,11 @@ class LongController:
   _PLANNER_DRAG_MARGIN_MS = 0.25
   _PLANNER_BELOW_EGO_MARGIN_MS = 0.05
   _STRONG_DECEL_ATARGET_MS2 = -0.7
-  _LEAD_PLANNER_GUARD_MIN_DROP_MS = 1.0 * CV.MPH_TO_MS
-  _LEAD_PLANNER_GUARD_EGO_MARGIN_MS = 0.35 * CV.MPH_TO_MS
-  _LEAD_PLANNER_GUARD_TIME_GAP_S = 2.05
-  _LEAD_PLANNER_GUARD_MIN_GAP_M = 38.0
-  _LEAD_PLANNER_GUARD_MAX_GAP_M = 72.0
+  _LEAD_PLANNER_GUARD_MIN_DROP_MS = 1.8 * CV.MPH_TO_MS
+  _LEAD_PLANNER_GUARD_EGO_MARGIN_MS = 0.8 * CV.MPH_TO_MS
+  _LEAD_PLANNER_GUARD_TIME_GAP_S = 1.65
+  _LEAD_PLANNER_GUARD_MIN_GAP_M = 26.0
+  _LEAD_PLANNER_GUARD_MAX_GAP_M = 64.0
 
   _CURVE_ENTRY_PERSIST_MS = 240
   _CURVE_EXIT_PERSIST_MS = 420
@@ -246,16 +246,16 @@ class LongController:
   _CURVE_PLANNER_RELEASE_PERSIST_MS = 180
   _CURVE_PLANNER_RELEASE_MAPD_TOLERANCE_MS = 5.5 * CV.MPH_TO_MS
   _CURVE_PLANNER_RELEASE_OVERRIDE_MS = 260
-  _LEAD_HOLD_PERSIST_MS = 320
+  _LEAD_HOLD_PERSIST_MS = 240
   _LEAD_HOLD_RELEASE_MARGIN_MS = 0.20 * CV.MPH_TO_MS
   _LEAD_OPENING_VREL_MS = 0.12
   _LEAD_OPENING_INFERRED_RATE_MS = 0.42    # dRel growing faster than this => lead opening (backup to vRel reading ~0)
   _LEAD_OPENING_ACTIVE_GAP_FACTOR = 0.40   # when actively opening, release at this fraction of the full opening gap (don't let the gap balloon)
   _LEAD_OPENING_GAP_MIN_M = 18.0
   _LEAD_OPENING_TIME_GAP_S = 1.45
-  _LEAD_CONSTRAIN_CLOSING_VREL_MS = -0.15
-  _LEAD_CONSTRAIN_GAP_MIN_M = 22.0
-  _LEAD_CONSTRAIN_TIME_GAP_S = 1.45
+  _LEAD_CONSTRAIN_CLOSING_VREL_MS = -0.30
+  _LEAD_CONSTRAIN_GAP_MIN_M = 18.0
+  _LEAD_CONSTRAIN_TIME_GAP_S = 1.25
   _LEAD_OFFLANE_YREL_M = 2.2
   _LEAD_OPENING_RELAX_ATARGET_MS2 = -0.15
   _NO_LEAD_MAPD_CURRENT_GATE_MS = 0.5 * CV.MPH_TO_MS
@@ -274,12 +274,12 @@ class LongController:
   _MAPD_ONLY_HIGHWAY_NEAR_STEER_DEG = 2.5
   _LEAD_CLEAR_MAPD_GRACE_MS = 520
   _LEAD_CLEAR_OPENING_GRACE_MS = 220
-  _LEAD_CURVE_HOLD_MAX_MS = 180
-  _LEAD_CURVE_HOLD_MAX_GAP_M = 65.0
+  _LEAD_CURVE_HOLD_MAX_MS = 120
+  _LEAD_CURVE_HOLD_MAX_GAP_M = 52.0
   _LEAD_CURVE_HOLD_MAX_YREL_M = 2.8
   _LEAD_CURVE_HOLD_MIN_SPEED_MS = 6.0
-  _LEAD_CURVE_HOLD_STEER_DEG = 6.0
-  _LEAD_CURVE_HOLD_STEER_RATE_DEG = 12.0
+  _LEAD_CURVE_HOLD_STEER_DEG = 8.0
+  _LEAD_CURVE_HOLD_STEER_RATE_DEG = 16.0
   _CURVE_REENTRY_BLOCK_MS = 1800
   _CURVE_REENTRY_ALLOW_DROP_MS = 6.0 * CV.MPH_TO_MS
   _CURVE_REENTRY_ALLOW_STEER_DEG = 2.0
@@ -290,13 +290,13 @@ class LongController:
   _CURVE_LIMIT_GUARD_FULL_STEER_DEG = 9.0
   _CURVE_LIMIT_GUARD_MIN_SPEED_MS = 25.0 * CV.MPH_TO_MS
   _CURVE_LIMIT_GUARD_ENTRY_PERSIST_MS = 120
-  _CURVE_LIMIT_GUARD_RELEASE_PERSIST_MS = 650
+  _CURVE_LIMIT_GUARD_RELEASE_PERSIST_MS = 420
   _CURVE_LIMIT_GUARD_ACTIVATION_DROP_MS = 1.0 * CV.MPH_TO_MS
   _CURVE_LIMIT_GUARD_VEGO_MARGIN_MS = 0.15 * CV.MPH_TO_MS
-  _CURVE_LIMIT_GUARD_MIN_DROP_MS = 0.75 * CV.MPH_TO_MS
-  _CURVE_LIMIT_GUARD_MAX_DROP_MS = 2.75 * CV.MPH_TO_MS
+  _CURVE_LIMIT_GUARD_MIN_DROP_MS = 0.50 * CV.MPH_TO_MS
+  _CURVE_LIMIT_GUARD_MAX_DROP_MS = 2.00 * CV.MPH_TO_MS
   _CONTROLS_STATE_FRESH_NS = 500_000_000
-  _CURVE_LIMIT_GUARD_FALLBACK_STEER_DEG = 7.5
+  _CURVE_LIMIT_GUARD_FALLBACK_STEER_DEG = 9.0
   _MAPD_LOW_SPEED_ENTRY_SPEED_MS = 45.0 * CV.MPH_TO_MS
   _MAPD_LOW_SPEED_SHARP_DROP_MS = 3.0 * CV.MPH_TO_MS
   _MAPD_LOW_SPEED_PLANNER_HINT_DROP_MS = 0.4 * CV.MPH_TO_MS
@@ -318,15 +318,15 @@ class LongController:
   _PLANNER_SET_TRACK_MARGIN_MS = 0.8 * CV.MPH_TO_MS
   _WEAK_LEAD_OWNER_VREL_MS = -0.35
   _WEAK_LEAD_OWNER_ATARGET_MS2 = -0.35
-  _WEAK_LEAD_OWNER_TIME_GAP_S = 1.65
+  _WEAK_LEAD_OWNER_TIME_GAP_S = 1.45
   _STALE_PLANNER_LEAD_CLEAR_MS = 420
   _STALE_PLANNER_LEAD_MAX_ATARGET_MS2 = -0.20
   _STALE_PLANNER_LEAD_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _STALE_PLANNER_LEAD_MAX_LIVE_DROP_MS = 0.75 * CV.MPH_TO_MS
 
-  _LEAD_REACCEL_MIN_GAP_S = 1.38
+  _LEAD_REACCEL_MIN_GAP_S = 1.30
   _LEAD_REACCEL_EXTRA_GAP_S = 0.00
-  _LEAD_REACCEL_MIN_DREL_M = 13.5
+  _LEAD_REACCEL_MIN_DREL_M = 12.0
   _LEAD_REACCEL_MAX_CLOSING_MS = -0.65
   _LEAD_REACCEL_MAX_DECEL_MS2 = -0.65
   _LEAD_REACCEL_LARGE_GAP_S = 1.95
@@ -341,8 +341,8 @@ class LongController:
   _STOCK_OVERRIDE_LOG_MARGIN_MS = 2.0 * CV.MPH_TO_MS
   _ROUNDABOUT_EXIT_CLEAR_HOLD_MS = 3500
   _ROUNDABOUT_EXIT_RELEASE_MIN_TARGET_RISE_MS = 1.0 * CV.MPH_TO_MS
-  _ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG = 4.0
-  _ROUNDABOUT_EXIT_STRAIGHT_RATE_DEG = 12.0
+  _ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG = 6.0
+  _ROUNDABOUT_EXIT_STRAIGHT_RATE_DEG = 18.0
 
   _CURVE_FORCE_ENTRY_MIN_SPEED_MS = 15.0 * CV.MPH_TO_MS
   _CURVE_FORCE_ENTRY_MIN_DROP_MS = 4.0 * CV.MPH_TO_MS
@@ -355,21 +355,21 @@ class LongController:
   _MAP_ONLY_EARLY_ENTRY_MIN_DROP_MS = 12.0 * CV.MPH_TO_MS
   _MAP_ONLY_EARLY_ENTRY_MAX_DROP_MS = 8.0 * CV.MPH_TO_MS
   _MAP_ONLY_EARLY_ENTRY_TARGET_OFFSET_MS = 12.0 * CV.MPH_TO_MS
-  _MAP_ONLY_EARLY_ENTRY_PERSIST_MS = 520
+  _MAP_ONLY_EARLY_ENTRY_PERSIST_MS = 650
   # Low-speed (sub-45mph) map-only curve entry: at roundabout / junction speeds vision
   # stays blind until the apex and steering is still near-zero on entry, so the >=45mph
   # early-entry hint can never fire. A strong, sustained map-only drop is allowed to cap
   # below that floor, with a larger drop margin and longer dwell to offset the missing
   # vision/steer confirmation. Bounded to low speed where an unwanted single SET nudge is
   # low-consequence and driver-overridable.
-  _MAP_ONLY_LOW_SPEED_ENTRY_MIN_DROP_MS = 5.0 * CV.MPH_TO_MS
+  _MAP_ONLY_LOW_SPEED_ENTRY_MIN_DROP_MS = 6.5 * CV.MPH_TO_MS
   _MAP_ONLY_LOW_SPEED_ENTRY_EGO_DROP_MS = 3.0 * CV.MPH_TO_MS
-  _MAP_ONLY_LOW_SPEED_ENTRY_PERSIST_MS = 700
-  _PLANNER_ONLY_CURVE_RELEASE_STEER_DEG = 7.0
-  _PLANNER_ONLY_CURVE_RELEASE_RATE_DEG = 8.0
+  _MAP_ONLY_LOW_SPEED_ENTRY_PERSIST_MS = 850
+  _PLANNER_ONLY_CURVE_RELEASE_STEER_DEG = 8.5
+  _PLANNER_ONLY_CURVE_RELEASE_RATE_DEG = 14.0
   _PLANNER_ONLY_CURVE_RELEASE_VISION_MARGIN_MS = 7.0 * CV.MPH_TO_MS
-  _CURVE_ACCEL_BLOCK_STEER_DEG = 5.0       # raised from 2.8: gentle lane-keeping/shallow bends no longer count as "steer busy" and pin SET down until the wheel is dead straight (revert to 2.8 to restore)
-  _CURVE_ACCEL_BLOCK_STEER_RATE_DEG = 9.0
+  _CURVE_ACCEL_BLOCK_STEER_DEG = 7.0       # raised from 2.8: gentle lane-keeping/shallow bends no longer count as "steer busy" and pin SET down until the wheel is dead straight (revert to 2.8 to restore)
+  _CURVE_ACCEL_BLOCK_STEER_RATE_DEG = 13.0
   _CURVE_ACCEL_BLOCK_MIN_DROP_MS = 2.0 * CV.MPH_TO_MS
   _CURVE_ACCEL_BLOCK_EGO_MARGIN_MS = 0.5 * CV.MPH_TO_MS
   _CURVE_STEER_LIMIT_HOLD_MS = 260
@@ -453,21 +453,21 @@ class LongController:
   _STALE_PLANNER_CURVE_EXIT_MAX_EGO_MS = 32.0 * CV.MPH_TO_MS
   _STALE_PLANNER_CURVE_EXIT_MAX_SET_MS = 27.0 * CV.MPH_TO_MS
   _STALE_PLANNER_CURVE_EXIT_MIN_GAIN_MS = 5.0 * CV.MPH_TO_MS
-  _STALE_PLANNER_CURVE_EXIT_STRAIGHT_STEER_DEG = 7.0
-  _STALE_PLANNER_CURVE_EXIT_STRAIGHT_RATE_DEG = 16.0
+  _STALE_PLANNER_CURVE_EXIT_STRAIGHT_STEER_DEG = 8.5
+  _STALE_PLANNER_CURVE_EXIT_STRAIGHT_RATE_DEG = 20.0
   _STALE_PLANNER_CURVE_EXIT_LEAD_CLEAR_GAP_S = 2.15
   _ARBITRATION_CURVE_ENTRY_STEP_MS = 4.0 * CV.MPH_TO_MS
   _ARBITRATION_CURVE_EXIT_STEP_MS = 4.5 * CV.MPH_TO_MS   # raised from 3.6: quicker ramp-back of the curve target toward reference on exit (revert to 3.6 to restore)
   # Q1-A (persistence): a mapd-map curve cap must hold this many consecutive ~5Hz arbitration
   # cycles (~600 ms) before it may lower set speed. A real bend holds across frames; a single
   # GPS/OSM blip does not. Revert to 1 to disable the debounce.
-  _ARBITRATION_MAP_PERSIST_FRAMES = 3
+  _ARBITRATION_MAP_PERSIST_FRAMES = 4
   # Q1-B (near-straight weighting): when the wheel is essentially straight, require a larger
   # mapd-map drop before a cap is allowed. Revert _ARBITRATION_CURVE_MIN_DROP_NEAR_STRAIGHT_MS
   # to _ARBITRATION_CURVE_MIN_DROP_MS to disable.
-  _ARBITRATION_CURVE_NEAR_STRAIGHT_STEER_DEG = 3.0
-  _ARBITRATION_CURVE_NEAR_STRAIGHT_RATE_DEG = 4.0
-  _ARBITRATION_CURVE_MIN_DROP_NEAR_STRAIGHT_MS = 5.5 * CV.MPH_TO_MS
+  _ARBITRATION_CURVE_NEAR_STRAIGHT_STEER_DEG = 4.0
+  _ARBITRATION_CURVE_NEAR_STRAIGHT_RATE_DEG = 6.0
+  _ARBITRATION_CURVE_MIN_DROP_NEAR_STRAIGHT_MS = 7.5 * CV.MPH_TO_MS
   # Point 2 (speed-limit flicker debounce): the CarState posted-limit target was oscillating
   # 40<->30 (~1 Hz) across a transition zone, swinging the SET speed. If CarState changes again
   # within _SPEED_LIMIT_FLICKER_WINDOW_MS, treat it as unstable and fall back to mapd's posted
@@ -484,7 +484,7 @@ class LongController:
   _FOLLOW_GAP_STALK_STEP_S = 0.35
   _FOLLOW_GAP_RELEASE_HYSTERESIS_S = 0.18
   _FOLLOW_GAP_RELEASE_VREL_MS = 0.05
-  _LEAD_RELEASE_MAX_FOLLOW_S = 1.80
+  _LEAD_RELEASE_MAX_FOLLOW_S = 3.35
   _RESUME_DECEL_GATE_MS2 = -0.5   # aEgo below this = actively decelerating; suppress upward SET restore (decel set-restore gate)
   _CURVE_CONFIRMED_COMFORT_BIAS_MS = 0.75 * CV.MPH_TO_MS
   _CURVE_MAPD_VISION_DISAGREE_EXTRA_BIAS_MS = 0.25 * CV.MPH_TO_MS
@@ -537,7 +537,7 @@ class LongController:
   # CSA has not locked yet. Fail-safe + trivial revert: set _CSA_MAP_DISAGREE_VETO False.
   _CSA_MAP_DISAGREE_VETO = True
   _CSA_CONFIDENT_FLAT_C2 = 0.00225          # 1/m; base (low-speed) flat threshold (R > ~440m = unambiguously straight)
-  _CSA_CONFIDENT_FLAT_MIN_RANGE_M = 100.0   # CSA must be far-sighted (near design lookahead) before "flat" is trusted to veto
+  _CSA_CONFIDENT_FLAT_MIN_RANGE_M = 85.0   # CSA must be far-sighted (near design lookahead) before "flat" is trusted to veto
   # Speed-scale (49mph-miss fix): CSA under-reads curvature on faster roads, so a fixed c2 flat
   # threshold lets a real bend read as "flat" and veto a correct mapd cap (the 49 mph c2 -0.0018
   # case). Demand a lower c2 at higher speed by holding a gentle lateral accel v^2*|c2| constant,
@@ -545,7 +545,15 @@ class LongController:
   # mapd false positives). Revert: set _CSA_FLAT_LAT_ACCEL_MS2 huge to disable the scaling.
   _CSA_FLAT_LAT_ACCEL_MS2 = 0.58
   _CSA_CONFIDENT_FLAT_C2_FLOOR = 0.0008
-  _CURVE_EXIT_FLAT_C2 = 0.0012   # range-independent "bend has ended" curvature for curve-exit release
+  _CURVE_EXIT_FLAT_C2 = 0.0018   # range-independent "bend has ended" curvature for curve-exit release
+  # CSA-vs-map preference: use a slightly more permissive flat-CSA veto for map-only
+  # false positives than the normal far-sighted curve-release gate. This is deliberately
+  # ignored while a named roundabout is active/recent so mapd keeps owning roundabout detection.
+  _CSA_MAP_VETO_FLAT_C2 = 0.0032
+  _CSA_MAP_VETO_MIN_RANGE_M = 70.0
+  _CSA_MAP_VETO_LAT_ACCEL_MS2 = 0.82
+  _CSA_MAP_VETO_C2_FLOOR = 0.0011
+
 
   # Named-road roundabout cap. The Tesla posts NO native roundabout/junction flag over CAN
   # when the nav route is inactive (the UI_csaOfframpCurvature channel stays zero and
@@ -602,6 +610,7 @@ class LongController:
     # a fallback default for any code path that still references it.
     self._csa_reader = None
     self._csa_last_sample: dict = {"ok": False, "advancing": False, "bus": -1, "c2": 0.0, "range_m": 0.0, "counter": -1}
+    self._desired_follow_gap_s: float = float(self._FOLLOW_GAP_DEFAULT_S)
     if self._CSA_ENABLE:
       cloudlog.info("Tesla LONG_module: CSA enabled (decoded in CarState off party parser, Option 1)")
     else:
@@ -1355,7 +1364,7 @@ class LongController:
     # False and never triggers, so this only fires once the curve has genuinely opened out.
     # Fail-safe: releasing only RESTORES speed -- if a real cap remains, mapd / planner / CSA
     # re-open it via arbitration on the next cycle. (Revert: delete this block.)
-    if self._csa_confidently_flat():
+    if self._csa_confidently_flat(v_ego_ms=float(reference_ms)):
       self._curve_planner_release_candidate_since_ms = 0
       return True
 
@@ -1403,11 +1412,7 @@ class LongController:
     raw_map_ms, raw_vision_ms = self._curve_specific_mapd_sources(now_ns=int(now_ns))
     if raw_map_ms is not None or raw_vision_ms is not None:
       return False
-    sample = self._csa_last_sample
-    if not isinstance(sample, dict) or not bool(sample.get("advancing", False)):
-      return False
-    c2 = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0))
-    return bool(math.isfinite(c2) and c2 < float(self._CURVE_EXIT_FLAT_C2))
+    return self._csa_exit_flat()
 
   def _reset_curve_hold(self) -> None:
     self._curve_entry_candidate_since_ms = 0
@@ -2210,7 +2215,15 @@ class LongController:
     lead_speed_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel))
     lead_slower_than_base = lead_speed_ms < (float(base_target_ms) - 0.25)
     closing = float(self._lead_vrel) < float(self._LEAD_CONSTRAIN_CLOSING_VREL_MS)
-    near_gap_limit_m = min(80.0, max(float(self._LEAD_CONSTRAIN_GAP_MIN_M), float(v_ego_ms) * float(self._LEAD_CONSTRAIN_TIME_GAP_S)))
+    desired_follow_s = max(
+      float(self._FOLLOW_GAP_MIN_S),
+      min(float(self._FOLLOW_GAP_MAX_S), float(getattr(self, "_desired_follow_gap_s", self._FOLLOW_GAP_DEFAULT_S))),
+    )
+    # Honour the Tesla stalk follow gap instead of treating every lead within a fixed ~1.45s
+    # window as constraining. Low gap settings release earlier; high settings still keep the
+    # larger selected headway.
+    constrain_gap_s = max(float(self._LEAD_CONSTRAIN_TIME_GAP_S), float(desired_follow_s) - float(self._FOLLOW_GAP_RELEASE_HYSTERESIS_S))
+    near_gap_limit_m = min(80.0, max(float(self._LEAD_CONSTRAIN_GAP_MIN_M), float(v_ego_ms) * float(constrain_gap_s)))
     near_lead = float(self._lead_drel) < float(near_gap_limit_m)
     non_opening_near = near_lead and float(self._lead_vrel) <= float(self._LEAD_OPENING_VREL_MS)
     return bool(lead_slower_than_base and (closing or non_opening_near))
@@ -2228,13 +2241,18 @@ class LongController:
     if self._lead_is_constraining(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
       return True
 
+    desired_follow_s = max(
+      float(self._FOLLOW_GAP_MIN_S),
+      min(float(self._FOLLOW_GAP_MAX_S), float(getattr(self, "_desired_follow_gap_s", self._FOLLOW_GAP_DEFAULT_S))),
+    )
+    hold_gap_s = max(1.0, float(desired_follow_s) - 0.35)
     close_gap_limit_m = min(
-      34.0,
-      max(16.0, float(v_ego_ms) * 1.15),
+      30.0,
+      max(12.0, float(v_ego_ms) * float(hold_gap_s)),
     )
     return bool(
       float(self._lead_drel) < float(close_gap_limit_m)
-      and float(self._lead_vrel) <= 0.10
+      and float(self._lead_vrel) <= 0.0
     )
 
 
@@ -2425,7 +2443,7 @@ class LongController:
       # released on a confidently-flat road. A fresh+advancing+far-sighted CSA reading that sees a
       # straight road vetoes the map-only force-entry too. Same strict asymmetry: short-range /
       # silent / stale CSA returns False and never blocks force-entry (late-CSA tight curves stand).
-      if (not self._MAPD_VISION_ENABLE) and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms)):
+      if (not self._MAPD_VISION_ENABLE) and self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms)) and not bool(self._roundabout_active):
         self._curve_force_entry_candidate_since_ms = 0
         return None, ""
       strong_map_only_hint = bool(
@@ -2726,9 +2744,14 @@ class LongController:
     if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
       return False
 
+    desired_follow_s = max(
+      float(self._FOLLOW_GAP_MIN_S),
+      min(float(self._FOLLOW_GAP_MAX_S), float(getattr(self, "_desired_follow_gap_s", self._FOLLOW_GAP_DEFAULT_S))),
+    )
+    guard_gap_s = max(float(self._LEAD_PLANNER_GUARD_TIME_GAP_S), float(desired_follow_s) + 0.15)
     guard_gap_m = min(
       float(self._LEAD_PLANNER_GUARD_MAX_GAP_M),
-      max(float(self._LEAD_PLANNER_GUARD_MIN_GAP_M), float(v_ego_ms) * float(self._LEAD_PLANNER_GUARD_TIME_GAP_S)),
+      max(float(self._LEAD_PLANNER_GUARD_MIN_GAP_M), float(v_ego_ms) * float(guard_gap_s)),
     )
     if float(self._lead_drel) > float(guard_gap_m):
       return False
@@ -2759,9 +2782,14 @@ class LongController:
     if self._lead_is_opening_clear(base_target_ms=max(float(current_set_ms), float(desired_ms)), v_ego_ms=float(v_ego_ms)):
       return float(desired_ms), False
 
+    desired_follow_s = max(
+      float(self._FOLLOW_GAP_MIN_S),
+      min(float(self._FOLLOW_GAP_MAX_S), float(getattr(self, "_desired_follow_gap_s", self._FOLLOW_GAP_DEFAULT_S))),
+    )
+    low_speed_gap_s = max(1.05, min(float(self._LOW_SPEED_LEAD_BLOCK_TIME_GAP_S), float(desired_follow_s) - 0.25))
     gap_limit_m = min(
       float(self._LOW_SPEED_LEAD_BLOCK_MAX_GAP_M),
-      max(float(self._LOW_SPEED_LEAD_BLOCK_MIN_GAP_M), float(v_ego_ms) * float(self._LOW_SPEED_LEAD_BLOCK_TIME_GAP_S)),
+      max(float(self._LOW_SPEED_LEAD_BLOCK_MIN_GAP_M), float(v_ego_ms) * float(low_speed_gap_s)),
     )
     if float(self._lead_drel) > float(gap_limit_m):
       return float(desired_ms), False
@@ -3340,6 +3368,62 @@ class LongController:
     return float(v_cap_ms), "csa"
 
 
+  def _csa_flat_sample(
+    self,
+    *,
+    v_ego_ms: float,
+    min_range_m: float,
+    base_c2: float,
+    lat_accel_ms2: float,
+    floor_c2: float,
+  ) -> bool:
+    if not bool(self._CSA_ENABLE):
+      return False
+    sample = self._csa_last_sample
+    if not isinstance(sample, dict):
+      return False
+    if not bool(sample.get("ok", False)) or not bool(sample.get("advancing", False)):
+      return False
+
+    range_m = self._safe_finite_float(sample.get("range_m", 0.0), 0.0)
+    if float(min_range_m) > 0.0 and (not math.isfinite(range_m) or float(range_m) < float(min_range_m)):
+      return False
+
+    c2 = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0))
+    if not math.isfinite(c2):
+      return False
+
+    flat_c2 = float(base_c2)
+    v = float(v_ego_ms)
+    if v > 1.0:
+      flat_c2 = min(float(flat_c2), max(float(floor_c2), float(lat_accel_ms2) / (v * v)))
+    return bool(c2 < flat_c2)
+
+
+  def _csa_map_veto_flat(self, *, v_ego_ms: float = 0.0) -> bool:
+    if not bool(self._CSA_MAP_DISAGREE_VETO):
+      return False
+    if bool(self._roundabout_active):
+      return False
+    return self._csa_flat_sample(
+      v_ego_ms=float(v_ego_ms),
+      min_range_m=float(self._CSA_MAP_VETO_MIN_RANGE_M),
+      base_c2=float(self._CSA_MAP_VETO_FLAT_C2),
+      lat_accel_ms2=float(self._CSA_MAP_VETO_LAT_ACCEL_MS2),
+      floor_c2=float(self._CSA_MAP_VETO_C2_FLOOR),
+    )
+
+
+  def _csa_exit_flat(self, *, v_ego_ms: float = 0.0) -> bool:
+    return self._csa_flat_sample(
+      v_ego_ms=float(v_ego_ms),
+      min_range_m=0.0,
+      base_c2=float(self._CURVE_EXIT_FLAT_C2),
+      lat_accel_ms2=float(self._CSA_FLAT_LAT_ACCEL_MS2),
+      floor_c2=float(self._CSA_CONFIDENT_FLAT_C2_FLOOR),
+    )
+
+
   def _csa_confidently_flat(self, *, v_ego_ms: float = 0.0) -> bool:
     """True only when a FRESH, advancing, FAR-SIGHTED CSA sample reads the road ahead as
     unambiguously straight. Used as the vision-style disagreement cross-check (point 2): when
@@ -3351,28 +3435,15 @@ class LongController:
     a short-range CSA (e.g. the 15:56 failure, roadRange 30-38m vs ~110m design) is only
     looking a few car-lengths ahead, so its "flat" reading says nothing about a bend further on
     -- in that state we must keep trusting mapd-map, not release its cap."""
-    if not bool(self._CSA_ENABLE):
-      return False
     if not bool(self._CSA_MAP_DISAGREE_VETO):
       return False
-    sample = self._csa_last_sample
-    if not isinstance(sample, dict):
-      return False
-    if not bool(sample.get("ok", False)):
-      return False
-    if not bool(sample.get("advancing", False)):
-      return False
-    range_m = self._safe_finite_float(sample.get("range_m", 0.0), 0.0)
-    if not math.isfinite(range_m) or float(range_m) < float(self._CSA_CONFIDENT_FLAT_MIN_RANGE_M):
-      return False
-    c2 = abs(self._safe_finite_float(sample.get("c2", 0.0), 0.0))
-    if not math.isfinite(c2):
-      return False
-    flat_c2 = float(self._CSA_CONFIDENT_FLAT_C2)
-    v = float(v_ego_ms)
-    if v > 1.0:
-      flat_c2 = min(flat_c2, max(float(self._CSA_CONFIDENT_FLAT_C2_FLOOR), float(self._CSA_FLAT_LAT_ACCEL_MS2) / (v * v)))
-    return bool(c2 < flat_c2)
+    return self._csa_flat_sample(
+      v_ego_ms=float(v_ego_ms),
+      min_range_m=float(self._CSA_CONFIDENT_FLAT_MIN_RANGE_M),
+      base_c2=float(self._CSA_CONFIDENT_FLAT_C2),
+      lat_accel_ms2=float(self._CSA_FLAT_LAT_ACCEL_MS2),
+      floor_c2=float(self._CSA_CONFIDENT_FLAT_C2_FLOOR),
+    )
 
 
   def _roundabout_curve_target_ms(
@@ -3515,7 +3586,7 @@ class LongController:
       # CSA reading stand in for vision_clear, exactly as it does for the mapd-map cross-check.
       road_clear = bool(
         vision_clear
-        or ((not self._MAPD_VISION_ENABLE) and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms)))
+        or ((not self._MAPD_VISION_ENABLE) and self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms)))
       )
       straightish = bool(
         abs(float(current_angle_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_STEER_DEG)
@@ -3547,7 +3618,7 @@ class LongController:
     if (
       not self._MAPD_VISION_ENABLE
       and map_only_low
-      and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms))
+      and self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms))
       and not (planner_curve_active or steer_busy or bool(self._lat_limit_saturated) or bool(live_lead_context) or csa_supports or roundabout_supports)
     ):
       return None, "map_only_csa_disagrees"
@@ -3656,7 +3727,7 @@ class LongController:
     current_angle_deg = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
     steering_rate_deg = abs(float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0))
     planner_clear = bool(float(planner_near_ms) >= (float(reference_ms) - max(float(self._CURVE_RELEASE_NEAR_TARGET_MARGIN_MS), 2.0 * CV.MPH_TO_MS)))
-    csa_clear = self._csa_confidently_flat(v_ego_ms=float(v_ego_ms))
+    csa_clear = bool(self._csa_confidently_flat(v_ego_ms=float(v_ego_ms)) or self._csa_exit_flat(v_ego_ms=float(v_ego_ms)))
     straight_clear = bool(
       float(current_angle_deg) <= float(self._ROUNDABOUT_EXIT_STRAIGHT_STEER_DEG)
       and float(steering_rate_deg) <= float(self._ROUNDABOUT_EXIT_STRAIGHT_RATE_DEG)
@@ -4629,6 +4700,7 @@ class LongController:
     current_set_ms = float(getattr(CS, "stock_cruise_set_speed_ms", 0.0) or 0.0)
     speed_units = str(getattr(CS, "speed_units", "MPH") or "MPH")
     cruise_buttons = int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0)
+    self._desired_follow_gap_s = self._desired_follow_time_s(cs_out)
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
 
