@@ -54,6 +54,17 @@ BTN_DOWN2 = 8
 BTN_UP1 = 16
 BTN_DOWN1 = 32
 
+# --- Low-speed DI-arming bisection toggles (bench only) ---------------------------------------
+# Arming is TWO independent mechanisms; we cannot yet prove which (if either) disrupts the EPAS,
+# so each is switchable here. Edit these two lines and restart to bisect on the bench:
+#   Test A (baseline, no arming): both False   -> steering should be rock-solid
+#   Test B (0x2B9 only):          CHASSIS True,  STALK False
+#   Test C (stalk only, bounded): CHASSIS False, STALK True
+#   Test D (both, the target):    both True
+# Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
+_ARM_ENABLE_CHASSIS = False  # OFF (isolate the GTW_carConfig test)
+_ARM_ENABLE_STALK = False    # OFF (isolate the GTW_carConfig test)
+
 ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
 ROADWORKS_DEFAULT_KPH = 50.0 * CV.MPH_TO_KPH
@@ -95,6 +106,11 @@ class CarController(CarControllerBase):
     self._stw_last_send_frame = -100000
     self._stw_release_frame = -1
     self._stw_release_bus = int(CANBUS.party)
+    # Low-speed DI-arming stalk pulse: strictly bounded, one-shot-per-engagement burst.
+    self._arm_pulse_last_frame = -1000   # last frame a pulse was emitted (spacing)
+    self._arm_pulse_count = 0            # pulses emitted in the current engagement cycle
+    self._arm_engage_frame = -1000       # frame long_active last went true (window start)
+    self._arm_long_active_prev = False   # edge detector for long_active
     self._stw_sequence = []  # list[(frame:int, btn:int)]
     self._op_enabled_prev = False
     self._xnor_diag_last_log_ms = 0
@@ -133,6 +149,11 @@ class CarController(CarControllerBase):
     self._params_last_read_frame = int(self.frame)
 
     self._cached_autopilot_disabled = bool(self.params.get_bool("TinklaAutopilotDisabled"))
+    # XNOR native-ACC (sub-17 TACC): when enabled, openpilot authors its own longitudinal
+    # via DAS_control even in the autopilot_disabled ("Unity"/lateral-only) mode, with no
+    # stock-cruise dependency and no 17.1 mph engage floor. Cached here so the longitudinal
+    # gate below can keep long_active true in that mode.
+    self._cached_enable_acc = bool(self.params.get_bool("TinklaEnableACC"))
     self._cached_pedal_enabled = bool(
       self.params.get_bool("TinklaPedalEnabled") or
       self.params.get_bool("PedalEnabled")
@@ -739,7 +760,11 @@ class CarController(CarControllerBase):
         CarControllerParams.ACCEL_MAX
       ))
       counter = (self.frame // 4) % 8
-      long_active = bool(CC.longActive) and (not autopilot_disabled)
+      # Native-ACC: in autopilot_disabled mode openpilot is normally lateral-only, so
+      # longitudinal is suppressed. When TinklaEnableACC is set, openpilot owns longitudinal
+      # itself (sub-17 TACC), so keep it active in that mode too. Otherwise unchanged.
+      native_acc = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
 
       can_sends.append(
         self.tesla_can.create_longitudinal_command(
@@ -750,6 +775,75 @@ class CarController(CarControllerBase):
           long_active
         )
       )
+
+      # --- Low-speed DI arming (0x2B9 chassis DAS_control + virtual stalk) ---
+      # Factory-log analysis: the DI only leaves STANDBY below ~18 mph when it sees
+      # DAS_control = ACC_ON on the CHASSIS bus as 0x2B9 AND a cruise-stalk engage pulse
+      # (STW_ACTN_RQ RWD == BTN_MAIN). openpilot's powertrain-only 0x2BF is honoured for
+      # accel once ENABLED but never arms the DI. Gated behind TinklaEnableACC and only on
+      # LEGACY_CARS (HW2), which have create_longitudinal_command_chassis.
+      # IMPORTANT: only touch the CHASSIS bus when actually engaged and commanding longitudinal
+      # (long_active). An unsolicited DAS_control = ACC_ON on the chassis bus while DISENGAGED
+      # makes the EPAS refuse to activate steering (EAC_INHIBITED -> "Steering Assist Temporarily
+      # Unavailable"), because EPAS and DAS share this bus. The powertrain 0x2BF is safe when idle
+      # because it goes out bus 4 (away from EPAS); the chassis 0x2B9 is NOT — so it must be gated
+      # on long_active, and never sent (not even idle) while disengaged.
+      if long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
+         hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
+        # Chassis 0x2B9 ACC_ON — independently toggleable for bisection (see _ARM_ENABLE_CHASSIS).
+        if _ARM_ENABLE_CHASSIS:
+          can_sends.append(
+            self.tesla_can.create_longitudinal_command_chassis(
+              state,
+              accel,
+              counter,
+              float(CS.out.vEgo),
+              long_active
+            )
+          )
+        # Virtual RWD (engage) stalk pulse to reproduce the factory arming handshake.
+        #
+        # CRITICAL: this must be a STRICTLY BOUNDED, one-shot-per-engagement burst — NOT a
+        # level-triggered retry. A repeated cruise-stalk stream while steering is engaged
+        # disrupts the EPAS (drops EAC_ACTIVE -> INHIBITED -> "Steering Temporarily Unavailable").
+        # The factory armed with just ~2 RWD pulls, then stopped. So:
+        #   - reset the attempt budget on the RISING EDGE of long_active (a fresh engagement),
+        #   - emit at most _ARM_PULSE_MAX pulses, spaced _ARM_PULSE_GAP frames apart,
+        #   - only within a short window after engage AND only at low speed AND only until the
+        #     DI actually arms, then STOP for the rest of this engagement cycle.
+        # If arming doesn't take, openpilot simply runs long from >=18 mph (proven-working) and
+        # low speed stays manual — never a stalk stream fighting the steering.
+        try:
+          _ARM_PULSE_MAX = 3        # total attempts per engagement
+          _ARM_PULSE_GAP = 18       # frames between pulses (~0.18s at 100Hz control)
+          _ARM_WINDOW_FRAMES = 250  # only attempt within ~2.5s of engaging
+
+          if not bool(self._arm_long_active_prev):
+            # rising edge of long_active -> new engagement cycle: reset the arming budget
+            self._arm_pulse_count = 0
+            self._arm_engage_frame = int(self.frame)
+          self._arm_long_active_prev = True
+
+          di_armed = bool(getattr(CS, "stock_cruise_enabled", False))
+          v_ego_mph = float(CS.out.vEgo) * CV.MS_TO_MPH
+          within_window = (int(self.frame) - int(self._arm_engage_frame)) <= _ARM_WINDOW_FRAMES
+          want_arm = (
+            _ARM_ENABLE_STALK and  # independently toggleable for bisection (see top of file)
+            (not di_armed) and (v_ego_mph < 20.0) and within_window and
+            (int(self._arm_pulse_count) < _ARM_PULSE_MAX)
+          )
+          if want_arm and (int(self.frame) - int(self._arm_pulse_last_frame) >= _ARM_PULSE_GAP):
+            if self._send_stw(CS, can_sends, BTN_MAIN, bus=int(self._stw_bus(CS))):
+              self._stw_release_frame = int(self.frame) + 1  # IDLE release next frame
+              self._stw_release_bus = int(self._stw_bus(CS))
+              self._arm_pulse_last_frame = int(self.frame)
+              self._arm_pulse_count = int(self._arm_pulse_count) + 1
+        except Exception:
+          pass
+      else:
+        # long_active is false (disengaged or non-native): clear the edge latch so the next
+        # engagement starts a fresh, bounded arming attempt. No stalk/chassis TX here.
+        self._arm_long_active_prev = False
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = float(self.apply_angle_last)

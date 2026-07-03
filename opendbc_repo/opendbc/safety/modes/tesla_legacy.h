@@ -29,6 +29,28 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 #define TESLA_LEGACY_FLAG_OP_STALK_ENABLE    0x40U
 #define TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB  0x80U
 
+// --- Sub-18 arming experiment: intercept-and-edit stock 0x2B9 in transit -----------------------
+// Rewrite the STOCK 0x2B9 DAS_control's accState CANCEL->ACC_ON as the panda forwards it toward
+// the DI, ONLY while engaged + native-ACC + below the DI's ~18mph arm floor + DI not yet armed.
+// This keeps a SINGLE 0x2B9 on the destination bus (the stock frame, modified) — no second
+// sender, no collision. Compile-time toggle (matches the carcontroller true/false pattern):
+//   1 = rewrite enabled (the experiment), 0 = leave stock 0x2B9 untouched (safe default).
+// CAVEAT: only works if the DI reads the FORWARDED copy that crosses the panda. If the DI reads
+// a native bus-2 copy the panda isn't between, this has no effect — the bench log shows which.
+#define TESLA_LEGACY_ARM_REWRITE_2B9 0
+
+// --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
+// Sets GTW_autopilot (61|2, byte7 bits 4-5) from 0 to 2 as the panda forwards GTW_carConfig,
+// testing whether overriding the FEATURE-CODING flag (not the command) makes the DI arm cruise
+// sub-18. No checksum/counter on this frame, so only byte7 changes. Compile-time toggle:
+//   1 = override enabled (the experiment), 0 = leave GTW_carConfig untouched (safe default).
+// CAVEATS (why this is expected to be LOW-probability): (a) same topology wall as 0x2B9 — only
+// affects the forwarded copy, not a native segment the panda isn't between; (b) ECUs usually
+// latch feature-coding from stored NVRAM at boot, not from a live broadcast, so a runtime
+// override of a config frame is often ignored. Bench/rig ONLY: GTW_carConfig configures many
+// subsystems, so a modified copy is seen by everything that reads it.
+#define TESLA_LEGACY_OVERRIDE_GTW_AUTOPILOT 1
+
 // --- Unity timing ---
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
@@ -134,6 +156,42 @@ static void tesla_legacy_set_last_byte_checksum(CANPacket_t *msg) {
 
 static bool tesla_legacy_is_das_control_msg(int addr) {
   return (addr == 0x2B9) || (addr == 0x2BF);
+}
+
+// True while at/below the DI's ~18mph cruise-arm floor (with a small margin). vehicle_speed is
+// m/s * VEHICLE_SPEED_FACTOR(1000). 18.5 mph ~= 8.27 m/s. Only rewrite the arm frame below this;
+// above it the DI arms on its own and we must not perturb the stock frame.
+static bool __attribute__((unused)) tesla_legacy_below_arm_speed(void) {
+  const float v_ms = (float)vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR;
+  return v_ms <= 8.27f;   // ~18.5 mph
+}
+
+// Sub-18 arm experiment: rewrite a STOCK 0x2B9 frame's DAS_accState (12|4 = byte1 high nibble)
+// to ACC_ON(4) in place, then fix the additive checksum. Edits the single forwarded frame — no
+// second sender. Only the accState nibble changes; setSpeed/jerk/accel/counter are left as the
+// stock frame had them (we are not commanding accel here, only asserting the ACC_ON state the DI
+// watches for arming). Returns true if it rewrote.
+static bool __attribute__((unused)) tesla_legacy_rewrite_2b9_accon(CANPacket_t *msg) {
+  const int cur = (int)((msg->data[1] >> 4) & 0x0FU);   // DAS_accState
+  if (cur == 4) {
+    return false;   // already ACC_ON, nothing to do
+  }
+  msg->data[1] = (uint8_t)((msg->data[1] & 0x0FU) | (4U << 4));  // accState = ACC_ON(4)
+  tesla_legacy_set_last_byte_checksum(msg);
+  return true;
+}
+
+// Config-override experiment: set GTW_autopilot (61|2 @0 big-endian = byte7 bits 4-5) to 2 in a
+// forwarded GTW_carConfig frame. No checksum/counter on 0x398, so ONLY byte7 changes. Verified
+// against real payloads: user byte7=0x00 (autopilot=0) -> 0x20 (autopilot=2); all other bytes
+// identical. Returns true if it changed the frame.
+static bool __attribute__((unused)) tesla_legacy_override_gtw_autopilot(CANPacket_t *msg) {
+  const uint8_t want = (uint8_t)((msg->data[7] & 0xCFU) | 0x20U);  // bits 4-5 = 0b10 (=2)
+  if (msg->data[7] == want) {
+    return false;   // already 2, nothing to do
+  }
+  msg->data[7] = want;
+  return true;
 }
 
 static bool tesla_legacy_vehicle_stopped_or_unknown(void) {
@@ -560,7 +618,50 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
   // Main panda (lateral)
   if (!tesla_legacy_external_panda) {
-    if (tesla_legacy_is_das_control_msg(addr)) {  // main: never transmit DAS_control directly
+    // Low-speed DI arming: the chassis-bus DAS_control (0x2B9) is the frame the DI watches to
+    // arm cruise below its self-arm speed. Allow it out the MAIN (chassis/bus0) panda, but only
+    // under the SAME longitudinal safety envelope the external panda enforces on 0x2BF: no AEB
+    // event, honour stock AEB, require controls_allowed + longitudinal_allowed when active, and
+    // bound accel min/max to the Tesla long limits. The powertrain 0x2BF is still never sent on
+    // the main panda.
+    if (addr == 0x2B9) {
+      // Hard backstop: NEVER allow the chassis-bus DAS_control out while disengaged. An
+      // unsolicited 0x2B9 (even an idle/inactive-accel frame) on the chassis bus inhibits the
+      // EPAS and kills steering. Unlike the powertrain 0x2BF (bus 4, away from EPAS), 0x2B9
+      // shares the steering bus, so the panda enforces "engaged only" regardless of what
+      // userspace sends — defense in depth against the exact regression seen in testing.
+      if (!controls_allowed || !get_longitudinal_allowed()) {
+        return false;
+      }
+
+      const int aeb_event = (int)(msg->data[2] & 0x03);
+      if (aeb_event != 0) {
+        return false;
+      }
+      if (tesla_legacy_stock_aeb) {
+        return false;
+      }
+
+      const LongitudinalLimits limits = {.max_accel = 425, .min_accel = 288, .inactive_accel = 375};
+
+      const int raw_accel_max = (((int)(msg->data[6] & 0x1FU)) << 4) | ((int)(msg->data[5] >> 4));
+      const int raw_accel_min = (((int)(msg->data[5] & 0x0FU)) << 5) | ((int)(msg->data[4] >> 3));
+
+      if ((raw_accel_max < limits.inactive_accel) && (raw_accel_min < limits.inactive_accel)) {
+        return false;
+      }
+
+      if (longitudinal_accel_checks(raw_accel_max, limits)) {
+        return false;
+      }
+      if (longitudinal_accel_checks(raw_accel_min, limits)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    if (tesla_legacy_is_das_control_msg(addr)) {  // main: never transmit powertrain DAS_control (0x2BF) directly
       return false;
     }
 
@@ -679,6 +780,27 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       tesla_legacy_scrub_das_control_aeb(to_fwd);
     }
   }
+
+#if TESLA_LEGACY_ARM_REWRITE_2B9
+  // Sub-18 arm experiment: as the panda forwards the STOCK 0x2B9 toward the DI, rewrite its
+  // accState CANCEL->ACC_ON, but ONLY while OP is actively controlling longitudinal
+  // (controls_allowed + longitudinal_allowed) AND the vehicle is at/below the DI's ~18mph arm
+  // floor. Above ~18 the DI already arms on its own, so we leave the stock frame alone there.
+  // This keeps ONE 0x2B9 on the wire (the stock frame, edited) — no second sender.
+  if ((addr == 0x2B9) && controls_allowed && get_longitudinal_allowed() &&
+      tesla_legacy_below_arm_speed()) {
+    (void)tesla_legacy_rewrite_2b9_accon(to_fwd);
+  }
+#endif
+
+#if TESLA_LEGACY_OVERRIDE_GTW_AUTOPILOT
+  // Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier 0->2 on every
+  // forwarding path, UNCONDITIONALLY (feature coding is broadcast regardless of engagement — the
+  // factory car advertises autopilot=2 continuously, so we mirror that). No engage/speed gate.
+  if (addr == 0x398) {
+    (void)tesla_legacy_override_gtw_autopilot(to_fwd);
+  }
+#endif
 
   // Prevent OP actuation echoes back to AP side.
   // Keep stock DAS_longControl (0x2BF) flowing before OP is actively controlling;
@@ -847,6 +969,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
+    {0x2B9, 0, 8, .check_relay = false},  // DAS_control (chassis) — low-speed DI arming, accel-limited in tx_hook
 
   };
 
