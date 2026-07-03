@@ -567,6 +567,15 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     // bound accel min/max to the Tesla long limits. The powertrain 0x2BF is still never sent on
     // the main panda.
     if (addr == 0x2B9) {
+      // Hard backstop: NEVER allow the chassis-bus DAS_control out while disengaged. An
+      // unsolicited 0x2B9 (even an idle/inactive-accel frame) on the chassis bus inhibits the
+      // EPAS and kills steering. Unlike the powertrain 0x2BF (bus 4, away from EPAS), 0x2B9
+      // shares the steering bus, so the panda enforces "engaged only" regardless of what
+      // userspace sends — defense in depth against the exact regression seen in testing.
+      if (!controls_allowed || !get_longitudinal_allowed()) {
+        return false;
+      }
+
       const int aeb_event = (int)(msg->data[2] & 0x03);
       if (aeb_event != 0) {
         return false;
@@ -579,11 +588,6 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
       const int raw_accel_max = (((int)(msg->data[6] & 0x1FU)) << 4) | ((int)(msg->data[5] >> 4));
       const int raw_accel_min = (((int)(msg->data[5] & 0x0FU)) << 5) | ((int)(msg->data[4] >> 3));
-
-      const bool long_active = (raw_accel_max != limits.inactive_accel) || (raw_accel_min != limits.inactive_accel);
-      if (long_active && (!controls_allowed || !get_longitudinal_allowed())) {
-        return false;
-      }
 
       if ((raw_accel_max < limits.inactive_accel) && (raw_accel_min < limits.inactive_accel)) {
         return false;

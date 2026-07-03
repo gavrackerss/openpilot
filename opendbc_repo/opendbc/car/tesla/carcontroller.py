@@ -768,7 +768,13 @@ class CarController(CarControllerBase):
       # (STW_ACTN_RQ RWD == BTN_MAIN). openpilot's powertrain-only 0x2BF is honoured for
       # accel once ENABLED but never arms the DI. Gated behind TinklaEnableACC and only on
       # LEGACY_CARS (HW2), which have create_longitudinal_command_chassis.
-      if native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
+      # IMPORTANT: only touch the CHASSIS bus when actually engaged and commanding longitudinal
+      # (long_active). An unsolicited DAS_control = ACC_ON on the chassis bus while DISENGAGED
+      # makes the EPAS refuse to activate steering (EAC_INHIBITED -> "Steering Assist Temporarily
+      # Unavailable"), because EPAS and DAS share this bus. The powertrain 0x2BF is safe when idle
+      # because it goes out bus 4 (away from EPAS); the chassis 0x2B9 is NOT — so it must be gated
+      # on long_active, and never sent (not even idle) while disengaged.
+      if long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
          hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
         can_sends.append(
           self.tesla_can.create_longitudinal_command_chassis(
@@ -784,10 +790,9 @@ class CarController(CarControllerBase):
         # factory two-part handshake. Rate-limited so it's a pulse, not a hold, and released
         # on the following control step via the existing _process_stalk_actions release path.
         try:
-          di_enabled = bool(getattr(CS.out.cruiseState, "enabled", False))
           di_armed = bool(getattr(CS, "stock_cruise_enabled", False))
           v_ego_mph = float(CS.out.vEgo) * CV.MS_TO_MPH
-          want_arm = bool(long_active) and (not di_armed) and (v_ego_mph < 20.0)
+          want_arm = (not di_armed) and (v_ego_mph < 20.0)  # long_active already required above
           if want_arm and (int(self.frame) - int(getattr(self, "_arm_pulse_last_frame", -1000)) >= 25):
             if self._send_stw(CS, can_sends, BTN_MAIN, bus=int(self._stw_bus(CS))):
               # Schedule the IDLE release on the next frame (matches existing stalk cadence).
