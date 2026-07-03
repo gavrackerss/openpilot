@@ -1121,7 +1121,9 @@ class CarState(CarStateBase):
       self.blinker_controller.tap_direction = 0
 
 
-    if self.autopilot_disabled:
+    if self.autopilot_disabled or self.enableACC:
+      # Native-ACC engagement source: the virtual cruise stalk drives openpilot's own
+      # longitudinal enable (MAIN=on / CANCEL=off), independent of stock Tesla cruise.
       if self.cruise_buttons == 2:  # MAIN
         self.cruiseEnabled = True
       if self.cruise_buttons == 1:  # CANCEL
@@ -1164,7 +1166,12 @@ class CarState(CarStateBase):
         pass
     self._param_frame += 1
 
-    if self.autopilot_disabled:
+    if self.autopilot_disabled or self.enableACC:
+      # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
+      # virtual cruise stalk (set just above) with NO stock-cruise dependency and NO 17.1 mph
+      # engage floor. This deliberately bypasses GATE B (_update_adaptive_cruise_mode, the
+      # stock-passthrough 17.1 mph lock) which a car without factory TACC cannot use anyway.
+      # Same door/gear/seatbelt sanity as the existing autopilot_disabled path.
       ret.cruiseState.available = True
       ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)

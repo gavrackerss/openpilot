@@ -133,6 +133,11 @@ class CarController(CarControllerBase):
     self._params_last_read_frame = int(self.frame)
 
     self._cached_autopilot_disabled = bool(self.params.get_bool("TinklaAutopilotDisabled"))
+    # XNOR native-ACC (sub-17 TACC): when enabled, openpilot authors its own longitudinal
+    # via DAS_control even in the autopilot_disabled ("Unity"/lateral-only) mode, with no
+    # stock-cruise dependency and no 17.1 mph engage floor. Cached here so the longitudinal
+    # gate below can keep long_active true in that mode.
+    self._cached_enable_acc = bool(self.params.get_bool("TinklaEnableACC"))
     self._cached_pedal_enabled = bool(
       self.params.get_bool("TinklaPedalEnabled") or
       self.params.get_bool("PedalEnabled")
@@ -739,7 +744,11 @@ class CarController(CarControllerBase):
         CarControllerParams.ACCEL_MAX
       ))
       counter = (self.frame // 4) % 8
-      long_active = bool(CC.longActive) and (not autopilot_disabled)
+      # Native-ACC: in autopilot_disabled mode openpilot is normally lateral-only, so
+      # longitudinal is suppressed. When TinklaEnableACC is set, openpilot owns longitudinal
+      # itself (sub-17 TACC), so keep it active in that mode too. Otherwise unchanged.
+      native_acc = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
 
       can_sends.append(
         self.tesla_can.create_longitudinal_command(
