@@ -62,8 +62,8 @@ BTN_DOWN1 = 32
 #   Test C (stalk only, bounded): CHASSIS False, STALK True
 #   Test D (both, the target):    both True
 # Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
-_ARM_ENABLE_CHASSIS = False   # emit chassis 0x2B9 DAS_control ACC_ON while engaged
-_ARM_ENABLE_STALK = False     # emit the bounded RWD engage-stalk burst
+_ARM_ENABLE_CHASSIS = True   # emit chassis 0x2B9 DAS_control ACC_ON while engaged
+_ARM_ENABLE_STALK = True     # emit the bounded RWD engage-stalk burst
 
 ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
