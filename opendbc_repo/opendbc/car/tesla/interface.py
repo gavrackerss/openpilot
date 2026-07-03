@@ -120,17 +120,7 @@ class CarInterface(CarInterfaceBase):
 
     ret.alphaLongitudinalAvailable = True
     ret.openpilotLongitudinalControl = True
-    # Apply LONG_CONTROL to EVERY safety config, not just [0]. On HW2 there are two configs:
-    # [0] = main panda (lateral), [1] = external panda (FLAG_EXTERNAL_PANDA) which is the one
-    # that actually transmits DAS_control (0x2BF). The long tx path lives on the external panda,
-    # so it must carry LONG_CONTROL too or native-ACC longitudinal is silently blocked.
-    for cfg in ret.safetyConfigs:
-      cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
-
-    # openpilot is the longitudinal authority (not stock cruise / not pcmCruise), so there is
-    # no low-speed engage floor: allow engaging from a standstill. Set explicitly so a future
-    # base-default change can't reintroduce a 17 mph-style floor on this car.
-    ret.minEnableSpeed = -1.
+    ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
     ret.vEgoStopping = 0.1
     ret.vEgoStarting = 0.1

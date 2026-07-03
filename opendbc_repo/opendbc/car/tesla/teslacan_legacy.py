@@ -57,43 +57,6 @@ class TeslaCANRaven:
     values["DAS_controlChecksum"] = self.checksum(0x2BF, data[:7])
     return self.packers[CANBUS.powertrain].make_can_msg("DAS_control", CANBUS.powertrain, values)
 
-  def create_longitudinal_command_chassis(self, acc_state, accel, counter, v_ego, active,
-                                          gas_pressed: bool = False, set_speed_kph: float | None = None):
-    # Chassis-bus copy of DAS_control as 0x2B9 (tesla_can DBC, via the party packer).
-    #
-    # Why this exists: log analysis of factory-TACC captures shows the Drive Inverter (DI)
-    # arms cruise at low speed (STANDBY->ENABLED below 18 mph) only when it sees DAS_control
-    # = ACC_ON on the CHASSIS bus as 0x2B9, paired with a cruise-stalk engage (STW_ACTN_RQ
-    # RWD). The stock powertrain-only 0x2BF that openpilot sends is honoured for accel *once
-    # ENABLED* but is NOT the frame the DI watches to make the arming decision. openpilot
-    # never sent 0x2B9, so it could never arm below the DI's self-arm speed. This builder
-    # provides that missing chassis frame. Identical signal payload to 0x2BF; only the
-    # address (and thus the additive checksum key) differ.
-    #
-    # NOTE: self.packers[CANBUS.party] is the tesla_can (chassis) DBC, in which "DAS_control"
-    # resolves to 0x2B9 — so the same message name packs to the correct id on this packer.
-    if set_speed_kph is not None:
-      set_speed = max(float(set_speed_kph), 0.0)
-    else:
-      set_speed = max(v_ego * CV.MS_TO_KPH, 0)
-      if active:
-        set_speed = 0 if accel < 0 else V_CRUISE_MAX
-
-    values = {
-      "DAS_setSpeed": set_speed,
-      "DAS_accState": acc_state,
-      "DAS_aebEvent": 0,
-      "DAS_jerkMin": CarControllerParams.JERK_LIMIT_MIN,
-      "DAS_jerkMax": CarControllerParams.JERK_LIMIT_MAX,
-      "DAS_accelMin": accel,
-      "DAS_accelMax": max(accel, 0),
-      "DAS_controlCounter": counter,
-    }
-
-    data = self.packers[CANBUS.party].make_can_msg("DAS_control", CANBUS.party, values)[1]
-    values["DAS_controlChecksum"] = self.checksum(0x2B9, data[:7])
-    return self.packers[CANBUS.party].make_can_msg("DAS_control", CANBUS.party, values)
-
   def create_steering_allowed(self, counter):
     values = {
       "APS_eacMonitorCounter": counter,
