@@ -95,6 +95,8 @@ class CarController(CarControllerBase):
     self._stw_last_send_frame = -100000
     self._stw_release_frame = -1
     self._stw_release_bus = int(CANBUS.party)
+    # Low-speed DI-arming: last frame a virtual RWD engage pulse was emitted (rate limiter).
+    self._arm_pulse_last_frame = -1000
     self._stw_sequence = []  # list[(frame:int, btn:int)]
     self._op_enabled_prev = False
     self._xnor_diag_last_log_ms = 0
@@ -759,6 +761,41 @@ class CarController(CarControllerBase):
           long_active
         )
       )
+
+      # --- Low-speed DI arming (0x2B9 chassis DAS_control + virtual stalk) ---
+      # Factory-log analysis: the DI only leaves STANDBY below ~18 mph when it sees
+      # DAS_control = ACC_ON on the CHASSIS bus as 0x2B9 AND a cruise-stalk engage pulse
+      # (STW_ACTN_RQ RWD == BTN_MAIN). openpilot's powertrain-only 0x2BF is honoured for
+      # accel once ENABLED but never arms the DI. Gated behind TinklaEnableACC and only on
+      # LEGACY_CARS (HW2), which have create_longitudinal_command_chassis.
+      if native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
+         hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
+        can_sends.append(
+          self.tesla_can.create_longitudinal_command_chassis(
+            state,
+            accel,
+            counter,
+            float(CS.out.vEgo),
+            long_active
+          )
+        )
+        # Emit a virtual RWD (engage) stalk pulse while we WANT longitudinal but the DI has
+        # not yet armed (DI_cruiseState not ENABLED), at low speed. This reproduces the
+        # factory two-part handshake. Rate-limited so it's a pulse, not a hold, and released
+        # on the following control step via the existing _process_stalk_actions release path.
+        try:
+          di_enabled = bool(getattr(CS.out.cruiseState, "enabled", False))
+          di_armed = bool(getattr(CS, "stock_cruise_enabled", False))
+          v_ego_mph = float(CS.out.vEgo) * CV.MS_TO_MPH
+          want_arm = bool(long_active) and (not di_armed) and (v_ego_mph < 20.0)
+          if want_arm and (int(self.frame) - int(getattr(self, "_arm_pulse_last_frame", -1000)) >= 25):
+            if self._send_stw(CS, can_sends, BTN_MAIN, bus=int(self._stw_bus(CS))):
+              # Schedule the IDLE release on the next frame (matches existing stalk cadence).
+              self._stw_release_frame = int(self.frame) + 1
+              self._stw_release_bus = int(self._stw_bus(CS))
+              self._arm_pulse_last_frame = int(self.frame)
+        except Exception:
+          pass
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = float(self.apply_angle_last)

@@ -560,7 +560,46 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
   // Main panda (lateral)
   if (!tesla_legacy_external_panda) {
-    if (tesla_legacy_is_das_control_msg(addr)) {  // main: never transmit DAS_control directly
+    // Low-speed DI arming: the chassis-bus DAS_control (0x2B9) is the frame the DI watches to
+    // arm cruise below its self-arm speed. Allow it out the MAIN (chassis/bus0) panda, but only
+    // under the SAME longitudinal safety envelope the external panda enforces on 0x2BF: no AEB
+    // event, honour stock AEB, require controls_allowed + longitudinal_allowed when active, and
+    // bound accel min/max to the Tesla long limits. The powertrain 0x2BF is still never sent on
+    // the main panda.
+    if (addr == 0x2B9) {
+      const int aeb_event = (int)(msg->data[2] & 0x03);
+      if (aeb_event != 0) {
+        return false;
+      }
+      if (tesla_legacy_stock_aeb) {
+        return false;
+      }
+
+      const LongitudinalLimits limits = {.max_accel = 425, .min_accel = 288, .inactive_accel = 375};
+
+      const int raw_accel_max = (((int)(msg->data[6] & 0x1FU)) << 4) | ((int)(msg->data[5] >> 4));
+      const int raw_accel_min = (((int)(msg->data[5] & 0x0FU)) << 5) | ((int)(msg->data[4] >> 3));
+
+      const bool long_active = (raw_accel_max != limits.inactive_accel) || (raw_accel_min != limits.inactive_accel);
+      if (long_active && (!controls_allowed || !get_longitudinal_allowed())) {
+        return false;
+      }
+
+      if ((raw_accel_max < limits.inactive_accel) && (raw_accel_min < limits.inactive_accel)) {
+        return false;
+      }
+
+      if (longitudinal_accel_checks(raw_accel_max, limits)) {
+        return false;
+      }
+      if (longitudinal_accel_checks(raw_accel_min, limits)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    if (tesla_legacy_is_das_control_msg(addr)) {  // main: never transmit powertrain DAS_control (0x2BF) directly
       return false;
     }
 
@@ -847,6 +886,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
+    {0x2B9, 0, 8, .check_relay = false},  // DAS_control (chassis) — low-speed DI arming, accel-limited in tx_hook
 
   };
 
