@@ -54,6 +54,17 @@ BTN_DOWN2 = 8
 BTN_UP1 = 16
 BTN_DOWN1 = 32
 
+# --- Low-speed DI-arming bisection toggles (bench only) ---------------------------------------
+# Arming is TWO independent mechanisms; we cannot yet prove which (if either) disrupts the EPAS,
+# so each is switchable here. Edit these two lines and restart to bisect on the bench:
+#   Test A (baseline, no arming): both False   -> steering should be rock-solid
+#   Test B (0x2B9 only):          CHASSIS True,  STALK False
+#   Test C (stalk only, bounded): CHASSIS False, STALK True
+#   Test D (both, the target):    both True
+# Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
+_ARM_ENABLE_CHASSIS = True   # emit chassis 0x2B9 DAS_control ACC_ON while engaged
+_ARM_ENABLE_STALK = True     # emit the bounded RWD engage-stalk burst
+
 ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
 ROADWORKS_DEFAULT_KPH = 50.0 * CV.MPH_TO_KPH
@@ -95,8 +106,11 @@ class CarController(CarControllerBase):
     self._stw_last_send_frame = -100000
     self._stw_release_frame = -1
     self._stw_release_bus = int(CANBUS.party)
-    # Low-speed DI-arming: last frame a virtual RWD engage pulse was emitted (rate limiter).
-    self._arm_pulse_last_frame = -1000
+    # Low-speed DI-arming stalk pulse: strictly bounded, one-shot-per-engagement burst.
+    self._arm_pulse_last_frame = -1000   # last frame a pulse was emitted (spacing)
+    self._arm_pulse_count = 0            # pulses emitted in the current engagement cycle
+    self._arm_engage_frame = -1000       # frame long_active last went true (window start)
+    self._arm_long_active_prev = False   # edge detector for long_active
     self._stw_sequence = []  # list[(frame:int, btn:int)]
     self._op_enabled_prev = False
     self._xnor_diag_last_log_ms = 0
@@ -776,31 +790,60 @@ class CarController(CarControllerBase):
       # on long_active, and never sent (not even idle) while disengaged.
       if long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
          hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
-        can_sends.append(
-          self.tesla_can.create_longitudinal_command_chassis(
-            state,
-            accel,
-            counter,
-            float(CS.out.vEgo),
-            long_active
+        # Chassis 0x2B9 ACC_ON — independently toggleable for bisection (see _ARM_ENABLE_CHASSIS).
+        if _ARM_ENABLE_CHASSIS:
+          can_sends.append(
+            self.tesla_can.create_longitudinal_command_chassis(
+              state,
+              accel,
+              counter,
+              float(CS.out.vEgo),
+              long_active
+            )
           )
-        )
-        # Emit a virtual RWD (engage) stalk pulse while we WANT longitudinal but the DI has
-        # not yet armed (DI_cruiseState not ENABLED), at low speed. This reproduces the
-        # factory two-part handshake. Rate-limited so it's a pulse, not a hold, and released
-        # on the following control step via the existing _process_stalk_actions release path.
+        # Virtual RWD (engage) stalk pulse to reproduce the factory arming handshake.
+        #
+        # CRITICAL: this must be a STRICTLY BOUNDED, one-shot-per-engagement burst — NOT a
+        # level-triggered retry. A repeated cruise-stalk stream while steering is engaged
+        # disrupts the EPAS (drops EAC_ACTIVE -> INHIBITED -> "Steering Temporarily Unavailable").
+        # The factory armed with just ~2 RWD pulls, then stopped. So:
+        #   - reset the attempt budget on the RISING EDGE of long_active (a fresh engagement),
+        #   - emit at most _ARM_PULSE_MAX pulses, spaced _ARM_PULSE_GAP frames apart,
+        #   - only within a short window after engage AND only at low speed AND only until the
+        #     DI actually arms, then STOP for the rest of this engagement cycle.
+        # If arming doesn't take, openpilot simply runs long from >=18 mph (proven-working) and
+        # low speed stays manual — never a stalk stream fighting the steering.
         try:
+          _ARM_PULSE_MAX = 3        # total attempts per engagement
+          _ARM_PULSE_GAP = 18       # frames between pulses (~0.18s at 100Hz control)
+          _ARM_WINDOW_FRAMES = 250  # only attempt within ~2.5s of engaging
+
+          if not bool(self._arm_long_active_prev):
+            # rising edge of long_active -> new engagement cycle: reset the arming budget
+            self._arm_pulse_count = 0
+            self._arm_engage_frame = int(self.frame)
+          self._arm_long_active_prev = True
+
           di_armed = bool(getattr(CS, "stock_cruise_enabled", False))
           v_ego_mph = float(CS.out.vEgo) * CV.MS_TO_MPH
-          want_arm = (not di_armed) and (v_ego_mph < 20.0)  # long_active already required above
-          if want_arm and (int(self.frame) - int(getattr(self, "_arm_pulse_last_frame", -1000)) >= 25):
+          within_window = (int(self.frame) - int(self._arm_engage_frame)) <= _ARM_WINDOW_FRAMES
+          want_arm = (
+            _ARM_ENABLE_STALK and  # independently toggleable for bisection (see top of file)
+            (not di_armed) and (v_ego_mph < 20.0) and within_window and
+            (int(self._arm_pulse_count) < _ARM_PULSE_MAX)
+          )
+          if want_arm and (int(self.frame) - int(self._arm_pulse_last_frame) >= _ARM_PULSE_GAP):
             if self._send_stw(CS, can_sends, BTN_MAIN, bus=int(self._stw_bus(CS))):
-              # Schedule the IDLE release on the next frame (matches existing stalk cadence).
-              self._stw_release_frame = int(self.frame) + 1
+              self._stw_release_frame = int(self.frame) + 1  # IDLE release next frame
               self._stw_release_bus = int(self._stw_bus(CS))
               self._arm_pulse_last_frame = int(self.frame)
+              self._arm_pulse_count = int(self._arm_pulse_count) + 1
         except Exception:
           pass
+      else:
+        # long_active is false (disengaged or non-native): clear the edge latch so the next
+        # engagement starts a fresh, bounded arming attempt. No stalk/chassis TX here.
+        self._arm_long_active_prev = False
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = float(self.apply_angle_last)
