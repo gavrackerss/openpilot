@@ -29,6 +29,16 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 #define TESLA_LEGACY_FLAG_OP_STALK_ENABLE    0x40U
 #define TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB  0x80U
 
+// --- Sub-18 arming experiment: intercept-and-edit stock 0x2B9 in transit -----------------------
+// Rewrite the STOCK 0x2B9 DAS_control's accState CANCEL->ACC_ON as the panda forwards it toward
+// the DI, ONLY while engaged + native-ACC + below the DI's ~18mph arm floor + DI not yet armed.
+// This keeps a SINGLE 0x2B9 on the destination bus (the stock frame, modified) — no second
+// sender, no collision. Compile-time toggle (matches the carcontroller true/false pattern):
+//   1 = rewrite enabled (the experiment), 0 = leave stock 0x2B9 untouched (safe default).
+// CAVEAT: only works if the DI reads the FORWARDED copy that crosses the panda. If the DI reads
+// a native bus-2 copy the panda isn't between, this has no effect — the bench log shows which.
+#define TESLA_LEGACY_ARM_REWRITE_2B9 1
+
 // --- Unity timing ---
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
@@ -134,6 +144,29 @@ static void tesla_legacy_set_last_byte_checksum(CANPacket_t *msg) {
 
 static bool tesla_legacy_is_das_control_msg(int addr) {
   return (addr == 0x2B9) || (addr == 0x2BF);
+}
+
+// True while at/below the DI's ~18mph cruise-arm floor (with a small margin). vehicle_speed is
+// m/s * VEHICLE_SPEED_FACTOR(1000). 18.5 mph ~= 8.27 m/s. Only rewrite the arm frame below this;
+// above it the DI arms on its own and we must not perturb the stock frame.
+static bool tesla_legacy_below_arm_speed(void) {
+  const float v_ms = (float)vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR;
+  return v_ms <= 8.27f;   // ~18.5 mph
+}
+
+// Sub-18 arm experiment: rewrite a STOCK 0x2B9 frame's DAS_accState (12|4 = byte1 high nibble)
+// to ACC_ON(4) in place, then fix the additive checksum. Edits the single forwarded frame — no
+// second sender. Only the accState nibble changes; setSpeed/jerk/accel/counter are left as the
+// stock frame had them (we are not commanding accel here, only asserting the ACC_ON state the DI
+// watches for arming). Returns true if it rewrote.
+static bool tesla_legacy_rewrite_2b9_accon(CANPacket_t *msg) {
+  const int cur = (int)((msg->data[1] >> 4) & 0x0FU);   // DAS_accState
+  if (cur == 4) {
+    return false;   // already ACC_ON, nothing to do
+  }
+  msg->data[1] = (uint8_t)((msg->data[1] & 0x0FU) | (4U << 4));  // accState = ACC_ON(4)
+  tesla_legacy_set_last_byte_checksum(msg);
+  return true;
 }
 
 static bool tesla_legacy_vehicle_stopped_or_unknown(void) {
@@ -722,6 +755,18 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       tesla_legacy_scrub_das_control_aeb(to_fwd);
     }
   }
+
+#if TESLA_LEGACY_ARM_REWRITE_2B9
+  // Sub-18 arm experiment: as the panda forwards the STOCK 0x2B9 toward the DI, rewrite its
+  // accState CANCEL->ACC_ON, but ONLY while OP is actively controlling longitudinal
+  // (controls_allowed + longitudinal_allowed) AND the vehicle is at/below the DI's ~18mph arm
+  // floor. Above ~18 the DI already arms on its own, so we leave the stock frame alone there.
+  // This keeps ONE 0x2B9 on the wire (the stock frame, edited) — no second sender.
+  if ((addr == 0x2B9) && controls_allowed && get_longitudinal_allowed() &&
+      tesla_legacy_below_arm_speed()) {
+    (void)tesla_legacy_rewrite_2b9_accon(to_fwd);
+  }
+#endif
 
   // Prevent OP actuation echoes back to AP side.
   // Keep stock DAS_longControl (0x2BF) flowing before OP is actively controlling;
