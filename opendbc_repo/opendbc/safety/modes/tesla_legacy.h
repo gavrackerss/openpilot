@@ -49,7 +49,7 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 // latch feature-coding from stored NVRAM at boot, not from a live broadcast, so a runtime
 // override of a config frame is often ignored. Bench/rig ONLY: GTW_carConfig configures many
 // subsystems, so a modified copy is seen by everything that reads it.
-#define TESLA_LEGACY_OVERRIDE_GTW_AUTOPILOT 1
+#define TESLA_LEGACY_OVERRIDE_GTW_AUTOPILOT 0
 
 // --- Unity timing ---
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
@@ -970,6 +970,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
     {0x2B9, 0, 8, .check_relay = false},  // DAS_control (chassis) — low-speed DI arming, accel-limited in tx_hook
+    {0x398, 2, 8, .check_relay = false},  // GTW_carConfig autopilot=2 native on bus2 (config-unlock experiment)
 
   };
 

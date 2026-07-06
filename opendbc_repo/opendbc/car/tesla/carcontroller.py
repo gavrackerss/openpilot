@@ -62,8 +62,19 @@ BTN_DOWN1 = 32
 #   Test C (stalk only, bounded): CHASSIS False, STALK True
 #   Test D (both, the target):    both True
 # Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
-_ARM_ENABLE_CHASSIS = False  # OFF (isolate the GTW_carConfig test)
-_ARM_ENABLE_STALK = False    # OFF (isolate the GTW_carConfig test)
+_ARM_ENABLE_CHASSIS = False  # OFF (isolate GTW bus2 TX test)
+_ARM_ENABLE_STALK = False    # OFF (isolate GTW bus2 TX test)
+
+# --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
+# Transmit a full GTW_carConfig (0x398) frame with GTW_autopilot=2 NATIVELY on the AP module's
+# own segment (bus 2 = CANBUS.autopilot_party), at ~1Hz (matching the real GTW cadence). Prior
+# runs only edited the FORWARDED copy (bus130/134); this puts autopilot=2 on the bus the AP module
+# actually reads. Fixed payload verified stable on this car: 6987474215320020 (byte7 0x00->0x20,
+# all other config bytes identical, no checksum/counter on 0x398). Set False to disable.
+# WATCH: does AutopilotStatus(0x399) climb UNAVAILABLE(1) -> AVAILABLE(2)? If yes, config is read
+# live and AP/sub-18 is reachable. If it stays UNAVAILABLE with ap=2 native on bus2 => NVRAM-gated.
+_GTW_TX_AUTOPILOT2_BUS2 = True
+_GTW_CARCONFIG_AP2_PAYLOAD = bytes.fromhex("6987474215320020")
 
 ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
@@ -659,6 +670,11 @@ class CarController(CarControllerBase):
 
     self._refresh_cached_params()
     self._emit_internal_0x659(CS, can_sends)
+
+    # Config-unlock experiment: transmit GTW_carConfig(0x398) with autopilot=2 natively on bus 2
+    # (the AP module's own segment), ~1Hz. Fixed valid payload; no checksum/counter on this frame.
+    if _GTW_TX_AUTOPILOT2_BUS2 and (self.frame % 100 == 0):
+      can_sends.append((0x398, bytes(_GTW_CARCONFIG_AP2_PAYLOAD), int(CANBUS.autopilot_party)))
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)
 
