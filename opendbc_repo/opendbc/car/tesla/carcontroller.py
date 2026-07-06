@@ -62,8 +62,8 @@ BTN_DOWN1 = 32
 #   Test C (stalk only, bounded): CHASSIS False, STALK True
 #   Test D (both, the target):    both True
 # Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
-_ARM_ENABLE_CHASSIS = False  # OFF (isolate GTW bus2 TX test)
-_ARM_ENABLE_STALK = False    # OFF (isolate GTW bus2 TX test)
+_ARM_ENABLE_CHASSIS = False  # OFF (isolate GTW MITM test)
+_ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
 
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
 # Transmit a full GTW_carConfig (0x398) frame with GTW_autopilot=2 NATIVELY on the AP module's

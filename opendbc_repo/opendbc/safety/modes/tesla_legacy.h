@@ -51,6 +51,19 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 // subsystems, so a modified copy is seen by everything that reads it.
 #define TESLA_LEGACY_OVERRIDE_GTW_AUTOPILOT 0
 
+// --- Clean MITM: block the stock GTW_carConfig forward so ONLY openpilot's injected autopilot=2
+// reaches the AP module (single source, no collision) --------------------------------------------
+// The native-TX test flickered DISABLED because the AP module saw TWO 0x398 sources: the stock
+// GTW's autopilot=0 (forwarded onto its bus) AND openpilot's injected autopilot=2 -> mismatch
+// rejected. This toggle blocks the stock 0x398 from being forwarded onto the AP-module bus, so the
+// ONLY 0x398 the module sees is openpilot's autopilot=2 (transmitted via _GTW_TX_AUTOPILOT2_BUS2 in
+// carcontroller). Pair the two: this =1 AND _GTW_TX_AUTOPILOT2_BUS2=True in carcontroller.
+//   1 = block stock 0x398 forward (MITM), 0 = forward stock 0x398 normally.
+// This is the definitive single-source test: if the module STILL holds UNAVAILABLE with one clean
+// authoritative autopilot=2 and no competing frame, it is proof-positive the gate is NVRAM/
+// entitlement, not a live-CAN artifact. Bench/rig ONLY.
+#define TESLA_LEGACY_MITM_BLOCK_STOCK_GTW 1
+
 // --- Unity timing ---
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
@@ -758,6 +771,14 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 // fwd_hook/fwd_msg return true => block forwarding
 static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
   (void)bus_num;
+#if TESLA_LEGACY_MITM_BLOCK_STOCK_GTW
+  // Clean MITM: block the stock GTW_carConfig (0x398) from being forwarded, so the only 0x398 the
+  // AP module sees is openpilot's injected autopilot=2 (no competing stock autopilot=0 -> no
+  // DISABLED-flicker mismatch). Pairs with _GTW_TX_AUTOPILOT2_BUS2 in carcontroller.
+  if (addr == 0x398) {
+    return true;
+  }
+#endif
   return addr == 0x659;
 }
 
