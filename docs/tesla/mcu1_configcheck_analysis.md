@@ -151,3 +151,20 @@ The extractor now supports `--refs` to surface this kind of raw callback-referen
 ```sh
 python3 tools/tesla/mcu1_config_table.py Tesla_MCU1_ConfigCheckBypass.bin --refs
 ```
+
+## Bench-test export script for Ghidra-side patching
+
+Because the firmware image is a raw flash dump rather than an ELF, the safest way to reproduce bench-test artifacts on the machine that has the loaded Ghidra project is to patch Ghidra memory and export from that same address map. The repository now includes `tools/tesla/ghidra_scripts/Mcu1PatchExport.py` for that workflow.
+
+The script assumes the image is loaded at `0x40000000`, reads/pads a full `0x200000`-byte image with `0xff`, applies user-supplied byte patches, recalculates the observed header CRC field at file offset `0x8` over the default application range `[0x0c, 0x200000)`, writes the refreshed CRC back into both Ghidra memory and the exported image, and emits:
+
+- `<out>.bin`: padded raw flash image.
+- `<out>.srec`: Motorola S-record output using S3 records with addresses based at `0x40000000`.
+
+Example Ghidra script arguments:
+
+```text
+out=/tmp/Tesla_MCU1_ConfigCheckBypass_patched patch=0x24d5c:000870f0 patch=0x6f549:0870f0
+```
+
+The checked-in script intentionally has an empty default `PATCHES` list so the operator can paste the exact bench patch bytes after confirming the desired replacement callback or instruction sequence in their own Ghidra database. For the AP runtime-comparison experiment, the two offsets to consider first remain the descriptor callback word at `0x24d5c` and the direct AP callback reference near `0x6f549`.
