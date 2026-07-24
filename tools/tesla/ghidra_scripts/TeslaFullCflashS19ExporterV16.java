@@ -53,6 +53,7 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
     private static final int AUTOPILOT_VALUE_TWO = 0x32;
 
     private static final long APP_HEADER_ADDRESS = 0x00020000L;
+    private static final long EXPECTED_APP_HEADER_CRC = 0x38c63335L;
     private static final byte[] EXPECTED_APP_HEADER_PREFIX = new byte[] {
         (byte) 0x38, (byte) 0xc6, (byte) 0x33, (byte) 0x35,
         (byte) 0x00, (byte) 0x12, (byte) 0x92, (byte) 0x9a,
@@ -104,6 +105,13 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
         }
 
         byte[] appHeader = readRange(APP_HEADER_ADDRESS, EXPECTED_APP_HEADER_PREFIX.length, false);
+        long appHeaderCrc = readUnsignedInt(APP_HEADER_ADDRESS, false);
+        if (appHeaderCrc != EXPECTED_APP_HEADER_CRC) {
+            popup(String.format(Locale.ROOT,
+                "Export stopped: application header CRC word at 0x%08X is 0x%08X, expected 0x%08X.",
+                APP_HEADER_ADDRESS, appHeaderCrc, EXPECTED_APP_HEADER_CRC));
+            return;
+        }
         if (!equalsBytes(appHeader, EXPECTED_APP_HEADER_PREFIX)) {
             popup("Export stopped: the gateway application header does not match this firmware build.\n" +
                   "Expected: " + toHex(EXPECTED_APP_HEADER_PREFIX) + "\n" +
@@ -149,7 +157,7 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
         String s19Sha256 = sha256(s19File);
 
         writeReport(reportFile, binFile, s19File, validation, binSha256, s19Sha256,
-            shim, appHeader, autopilotValue);
+            shim, appHeader, appHeaderCrc, autopilotValue);
 
         println("Export complete:");
         println("  BIN:    " + binFile.getAbsolutePath());
@@ -199,6 +207,14 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
 
     private int readUnsignedByte(long address, boolean fillMissingWithFF) throws Exception {
         return readRange(address, 1, fillMissingWithFF)[0] & 0xff;
+    }
+
+    private long readUnsignedInt(long address, boolean fillMissingWithFF) throws Exception {
+        byte[] bytes = readRange(address, 4, fillMissingWithFF);
+        return ((long) (bytes[0] & 0xff) << 24) |
+               ((long) (bytes[1] & 0xff) << 16) |
+               ((long) (bytes[2] & 0xff) << 8) |
+               ((long) (bytes[3] & 0xff));
     }
 
     private void writeBinary(File file, byte[] image) throws Exception {
@@ -403,7 +419,7 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
 
     private void writeReport(File reportFile, File binFile, File s19File,
             S19Validation validation, String binSha256, String s19Sha256,
-            byte[] shim, byte[] appHeader, int autopilotValue) throws Exception {
+            byte[] shim, byte[] appHeader, long appHeaderCrc, int autopilotValue) throws Exception {
 
         BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
             new FileOutputStream(reportFile), StandardCharsets.UTF_8));
@@ -427,6 +443,9 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
             writer.write(String.format(Locale.ROOT,
                 "0x%08X autopilot value: %02X ('%c') [PASS]\r\n",
                 AUTOPILOT_VALUE_ADDRESS, autopilotValue, (char) autopilotValue));
+            writer.write(String.format(Locale.ROOT,
+                "0x%08X application header CRC word: 0x%08X [PASS]\r\n",
+                APP_HEADER_ADDRESS, appHeaderCrc));
             writer.write(String.format(Locale.ROOT,
                 "0x%08X application header prefix: %s [PASS]\r\n\r\n",
                 APP_HEADER_ADDRESS, toHex(appHeader)));

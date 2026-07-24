@@ -158,7 +158,7 @@ Use the provided `tools/tesla/ghidra_scripts/TeslaFullCflashS19ExporterV16.java`
 
 The script exports a complete `0x00200000` byte CFLASH image, writes S-records with 16 data bytes per record, uses S1 records through `0x00ffff` and S2 records after that, validates the S-record address coverage/checksums, and writes a report with output file sizes and SHA-256 hashes.
 
-Before export it verifies the currently expected bench patch bytes at `0x77226` and `0x87110`, accepts either `48 10` or the observed `48 00` bytes at `0x7722c`, verifies the application header prefix at `0x20000`, and checks the stored autopilot byte at `0x1cdbd` is ASCII `0` or `2`.
+Before export it verifies the currently expected bench patch bytes at `0x77226` and `0x87110`, accepts either `48 10` or the observed `48 00` bytes at `0x7722c`, verifies the application header CRC word is `0x38c63335` at `0x20000` and verifies the application header prefix, and checks the stored autopilot byte at `0x1cdbd` is ASCII `0` or `2`.
 
 ### Ghidra Java bundle troubleshooting
 
@@ -187,3 +187,6 @@ After it finishes, restart Ghidra or refresh Script Manager so the Java bundle r
 For the next bench experiment, use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefPatchV50.java` first. It toggles the two AP runtime-read reference edits identified by the latest trace: the direct callback reference at `0x6f549` and the autopilot descriptor callback word at `0x24d5c`. Both edits redirect `0x0870f0` to `0x086170` while leaving the functional AP runtime words untouched. The class name is unique so it will not collide with earlier local scripts.
 
 After applying the V50 patch in Ghidra, run `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefBinS19ExporterV51.java`. It is based on the full-CFLASH/PEmicro-compatible exporter flow, uses a unique class name, verifies the V50 bytes are present before export, and writes `Tesla_MCU1_APRuntimeReadRefV51.bin`, `Tesla_MCU1_APRuntimeReadRefV51.S19`, and a report.
+
+
+The V16 and V51 exporters explicitly stop if the stored application-header CRC word at `0x20000` is not `0x38c63335`, because that is the expected bootable value for this image family.
