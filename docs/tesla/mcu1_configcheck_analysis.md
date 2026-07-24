@@ -159,3 +159,9 @@ Use the provided `tools/tesla/ghidra_scripts/TeslaFullCflashS19ExporterV16.java`
 The script exports a complete `0x00200000` byte CFLASH image, writes S-records with 16 data bytes per record, uses S1 records through `0x00ffff` and S2 records after that, validates the S-record address coverage/checksums, and writes a report with output file sizes and SHA-256 hashes.
 
 Before export it verifies the currently expected bench patch bytes at `0x7722c`, `0x77226`, and `0x87110`, verifies the application header prefix at `0x20000`, and checks the stored autopilot byte at `0x1cdbd` is ASCII `0` or `2`.
+
+### Ghidra Java bundle troubleshooting
+
+If Ghidra reports `Unable to load script: TeslaFullCflashS19ExporterV16.java` but the stack trace names a different missing Java file, such as `TrasnsportAPublicationV53Script.java`, the exporter source is not the failing file. Ghidra's Java script provider builds the script directory as one bundle, and a stale/missing source entry for another script can prevent the whole bundle from activating.
+
+To recover, remove the missing script from the Ghidra script directory listing or restore that exact file, then force Ghidra to rebuild the Java script bundle. In practice this usually means closing Ghidra, deleting the stale `TrasnsportAPublicationV53Script.java` entry or copying the missing file back into `C:\Users\gavra\ghidra_scripts`, clearing the script-manager cache if necessary, and reopening the Script Manager. `TeslaFullCflashS19ExporterV16.java` itself already has the required public class name matching the file name.
