@@ -154,17 +154,8 @@ python3 tools/tesla/mcu1_config_table.py Tesla_MCU1_ConfigCheckBypass.bin --refs
 
 ## Bench-test export script for Ghidra-side patching
 
-Because the firmware image is a raw flash dump rather than an ELF, the safest way to reproduce bench-test artifacts on the machine that has the loaded Ghidra project is to patch Ghidra memory and export from that same address map. The repository now includes `tools/tesla/ghidra_scripts/Mcu1PatchExport.java` for that workflow.
+Use the provided `tools/tesla/ghidra_scripts/TeslaFullCflashS19ExporterV16.java` script for bench exports. This preserves the known-good full-CFLASH/PEmicro-compatible layout instead of using the experimental generic exporter.
 
-The script reads from the first loaded Ghidra memory block by default, so it works whether the raw image was imported at `0x0`, `0x40000000`, or another RAM/flash base. If needed, pass `image_base=0x...` to force the loaded-image base and `srec_base=0x40000000` to control exported S-record addresses. It reads/pads a full `0x200000`-byte image with `0xff`, applies user-supplied byte patches, recalculates the observed header CRC field at file offset `0x8` over the default application range `[0x0c, 0x200000)`, writes the refreshed CRC back into both Ghidra memory and the exported image, and emits:
+The script exports a complete `0x00200000` byte CFLASH image, writes S-records with 16 data bytes per record, uses S1 records through `0x00ffff` and S2 records after that, validates the S-record address coverage/checksums, and writes a report with output file sizes and SHA-256 hashes.
 
-- `<out>.bin`: padded raw flash image.
-- `<out>.srec`: Motorola S-record output using S3 records with addresses based at `0x40000000`.
-
-Example Ghidra script arguments:
-
-```text
-out=/tmp/Tesla_MCU1_ConfigCheckBypass_patched srec_base=0x40000000 patch=0x24d5c:000870f0 patch=0x6f549:0870f0
-```
-
-The checked-in Java script intentionally has an empty default `PATCHES` list so the operator can paste the exact bench patch bytes after confirming the desired replacement callback or instruction sequence in their own Ghidra database. For the AP runtime-comparison experiment, the two offsets to consider first remain the descriptor callback word at `0x24d5c` and the direct AP callback reference near `0x6f549`.
+Before export it verifies the currently expected bench patch bytes at `0x7722c`, `0x77226`, and `0x87110`, verifies the application header prefix at `0x20000`, and checks the stored autopilot byte at `0x1cdbd` is ASCII `0` or `2`.
