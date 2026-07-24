@@ -180,3 +180,10 @@ powershell -ExecutionPolicy Bypass -File .\RepairGhidraScriptBundle.ps1 `
 ```
 
 After it finishes, restart Ghidra or refresh Script Manager so the Java bundle rebuilds from the cleaned script directory.
+
+
+## AP runtime-read reference patch/export scripts
+
+For the next bench experiment, use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefPatchV50.java` first. It toggles the two AP runtime-read reference edits identified by the latest trace: the direct callback reference at `0x6f549` and the autopilot descriptor callback word at `0x24d5c`. Both edits redirect `0x0870f0` to `0x086170` while leaving the functional AP runtime words untouched. The class name is unique so it will not collide with earlier local scripts.
+
+After applying the V50 patch in Ghidra, run `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefBinS19ExporterV51.java`. It is based on the full-CFLASH/PEmicro-compatible exporter flow, uses a unique class name, verifies the V50 bytes are present before export, and writes `Tesla_MCU1_APRuntimeReadRefV51.bin`, `Tesla_MCU1_APRuntimeReadRefV51.S19`, and a report.
