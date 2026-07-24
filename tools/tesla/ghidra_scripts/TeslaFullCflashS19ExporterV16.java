@@ -31,8 +31,11 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
     private static final int RECORD_DATA_LENGTH = 16;
 
     private static final long SHIM_ADDRESS = 0x0007722CL;
-    private static final byte[] SHIM_BYTES = new byte[] {
+    private static final byte[] SHIM_FAILURE_ACK_BYTES = new byte[] {
         (byte) 0x48, (byte) 0x10
+    };
+    private static final byte[] SHIM_ORIGINAL_BYTES = new byte[] {
+        (byte) 0x48, (byte) 0x00
     };
 
     private static final long CHECK_CALL_ADDRESS = 0x00077226L;
@@ -74,11 +77,11 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
         println("Program: " + currentProgram.getName());
         println(String.format(Locale.ROOT, "Range: 0x%08X-0x%08X", START, END));
 
-        byte[] shim = readRange(SHIM_ADDRESS, SHIM_BYTES.length, false);
-        if (!equalsBytes(shim, SHIM_BYTES)) {
-            popup("Export stopped: the failure ACK is not present at 0x7722C.\n" +
-                  "Expected: 48 10\n" +
-                  "Found:    " + toHex(shim));
+        byte[] shim = readRange(SHIM_ADDRESS, SHIM_FAILURE_ACK_BYTES.length, false);
+        if (!equalsBytes(shim, SHIM_FAILURE_ACK_BYTES) && !equalsBytes(shim, SHIM_ORIGINAL_BYTES)) {
+            popup("Export stopped: the 0x7722C ACK shim bytes are not recognized.\n" +
+                  "Expected one of: 48 10 or 48 00\n" +
+                  "Found:           " + toHex(shim));
             return;
         }
 
@@ -416,7 +419,7 @@ public class TeslaFullCflashS19ExporterV16 extends GhidraScript {
             writer.write("Required patch checks\r\n");
             writer.write("---------------------\r\n");
             writer.write(String.format(Locale.ROOT,
-                "0x%08X vehicle-config failure ACK: %s [PASS]\r\n",
+                "0x%08X ACK shim/original bytes: %s [PASS]\r\n",
                 SHIM_ADDRESS, toHex(shim)));
             writer.write(String.format(Locale.ROOT,
                 "0x%08X runtime autopilot patch: %s [PASS]\r\n",

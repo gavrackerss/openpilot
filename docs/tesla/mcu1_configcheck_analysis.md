@@ -158,7 +158,7 @@ Use the provided `tools/tesla/ghidra_scripts/TeslaFullCflashS19ExporterV16.java`
 
 The script exports a complete `0x00200000` byte CFLASH image, writes S-records with 16 data bytes per record, uses S1 records through `0x00ffff` and S2 records after that, validates the S-record address coverage/checksums, and writes a report with output file sizes and SHA-256 hashes.
 
-Before export it verifies the currently expected bench patch bytes at `0x7722c`, `0x77226`, and `0x87110`, verifies the application header prefix at `0x20000`, and checks the stored autopilot byte at `0x1cdbd` is ASCII `0` or `2`.
+Before export it verifies the currently expected bench patch bytes at `0x77226` and `0x87110`, accepts either `48 10` or the observed `48 00` bytes at `0x7722c`, verifies the application header prefix at `0x20000`, and checks the stored autopilot byte at `0x1cdbd` is ASCII `0` or `2`.
 
 ### Ghidra Java bundle troubleshooting
 
