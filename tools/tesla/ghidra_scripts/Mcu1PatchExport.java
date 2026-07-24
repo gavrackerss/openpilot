@@ -51,22 +51,22 @@ public class Mcu1PatchExport extends GhidraScript {
   @Override
   public void run() throws Exception {
     Map<String, List<String>> args = parseArgs(getScriptArgs());
-    int imageSize = parseInt(firstArg(args, "image_size", Integer.toString(IMAGE_SIZE)));
-    int crcOffset = parseInt(firstArg(args, "crc_offset", Integer.toString(CRC_OFFSET)));
-    int crcStart = parseInt(firstArg(args, "crc_start", Integer.toString(CRC_START)));
-    int crcEnd = parseInt(firstArg(args, "crc_end", Integer.toString(imageSize)));
+    int imageSize = parseIntegerArg(firstArg(args, "image_size", Integer.toString(IMAGE_SIZE)));
+    int crcOffset = parseIntegerArg(firstArg(args, "crc_offset", Integer.toString(CRC_OFFSET)));
+    int crcStart = parseIntegerArg(firstArg(args, "crc_start", Integer.toString(CRC_START)));
+    int crcEnd = parseIntegerArg(firstArg(args, "crc_end", Integer.toString(imageSize)));
     String outPrefix = firstArg(args, "out", System.getProperty("user.home") + "/Tesla_MCU1_ConfigCheckBypass_patched");
 
     List<Patch> patches = new ArrayList<>();
     for (String[] patch : PATCHES) {
-      patches.add(new Patch(parseInt(patch[0]), parseHex(patch[1])));
+      patches.add(new Patch(parseIntegerArg(patch[0]), parseHex(patch[1])));
     }
     for (String spec : args.getOrDefault("patch", new ArrayList<String>())) {
       String[] parts = spec.split(":", 2);
       if (parts.length != 2) {
         throw new IllegalArgumentException("patch argument must be offset:hexbytes, got: " + spec);
       }
-      patches.add(new Patch(parseInt(parts[0]), parseHex(parts[1])));
+      patches.add(new Patch(parseIntegerArg(parts[0]), parseHex(parts[1])));
     }
 
     println(String.format("Reading 0x%x bytes from Ghidra memory at 0x%x", imageSize, FLASH_BASE));
@@ -122,7 +122,7 @@ public class Mcu1PatchExport extends GhidraScript {
     return values == null || values.isEmpty() ? defaultValue : values.get(values.size() - 1);
   }
 
-  private int parseInt(String value) {
+  private int parseIntegerArg(String value) {
     String trimmed = value.trim().toLowerCase();
     if (trimmed.startsWith("0x")) {
       return (int) Long.parseLong(trimmed.substring(2), 16);
