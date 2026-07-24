@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Map;
 
 public class Mcu1PatchExport extends GhidraScript {
-  private static final long FLASH_BASE = 0x40000000L;
+  private static final long DEFAULT_SREC_BASE = 0x40000000L;
   private static final int IMAGE_SIZE = 0x200000;
   private static final int PAD_BYTE = 0xff;
 
@@ -55,6 +55,8 @@ public class Mcu1PatchExport extends GhidraScript {
     int crcOffset = parseIntegerArg(firstArg(args, "crc_offset", Integer.toString(CRC_OFFSET)));
     int crcStart = parseIntegerArg(firstArg(args, "crc_start", Integer.toString(CRC_START)));
     int crcEnd = parseIntegerArg(firstArg(args, "crc_end", Integer.toString(imageSize)));
+    Address imageBase = resolveImageBase(args);
+    long srecBase = parseLongArg(firstArg(args, "srec_base", Long.toString(DEFAULT_SREC_BASE)));
     String outPrefix = firstArg(args, "out", System.getProperty("user.home") + "/Tesla_MCU1_ConfigCheckBypass_patched");
 
     List<Patch> patches = new ArrayList<>();
@@ -69,16 +71,16 @@ public class Mcu1PatchExport extends GhidraScript {
       patches.add(new Patch(parseIntegerArg(parts[0]), parseHex(parts[1])));
     }
 
-    println(String.format("Reading 0x%x bytes from Ghidra memory at 0x%x", imageSize, FLASH_BASE));
-    byte[] image = readImage(imageSize);
+    println(String.format("Reading 0x%x bytes from Ghidra memory at %s", imageSize, imageBase));
+    byte[] image = readImage(imageBase, imageSize);
 
     for (Patch patch : patches) {
       if (patch.offset < 0 || patch.offset + patch.bytes.length > image.length) {
         throw new IllegalArgumentException(String.format("Patch outside image: off=0x%x len=%d", patch.offset, patch.bytes.length));
       }
-      println(String.format("Patching file offset 0x%x VA 0x%x: %s", patch.offset, FLASH_BASE + patch.offset, toHex(patch.bytes)));
+      println(String.format("Patching file offset 0x%x address %s: %s", patch.offset, fileAddr(imageBase, patch.offset), toHex(patch.bytes)));
       System.arraycopy(patch.bytes, 0, image, patch.offset, patch.bytes.length);
-      writeBytes(patch.offset, patch.bytes);
+      writeBytes(imageBase, patch.offset, patch.bytes);
     }
 
     if (!(0 <= crcOffset && crcOffset <= imageSize - 4 && 0 <= crcStart && crcStart <= crcEnd && crcEnd <= imageSize)) {
@@ -90,13 +92,13 @@ public class Mcu1PatchExport extends GhidraScript {
     image[crcOffset + 1] = (byte) ((crc >>> 16) & 0xff);
     image[crcOffset + 2] = (byte) ((crc >>> 8) & 0xff);
     image[crcOffset + 3] = (byte) (crc & 0xff);
-    writeBytes(crcOffset, Arrays.copyOfRange(image, crcOffset, crcOffset + 4));
+    writeBytes(imageBase, crcOffset, Arrays.copyOfRange(image, crcOffset, crcOffset + 4));
     int verify = crc32Ieee(image, crcStart, crcEnd);
 
     String binPath = outPrefix + ".bin";
     String srecPath = outPrefix + ".srec";
     writeBin(binPath, image);
-    int records = writeSrec(srecPath, image, FLASH_BASE, 32);
+    int records = writeSrec(srecPath, image, srecBase, 32);
 
     println(String.format("Wrote %s (%d bytes, padded with 0x%02x)", binPath, image.length, PAD_BYTE));
     println(String.format("Wrote %s (%d S3 data records)", srecPath, records));
@@ -123,11 +125,15 @@ public class Mcu1PatchExport extends GhidraScript {
   }
 
   private int parseIntegerArg(String value) {
+    return (int) parseLongArg(value);
+  }
+
+  private long parseLongArg(String value) {
     String trimmed = value.trim().toLowerCase();
     if (trimmed.startsWith("0x")) {
-      return (int) Long.parseLong(trimmed.substring(2), 16);
+      return Long.parseLong(trimmed.substring(2), 16);
     }
-    return Integer.parseInt(trimmed);
+    return Long.parseLong(trimmed);
   }
 
   private byte[] parseHex(String hex) {
@@ -150,16 +156,30 @@ public class Mcu1PatchExport extends GhidraScript {
     return out.toString();
   }
 
-  private Address fileAddr(int offset) {
-    return currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(FLASH_BASE + (long) offset);
+  private Address resolveImageBase(Map<String, List<String>> args) {
+    String explicitBase = firstArg(args, "image_base", null);
+    if (explicitBase != null) {
+      return currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(parseLongArg(explicitBase));
+    }
+
+    Memory memory = currentProgram.getMemory();
+    Address minAddress = memory.getMinAddress();
+    if (minAddress == null) {
+      throw new IllegalStateException("Program has no memory blocks; import the raw image before running this script");
+    }
+    return minAddress;
   }
 
-  private byte[] readImage(int size) throws Exception {
+  private Address fileAddr(Address imageBase, int offset) {
+    return imageBase.add(offset);
+  }
+
+  private byte[] readImage(Address imageBase, int size) throws Exception {
     byte[] data = new byte[size];
     Arrays.fill(data, (byte) PAD_BYTE);
     Memory memory = currentProgram.getMemory();
     for (int off = 0; off < size; off++) {
-      Address addr = fileAddr(off);
+      Address addr = fileAddr(imageBase, off);
       if (memory.contains(addr)) {
         data[off] = getByte(addr);
       }
@@ -168,9 +188,9 @@ public class Mcu1PatchExport extends GhidraScript {
     return data;
   }
 
-  private void writeBytes(int offset, byte[] data) throws Exception {
+  private void writeBytes(Address imageBase, int offset, byte[] data) throws Exception {
     for (int i = 0; i < data.length; i++) {
-      setByte(fileAddr(offset + i), data[i]);
+      setByte(fileAddr(imageBase, offset + i), data[i]);
     }
   }
 
