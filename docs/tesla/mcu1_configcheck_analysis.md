@@ -195,3 +195,9 @@ The V16 and V51 exporters explicitly stop if the stored application-header CRC w
 ### V50 AP runtime-read patch bench result
 
 The V50 AP runtime-read reference patch (`0x6f549: 08 61 70` and `0x24d5c: 00 08 61 70`) boot-failed on bench. Treat that result as a failed patch experiment, not as a valid export target. The V50 script now keeps only the restore path enabled so it can revert an already-patched Ghidra program back to `0x6f549: 08 70 f0` and `0x24d5c: 00 08 70 f0`; it will not apply the boot-failing bytes from a clean/original state. The V51 exporter also blocks export if those boot-failing bytes are present.
+
+## Next trace script: AP runtime-read consumer V52
+
+`tools/tesla/ghidra_scripts/TeslaAPRuntimeReadConsumerTraceV52.java` is the next read-only Ghidra trace script. It targets the direct AP runtime-read callback reference at `0x6f549` and the surrounding `0x6f520` code area without applying any binary patch.
+
+The V52 report writes `Tesla_APRuntimeReadConsumerTraceV52.txt` and includes the bytes around `0x6f520`, the containing function, typed callers, call/flow references from that function, suspicious stores/compares/constants in that function, raw 24-bit callback-offset hits for the comparison-relevant callbacks, typed references to those callback addresses, and nearby defined strings/data. Use this to decide whether the `0x6f520` path is an outbound serializer, comparator, hash/config-object builder, or unrelated initialization path before attempting another patch.
