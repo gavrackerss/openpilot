@@ -107,7 +107,7 @@ public class TeslaAPRuntimeReadConsumerTraceV52 extends GhidraScript {
     }
 
     private void traceContainingFunction() throws Exception {
-        Address directAddress = toAddr(DIRECT_REF_ADDRESS);
+        Address directAddress = offsetAddr(DIRECT_REF_ADDRESS);
         Function function = functionManager.getFunctionContaining(directAddress);
         writeLine("CONTAINING FUNCTION");
         writeLine("-------------------");
@@ -147,7 +147,7 @@ public class TeslaAPRuntimeReadConsumerTraceV52 extends GhidraScript {
         writeLine("GHIDRA REFERENCES TO INTERESTING CALLBACK ADDRESSES");
         writeLine("--------------------------------------------------");
         for (int i = 0; i < INTERESTING_CALLBACKS.length; i++) {
-            Address callback = toAddr(INTERESTING_CALLBACKS[i]);
+            Address callback = offsetAddr(INTERESTING_CALLBACKS[i]);
             writeLine(String.format(Locale.ROOT, "%s callback 0x%08X", INTERESTING_NAMES[i], INTERESTING_CALLBACKS[i]));
             ReferenceIterator refs = referenceManager.getReferencesTo(callback);
             int count = 0;
@@ -169,7 +169,7 @@ public class TeslaAPRuntimeReadConsumerTraceV52 extends GhidraScript {
         long min = Math.max(0, CONTEXT_ADDRESS - 0x8000);
         long max = CONTEXT_ADDRESS + 0x8000;
         int count = 0;
-        for (Data data = listing.getDefinedDataAfter(toAddr(min)); data != null; data = listing.getDefinedDataAfter(data.getAddress())) {
+        for (Data data = listing.getDefinedDataAfter(offsetAddr(min)); data != null; data = listing.getDefinedDataAfter(data.getAddress())) {
             long offset = data.getAddress().getOffset();
             if (offset > max) {
                 break;
@@ -294,7 +294,7 @@ public class TeslaAPRuntimeReadConsumerTraceV52 extends GhidraScript {
 
     private boolean matchesAt(long offset, byte[] pattern) throws Exception {
         for (int i = 0; i < pattern.length; i++) {
-            Address address = toAddr(offset + i);
+            Address address = offsetAddr(offset + i);
             if (!memory.contains(address) || memory.getByte(address) != pattern[i]) {
                 return false;
             }
@@ -315,7 +315,7 @@ public class TeslaAPRuntimeReadConsumerTraceV52 extends GhidraScript {
             StringBuilder line = new StringBuilder();
             line.append(String.format(Locale.ROOT, "0x%08X:", start + row));
             for (int i = 0; i < 16 && row + i < length; i++) {
-                Address address = toAddr(start + row + i);
+                Address address = offsetAddr(start + row + i);
                 if (memory.contains(address)) {
                     line.append(String.format(Locale.ROOT, " %02X", memory.getByte(address) & 0xff));
                 }
@@ -331,7 +331,7 @@ public class TeslaAPRuntimeReadConsumerTraceV52 extends GhidraScript {
         return function == null ? "<no function>" : function.getName() + "@" + function.getEntryPoint();
     }
 
-    private Address toAddr(long offset) {
+    private Address offsetAddr(long offset) {
         return addressSpace.getAddress(offset);
     }
 
