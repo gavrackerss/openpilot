@@ -209,3 +209,7 @@ The V52 report showed raw AP callback hits but no Ghidra function containing `0x
 ## Follow-up trace script: candidate function trace V54
 
 The V53 output still did not place `0x6f549` inside a function and showed likely misaligned/partial disassembly from `0x6f520`. Use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadCandidateFunctionTraceV54.java` next. V54 tries several even candidate starts around the raw reference (`0x6f548`, `0x6f546`, `0x6f544`, `0x6f542`, `0x6f540`, `0x6f53c`, `0x6f538`, `0x6f530`, `0x6f520`, `0x6f500`), asks Ghidra to disassemble each candidate as needed, creates uniquely named analysis functions, and stops once `0x6f549` is covered. It also emits a mixed instruction/raw-byte window from `0x6f500` through `0x6f590` so the correct instruction boundary around the embedded `08 70 f0` bytes can be identified.
+
+## Follow-up trace script: raw region classifier V55
+
+The V54 output classified `0x6f548` as a tiny function containing `tdi r8,0x70f0`, which is not a convincing software-update comparator/serializer. That makes the `0x6f500` region more likely to be data, an encoded dispatch/object table, or incorrectly decoded code. Use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRawRegionClassifierV55.java` next. It treats `0x6f480`-`0x6f680` as raw data, emits 8-byte and 16-byte row views, annotates low-24-bit hits for the known config callbacks/AP runtime words, and scans the whole image for raw pointers back to `0x6f520`, `0x6f548`, and `0x6f549`.
