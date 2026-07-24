@@ -205,3 +205,7 @@ The V52 report writes `Tesla_APRuntimeReadConsumerTraceV52.txt` and includes the
 ## Follow-up trace script: function builder V53
 
 The V52 report showed raw AP callback hits but no Ghidra function containing `0x6f549`. Use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadConsumerFunctionBuilderV53.java` next. It asks Ghidra to disassemble from `0x6f520`, creates a uniquely named analysis function at that address if the direct AP reference is still not inside a function, and emits `Tesla_APRuntimeReadConsumerFunctionBuilderV53.txt` with a linear instruction window from `0x6f480` through `0x6f680`. This changes only Ghidra analysis metadata, not firmware bytes, and should make subsequent caller/callee tracing possible.
+
+## Follow-up trace script: candidate function trace V54
+
+The V53 output still did not place `0x6f549` inside a function and showed likely misaligned/partial disassembly from `0x6f520`. Use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadCandidateFunctionTraceV54.java` next. V54 tries several even candidate starts around the raw reference (`0x6f548`, `0x6f546`, `0x6f544`, `0x6f542`, `0x6f540`, `0x6f53c`, `0x6f538`, `0x6f530`, `0x6f520`, `0x6f500`), asks Ghidra to disassemble each candidate as needed, creates uniquely named analysis functions, and stops once `0x6f549` is covered. It also emits a mixed instruction/raw-byte window from `0x6f500` through `0x6f590` so the correct instruction boundary around the embedded `08 70 f0` bytes can be identified.
