@@ -184,9 +184,14 @@ After it finishes, restart Ghidra or refresh Script Manager so the Java bundle r
 
 ## AP runtime-read reference patch/export scripts
 
-For the next bench experiment, use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefPatchV50.java` first. It toggles the two AP runtime-read reference edits identified by the latest trace: the direct callback reference at `0x6f549` and the autopilot descriptor callback word at `0x24d5c`. Both edits redirect `0x0870f0` to `0x086170` while leaving the functional AP runtime words untouched. The class name is unique so it will not collide with earlier local scripts.
+The V50 AP runtime-read reference scripts are retained for audit/revert only after the bench boot failure. `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefPatchV50.java` recognizes the two traced AP runtime-read reference edits at `0x6f549` and `0x24d5c`, but now refuses to apply them from a clean/original state. If those bytes are already patched in a Ghidra program, it restores them to `0x6f549: 08 70 f0` and `0x24d5c: 00 08 70 f0`.
 
-After applying the V50 patch in Ghidra, run `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefBinS19ExporterV51.java`. It is based on the full-CFLASH/PEmicro-compatible exporter flow, uses a unique class name, verifies the V50 bytes are present before export, and writes `Tesla_MCU1_APRuntimeReadRefV51.bin`, `Tesla_MCU1_APRuntimeReadRefV51.S19`, and a report.
+`tools/tesla/ghidra_scripts/TeslaAPRuntimeReadRefBinS19ExporterV51.java` is likewise retained only as a guarded exporter/report template; it blocks export if the boot-failing V50 bytes are present.
 
 
 The V16 and V51 exporters explicitly stop if the stored application-header CRC word at `0x20000` is not `0x38c63335`, because that is the expected bootable value for this image family.
+
+
+### V50 AP runtime-read patch bench result
+
+The V50 AP runtime-read reference patch (`0x6f549: 08 61 70` and `0x24d5c: 00 08 61 70`) boot-failed on bench. Treat that result as a failed patch experiment, not as a valid export target. The V50 script now keeps only the restore path enabled so it can revert an already-patched Ghidra program back to `0x6f549: 08 70 f0` and `0x24d5c: 00 08 70 f0`; it will not apply the boot-failing bytes from a clean/original state. The V51 exporter also blocks export if those boot-failing bytes are present.

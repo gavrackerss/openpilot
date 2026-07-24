@@ -84,23 +84,17 @@ public class TeslaAPRuntimeReadRefBinS19ExporterV51 extends GhidraScript {
         memory = currentProgram.getMemory();
         addressSpace = currentProgram.getAddressFactory().getDefaultAddressSpace();
 
-        println("Tesla AP runtime-read ref V51 CFLASH BIN/S19 exporter");
+        println("Tesla AP runtime-read ref V51 CFLASH BIN/S19 exporter (V50 boot-fail guarded)");
         println("Program: " + currentProgram.getName());
         println(String.format(Locale.ROOT, "Range: 0x%08X-0x%08X", START, END));
 
         byte[] directRef = readRange(DIRECT_REF_ADDRESS, DIRECT_REF_PATCHED.length, false);
-        if (!equalsBytes(directRef, DIRECT_REF_PATCHED)) {
-            popup("Export stopped: V50 direct AP runtime-read reference patch is not present at 0x6F549.\n" +
-                  "Expected: " + toHex(DIRECT_REF_PATCHED) + "\n" +
-                  "Found:    " + toHex(directRef));
-            return;
-        }
-
         byte[] descriptorRef = readRange(DESCRIPTOR_READ_ADDRESS, DESCRIPTOR_READ_PATCHED.length, false);
-        if (!equalsBytes(descriptorRef, DESCRIPTOR_READ_PATCHED)) {
-            popup("Export stopped: V50 AP descriptor runtime-read patch is not present at 0x24D5C.\n" +
-                  "Expected: " + toHex(DESCRIPTOR_READ_PATCHED) + "\n" +
-                  "Found:    " + toHex(descriptorRef));
+        if (equalsBytes(directRef, DIRECT_REF_PATCHED) || equalsBytes(descriptorRef, DESCRIPTOR_READ_PATCHED)) {
+            popup("Export stopped: the V50 AP runtime-read reference patch is present, and that patch boot-failed on bench.\n" +
+                  "Revert 0x6F549 and 0x24D5C before exporting a flashable file.\n\n" +
+                  String.format(Locale.ROOT, "0x%08X: %s\n", DIRECT_REF_ADDRESS, toHex(directRef)) +
+                  String.format(Locale.ROOT, "0x%08X: %s", DESCRIPTOR_READ_ADDRESS, toHex(descriptorRef)));
             return;
         }
 

@@ -70,22 +70,28 @@ public class TeslaAPRuntimeReadRefPatchV50 extends GhidraScript {
             return;
         }
 
-        boolean applyPatch = original;
-        String action = applyPatch ? "APPLY V50 runtime-read reference patch" : "RESTORE original AP runtime-read references";
-        if (!askYesNo(action, "This modifies the open Ghidra program in-place. Continue?")) {
-            println("Patch cancelled.");
+        if (original) {
+            popup("V50 apply path is disabled: the 0x6F549/0x24D5C runtime-read reference patch boot-failed on bench.\n\n" +
+                  "No bytes were changed. Keep this script only to restore an already-patched Ghidra program back to the original bytes.");
+            println("V50 apply path disabled after bench boot failure; no bytes changed.");
             return;
         }
 
-        writeRange(DIRECT_REF_ADDRESS, applyPatch ? DIRECT_REF_PATCHED : DIRECT_REF_ORIGINAL);
-        writeRange(DESCRIPTOR_READ_ADDRESS, applyPatch ? DESCRIPTOR_READ_PATCHED : DESCRIPTOR_READ_ORIGINAL);
+        String action = "RESTORE original AP runtime-read references";
+        if (!askYesNo(action, "This modifies the open Ghidra program in-place and reverts the boot-failing V50 bytes. Continue?")) {
+            println("Restore cancelled.");
+            return;
+        }
+
+        writeRange(DIRECT_REF_ADDRESS, DIRECT_REF_ORIGINAL);
+        writeRange(DESCRIPTOR_READ_ADDRESS, DESCRIPTOR_READ_ORIGINAL);
 
         println(action + " complete.");
         println(String.format(Locale.ROOT, "0x%08X: %s", DIRECT_REF_ADDRESS,
             toHex(readRange(DIRECT_REF_ADDRESS, DIRECT_REF_ORIGINAL.length))));
         println(String.format(Locale.ROOT, "0x%08X: %s", DESCRIPTOR_READ_ADDRESS,
             toHex(readRange(DESCRIPTOR_READ_ADDRESS, DESCRIPTOR_READ_ORIGINAL.length))));
-        popup(action + " complete. Export with TeslaAPRuntimeReadRefBinS19ExporterV51.java.");
+        popup(action + " complete. Export with the known-good full CFLASH exporter if needed.");
     }
 
     private byte[] readRange(long start, int length) throws Exception {
