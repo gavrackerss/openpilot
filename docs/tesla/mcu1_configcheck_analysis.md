@@ -165,3 +165,18 @@ Before export it verifies the currently expected bench patch bytes at `0x7722c`,
 If Ghidra reports `Unable to load script: TeslaFullCflashS19ExporterV16.java` but the stack trace names a different missing Java file, such as `TrasnsportAPublicationV53Script.java`, the exporter source is not the failing file. Ghidra's Java script provider builds the script directory as one bundle, and a stale/missing source entry for another script can prevent the whole bundle from activating.
 
 To recover, remove the missing script from the Ghidra script directory listing or restore that exact file, then force Ghidra to rebuild the Java script bundle. In practice this usually means closing Ghidra, deleting the stale `TrasnsportAPublicationV53Script.java` entry or copying the missing file back into `C:\Users\gavra\ghidra_scripts`, clearing the script-manager cache if necessary, and reopening the Script Manager. `TeslaFullCflashS19ExporterV16.java` itself already has the required public class name matching the file name.
+
+
+### Repair script for a broken Ghidra script bundle
+
+If Ghidra says the script directory has multiple previous Java build failures, run `tools/tesla/ghidra_scripts/RepairGhidraScriptBundle.ps1` from PowerShell. The repair script quarantines the known failing files from the error log, including Python/Markdown content saved as `.java`, duplicate `TeslaFullCflashS19ExporterV16-old.java`, public-class/file-name mismatches, and UTF-8-BOM Java files, then optionally copies the known-good exporter back into `C:\Users\gavra\ghidra_scripts`.
+
+Example from the directory containing the checked-in scripts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\RepairGhidraScriptBundle.ps1 `
+  -ScriptDir "$env:USERPROFILE\ghidra_scripts" `
+  -ExporterSource .\TeslaFullCflashS19ExporterV16.java
+```
+
+After it finishes, restart Ghidra or refresh Script Manager so the Java bundle rebuilds from the cleaned script directory.
