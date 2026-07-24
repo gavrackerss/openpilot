@@ -201,3 +201,7 @@ The V50 AP runtime-read reference patch (`0x6f549: 08 61 70` and `0x24d5c: 00 08
 `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadConsumerTraceV52.java` is the next read-only Ghidra trace script. It targets the direct AP runtime-read callback reference at `0x6f549` and the surrounding `0x6f520` code area without applying any binary patch.
 
 The V52 report writes `Tesla_APRuntimeReadConsumerTraceV52.txt` and includes the bytes around `0x6f520`, the containing function, typed callers, call/flow references from that function, suspicious stores/compares/constants in that function, raw 24-bit callback-offset hits for the comparison-relevant callbacks, typed references to those callback addresses, and nearby defined strings/data. Use this to decide whether the `0x6f520` path is an outbound serializer, comparator, hash/config-object builder, or unrelated initialization path before attempting another patch.
+
+## Follow-up trace script: function builder V53
+
+The V52 report showed raw AP callback hits but no Ghidra function containing `0x6f549`. Use `tools/tesla/ghidra_scripts/TeslaAPRuntimeReadConsumerFunctionBuilderV53.java` next. It asks Ghidra to disassemble from `0x6f520`, creates a uniquely named analysis function at that address if the direct AP reference is still not inside a function, and emits `Tesla_APRuntimeReadConsumerFunctionBuilderV53.txt` with a linear instruction window from `0x6f480` through `0x6f680`. This changes only Ghidra analysis metadata, not firmware bytes, and should make subsequent caller/callee tracing possible.
