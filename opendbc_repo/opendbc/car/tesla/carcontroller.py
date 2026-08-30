@@ -412,10 +412,66 @@ class CarController(CarControllerBase):
 
 
 
+  def _ic_lane_model_state(self, CS) -> tuple[float, bool, bool, float, float, float, float, float, int, int]:
+    # Semantic port of Unity HUD_module's modelV2 -> DAS_lanes mapping. Keep xnor's
+    # controller/gating architecture; only transplant the lane data it was missing.
+    lane_width_m = 4.0
+    lane_range_m = 50.0
+    left_visible = False
+    right_visible = False
+    left_quality = 0
+    right_quality = 0
+    c0 = c1 = c2 = c3 = 0.0
+
+    model = getattr(CS, "ic_model_data", None)
+    if not isinstance(model, dict):
+      return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
+
+    try:
+      probs = tuple(float(v) for v in model.get("lane_probs", ()))
+      if len(probs) >= 4:
+        left_visible = probs[1] > 0.45
+        right_visible = probs[2] > 0.45
+        left_quality = 1 if probs[0] > 0.25 else 0
+        right_quality = 1 if probs[3] > 0.25 else 0
+
+      x = np.asarray(model.get("position_x", ()), dtype=float)
+      y = np.asarray(model.get("position_y", ()), dtype=float)
+      n = min(int(x.size), int(y.size))
+      if n >= 4:
+        x = x[:n]
+        y = y[:n]
+        valid = np.isfinite(x) & np.isfinite(y) & (x >= 0.0) & (x <= 100.0)
+        x_fit = x[valid]
+        y_fit = y[valid]
+        if x_fit.size >= 4:
+          coefs = np.polyfit(x_fit, y_fit, 3)
+          # Unity's IC path is displayed at 2x scale (IC_LANE_SCALE = 0.5), and
+          # Unity intentionally suppresses C1 to keep the rendered path centered.
+          scale = 2.0
+          c0 = float(np.clip(coefs[3], -3.5, 3.5))
+          c1 = 0.0
+          c2 = float(np.clip(coefs[1] * scale * scale, -0.0025, 0.0025))
+          c3 = float(np.clip(coefs[0] * scale * scale * scale, -0.00003, 0.00003))
+    except (TypeError, ValueError, np.linalg.LinAlgError):
+      pass
+
+    return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
+
   def _hud_alca_state(self, CS) -> int:
     turn = int(getattr(CS, "alca_direction", 0) or 0)
     if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
       return 8 + turn
+
+    # Unity advertises lane-change availability from the two outer lane-line probabilities.
+    # Keeping this coherent with DAS_lanes avoids telling the IC "no lanes" while drawing them.
+    *_, left_quality, right_quality = self._ic_lane_model_state(CS)
+    if left_quality and right_quality:
+      return 8
+    if left_quality:
+      return 6
+    if right_quality:
+      return 7
     return 1
 
   def _hud_speed_limit_uom(self, CS) -> float:
@@ -502,8 +558,8 @@ class CarController(CarControllerBase):
   def _process_lane_telemetry(self, CS, can_sends, lane_active: bool) -> None:
     prev_active = bool(getattr(self, "_telemetry_prev_active", False))
 
-    # Phase 2 IC experiment: own DAS_lanes (0x239) plus DAS_telemetry (0x3A9).
-    # Telemetry alone did not recolor AP2-rendered lanes, so provide lane presence/shape too.
+    # Unity IC path: DAS_lanes (0x239) carries presence + path geometry and DAS_telemetry
+    # (0x3A9) carries physical marker style/quality. xnor remains the control master.
     if not lane_active and not prev_active:
       return
 
@@ -512,33 +568,43 @@ class CarController(CarControllerBase):
       self._telemetry_prev_active = bool(lane_active)
       return
 
-    lane_visible = bool(lane_active)
-    lane_color = 3 if lane_visible else 0  # 3 = blue
-    lane_counter = (int(self.frame) // 10) % 16
-    lane_range_m = 80.0 if lane_visible else 0.0
+    (lane_width_m, left_visible, right_visible, lane_range_m,
+     c0, c1, c2, c3, left_quality, right_quality) = self._ic_lane_model_state(CS)
+
+    if not lane_active:
+      left_visible = False
+      right_visible = False
+      lane_range_m = 0.0
+      c0 = c1 = c2 = c3 = 0.0
+      left_quality = 0
+      right_quality = 0
+
+    # The panda overlays this payload onto the stock AP 0x239 frame and preserves the stock
+    # rolling counter. Use a non-zero placeholder here so the capture-validity guard accepts it.
+    lane_counter = 1
 
     can_sends.append(
       self._body_controls_can.create_lane_message(
-        3.7,
-        lane_visible,
-        lane_visible,
+        lane_width_m,
+        left_visible,
+        right_visible,
         lane_range_m,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0,
-        0,
+        c0,
+        c1,
+        c2,
+        c3,
+        left_quality,
+        right_quality,
         int(CANBUS.party),
         lane_counter,
       )
     )
     can_sends.append(
       self._body_controls_can.create_telemetry_road_info(
-        lane_visible,
-        lane_visible,
-        lane_color,
-        lane_color,
+        left_visible,
+        right_visible,
+        left_quality,
+        right_quality,
         self._telemetry_alca_state(CS),
         int(CANBUS.party),
       )

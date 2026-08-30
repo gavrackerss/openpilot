@@ -325,7 +325,7 @@ class CarState(CarStateBase):
 
     - Two MAIN pulls within 750ms enables adaptive matching.
     - One MAIN pull while enabled disables it.
-    - Auto-disables when stock cruise is not ENABLED/STANDBY or speed is below minimum.
+    - Auto-disables only when stock cruise is no longer in a usable state.
     """
     btn = int(getattr(self, "cruise_buttons", 0) or 0)
     prev_btn = int(getattr(self, "_prev_pull_button", 0) or 0)
@@ -346,7 +346,7 @@ class CarState(CarStateBase):
         self._last_cruise_stalk_pull_ms = int(now_ms)
 
         stock_state = str(getattr(self, "stock_cruise_state", "") or "")
-        ready = (stock_state in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")) and (float(v_ego_ms) > (17.1 * CV.MPH_TO_MS))
+        ready = stock_state in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")
 
         if ready and (not bool(getattr(self, "enable_adaptive_cruise", False))):
           if double_pull:
@@ -357,7 +357,7 @@ class CarState(CarStateBase):
 
     # auto-disable when cruise not ready
     stock_state = str(getattr(self, "stock_cruise_state", "") or "")
-    if (stock_state not in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")) or (float(v_ego_ms) <= (17.1 * CV.MPH_TO_MS)):
+    if stock_state not in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL"):
       self.enable_adaptive_cruise = False
 
     self._prev_pull_button = int(btn)
@@ -1167,11 +1167,8 @@ class CarState(CarStateBase):
     self._param_frame += 1
 
     if self.autopilot_disabled or self.enableACC:
-      # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
-      # virtual cruise stalk (set just above) with NO stock-cruise dependency and NO 17.1 mph
-      # engage floor. This deliberately bypasses GATE B (_update_adaptive_cruise_mode, the
-      # stock-passthrough 17.1 mph lock) which a car without factory TACC cannot use anyway.
-      # Same door/gear/seatbelt sanity as the existing autopilot_disabled path.
+      # Native ACC: openpilot is the longitudinal authority and can remain available through
+      # standstill. Keep the same door/gear/seatbelt sanity as the existing autopilot_disabled path.
       ret.cruiseState.available = True
       ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)

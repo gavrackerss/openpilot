@@ -252,8 +252,8 @@ static void tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {
   tesla_legacy_set_last_byte_checksum(msg);
 }
 
-static bool tesla_legacy_is_hud_status_msg(int addr) {
-  return (addr == 0x399) || (addr == 0x389);
+static bool tesla_legacy_is_hud_overlay_msg(int addr) {
+  return (addr == 0x399) || (addr == 0x389) || (addr == 0x239) || (addr == 0x3A9);
 }
 
 typedef struct {
@@ -274,6 +274,10 @@ typedef struct {
 static TeslaLegacyHudForwardData tesla_legacy_hud_forward_data[] = {
   {0x399, 2, 0, 8, 500000U, 0x00F8031FU, 0xFF3FFFF0U, 0U, 0U, 0U, 0U, false},
   {0x389, 2, 0, 8, 500000U, 0x00F0FF3CU, 0xFFFF3FFFU, 0U, 0U, 0U, 0U, false},
+  // Unity IC lane integration. 0x239 has a rolling counter in byte7 high nibble; preserve the
+  // stock AP counter/timing. 0x3A9 has neither counter nor additive Tesla checksum.
+  {0x239, 2, 0, 8, 1000000U, 0xF0000000U, 0x00000000U, 0U, 0U, 0U, 0U, false},
+  {0x3A9, 2, 0, 8, 1000000U, 0x00000000U, 0x00000000U, 0U, 0U, 0U, 0U, false},
 };
 
 static uint32_t tesla_legacy_get_u32_le(const uint8_t *data) {
@@ -299,7 +303,7 @@ static bool tesla_legacy_hud_tx_has_valid_counter(const CANPacket_t *msg, const 
 
 static bool tesla_legacy_capture_hud_tx(const CANPacket_t *msg, bool violation) {
   const int addr = (int)msg->addr;
-  if (!tesla_legacy_is_hud_status_msg(addr)) {
+  if (!tesla_legacy_is_hud_overlay_msg(addr)) {
     return false;
   }
 
@@ -334,7 +338,7 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
   const int len = GET_LEN(to_fwd);
   const int fwd_len = (int)(sizeof(tesla_legacy_hud_forward_data) / sizeof(tesla_legacy_hud_forward_data[0]));
 
-  if (!tesla_legacy_is_hud_status_msg(addr)) {
+  if (!tesla_legacy_is_hud_overlay_msg(addr)) {
     return false;
   }
 
@@ -359,7 +363,11 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
         to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);
       }
 
-      tesla_legacy_set_last_byte_checksum(to_fwd);
+      // 0x399/0x389 use Tesla's additive checksum in byte7. DAS_lanes (0x239) uses
+      // that byte for its rolling counter, and DAS_telemetry (0x3A9) has no checksum.
+      if ((addr == 0x399) || (addr == 0x389)) {
+        tesla_legacy_set_last_byte_checksum(to_fwd);
+      }
       fwd->last_apply_ts = fwd->last_capture_ts;
       return true;
     }
@@ -616,7 +624,7 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return !tesla_legacy_external_panda;   // main panda: allow on bus0; external panda: block on bus4
   }
 
-  // Unity-style HUD ownership: consume OP HUD status frames, but never transmit them directly.
+  // Unity-style HUD ownership: consume OP HUD/IC overlay frames, but never transmit them directly.
   // The cached payload is merged onto stock AP frames in fwd_msg so the IC sees one coherent stream.
   if (tesla_legacy_capture_hud_tx(msg, false)) {
     return false;
@@ -891,7 +899,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // bus0 -> bus2: preserve vanilla forwarding, but keep the Unity EPAS_eacStatus rewrite
   // that prevents stock AP from declaring steering temporarily unavailable while OP steers.
   if (bus_num == 0) {
-    if (tesla_legacy_is_hud_status_msg(addr)) {
+    if (tesla_legacy_is_hud_overlay_msg(addr)) {
       return true;
     }
 
@@ -908,11 +916,11 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   }
 
   // bus2 -> bus0: Unity-style HUD overlay.
-  // OP's userspace 0x399/0x389 is cached in tx_hook and blocked from direct TX. When the stock AP
-  // 0x399/0x389 arrives here, selected OP-owned payload bits are overlaid while preserving the stock
-  // counter/timing bits, then the Tesla additive checksum is recomputed.
+  // OP userspace HUD/IC frames are cached in tx_hook and blocked from direct TX. When the matching
+  // stock AP frame arrives here, OP-owned payload bits are overlaid while preserving stock timing and
+  // counters. Additive checksum is recomputed only for 0x399/0x389; 0x239/0x3A9 do not use it.
   if (bus_num == 2) {
-    if (tesla_legacy_is_hud_status_msg(addr)) {
+    if (tesla_legacy_is_hud_overlay_msg(addr)) {
       (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
     }
 
@@ -990,6 +998,8 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
+    {0x239, 0, 8, .check_relay = false},  // DAS_lanes captured for IC overlay
+    {0x3A9, 0, 8, .check_relay = false},  // DAS_telemetry captured for IC overlay
     {0x2B9, 0, 8, .check_relay = false},  // DAS_control (chassis) — low-speed DI arming, accel-limited in tx_hook
     {0x398, 2, 8, .check_relay = false},  // GTW_carConfig autopilot=2 native on bus2 (config-unlock experiment)
 
@@ -1001,6 +1011,8 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
+    {0x239, 0, 8, .check_relay = false},  // DAS_lanes captured for IC overlay
+    {0x3A9, 0, 8, .check_relay = false},  // DAS_telemetry captured for IC overlay
 
   };
 

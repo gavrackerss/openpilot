@@ -16,6 +16,7 @@ class CarInterface(CarInterfaceBase):
   def __init__(self, CP: structs.CarParams):
     super().__init__(CP)
     self._model_v2_sock = messaging.sub_sock('modelV2', conflate=True)
+    self._ic_model_data = None
 
   def post_update(self, c: structs.CarControl, ret: structs.CarState) -> None:
     try:
@@ -23,10 +24,25 @@ class CarInterface(CarInterfaceBase):
     except Exception:
       self.CS.human_control = False
 
+    # Unity IC integration uses modelV2 lane probabilities and the model path. Keep the
+    # last good sample on CarState so CarController can render the IC lanes at its own cadence.
+    # This is deliberately independent of ALC: IC lane rendering must still work with ALC off.
+    model_msg = messaging.recv_one_or_none(self._model_v2_sock)
+    if model_msg is not None:
+      try:
+        model_v2 = model_msg.modelV2
+        self._ic_model_data = {
+          'lane_probs': tuple(float(v) for v in model_v2.laneLineProbs),
+          'position_x': tuple(float(v) for v in model_v2.position.x),
+          'position_y': tuple(float(v) for v in model_v2.position.y),
+        }
+      except Exception:
+        pass
+    self.CS.ic_model_data = self._ic_model_data
+
     if not getattr(self.CS, 'enableALC', False):
       return
 
-    model_msg = messaging.recv_one_or_none(self._model_v2_sock)
     try:
       self.CS.alca_controller.update(bool(getattr(c, 'latActive', False)), self.CS, int(self.CS._param_frame), model_msg)
     except Exception:
