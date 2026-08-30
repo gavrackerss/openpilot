@@ -971,7 +971,8 @@ class LongController:
 
     planner_confirms_low = bool(
       planner_near_ms is not None
-      and float(planner_near_ms) > 0.1
+      and math.isfinite(float(planner_near_ms))
+      and float(planner_near_ms) >= 0.0
       and float(planner_near_ms) <= (low_ms + float(self._MAPD_DISAGREE_PLANNER_CONFIRM_MS))
     )
     steering_confirms_low = abs(float(current_angle_deg)) >= float(self._MAPD_DISAGREE_STEER_CONFIRM_DEG)
@@ -1062,7 +1063,7 @@ class LongController:
       return False
     if raw_vision_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_VISION_CLEAR_MS)):
       return False
-    if planner_near_ms > 0.1 and planner_near_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_PLANNER_CLEAR_MS)):
+    if math.isfinite(planner_near_ms) and planner_near_ms >= 0.0 and planner_near_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_PLANNER_CLEAR_MS)):
       return False
     if current_angle_deg > float(self._MAPD_STRAIGHT_STALE_STEER_DEG):
       return False
@@ -1595,7 +1596,7 @@ class LongController:
     if int(self._lead_hold_until_ms) <= 0 or int(now_ms) > int(self._lead_hold_until_ms):
       self._lead_hold_until_ms = 0
       return False
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return False
     if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
       self._lead_hold_until_ms = 0
@@ -2723,7 +2724,7 @@ class LongController:
       return False
     if float(v_ego_ms) > float(self._LP_QUEUE_FALLBACK_MAX_SPEED_MS):
       return False
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return False
 
     materially_below_base = float(planner_ms) < (float(base_target_ms) - float(self._LP_QUEUE_FALLBACK_DROP_MS))
@@ -2740,7 +2741,7 @@ class LongController:
   def _lead_planner_guard_active(self, *, base_target_ms: float, planner_ms: float, current_set_ms: float, v_ego_ms: float) -> bool:
     if (not self._lead_present) or float(self._lead_drel) <= 0.0:
       return False
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return False
     if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
       return False
@@ -2902,7 +2903,7 @@ class LongController:
     if float(v_ego_ms) > float(self._LEAD_APPROACH_CANCEL_MAX_SPEED_MS):
       self._lead_approach_force_candidate_since_ms = 0
       return False
-    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
+    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
       self._lead_approach_force_candidate_since_ms = 0
       return False
 
@@ -2913,7 +2914,8 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      planner_floor_ms > 0.1
+      math.isfinite(planner_floor_ms)
+      and planner_floor_ms >= 0.0
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_APPROACH_CANCEL_PLANNER_MARGIN_MS))
       and (
         planner_floor_ms < (float(v_ego_ms) - (0.25 * CV.MPH_TO_MS))
@@ -2996,7 +2998,7 @@ class LongController:
       self._reset_lead_approach_cancel()
       self._reset_lead_close_cancel()
       return False
-    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
+    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
       self._reset_lead_approach_cancel()
       self._reset_lead_close_cancel()
       return False
@@ -3008,7 +3010,8 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      planner_floor_ms > 0.1
+      math.isfinite(planner_floor_ms)
+      and planner_floor_ms >= 0.0
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_APPROACH_CANCEL_PLANNER_MARGIN_MS))
       and (
         planner_floor_ms < (float(v_ego_ms) - (0.4 * CV.MPH_TO_MS))
@@ -3085,7 +3088,7 @@ class LongController:
       self._reset_lead_stuck_cancel()
       self._reset_lead_approach_cancel()
       return False
-    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
+    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
       self._reset_lead_stuck_cancel()
       self._reset_lead_approach_cancel()
       return False
@@ -3098,7 +3101,8 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      planner_floor_ms > 0.1
+      math.isfinite(planner_floor_ms)
+      and planner_floor_ms >= 0.0
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_STUCK_CANCEL_PLANNER_MARGIN_MS))
     )
     if not planner_supported:
@@ -3491,7 +3495,8 @@ class LongController:
   ) -> tuple[Optional[float], str]:
     planner_curve_active = bool(
       bool(lp_fresh)
-      and float(planner_near_ms) > 0.1
+      and math.isfinite(float(planner_near_ms))
+      and float(planner_near_ms) >= 0.0
       and float(planner_near_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
     )
 
@@ -3999,7 +4004,8 @@ class LongController:
     )
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_below_reference = bool(
-      float(planner_floor_ms) > 0.1
+      math.isfinite(float(planner_floor_ms))
+      and float(planner_floor_ms) >= 0.0
       and float(planner_floor_ms) < (float(reference_ms) - float(self._ARBITRATION_LEAD_PLANNER_DROP_MS))
     )
 
@@ -4077,21 +4083,20 @@ class LongController:
       self._set_arbitration_state(state="LEAD_CRITICAL", now_ms=int(now_ms))
       self._reset_curve_hold()
       self._reset_lead_curve_hold()
-      if float(planner_floor_ms) > 0.1:
+      if math.isfinite(float(planner_floor_ms)) and float(planner_floor_ms) >= 0.0:
         out_ms = min(float(out_ms), float(planner_floor_ms))
       if float(current_set_ms) > 0.1:
         out_ms = min(float(out_ms), float(current_set_ms))
       if lead_closing:
         lead_speed_cap_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel) + (0.5 * CV.MPH_TO_MS))
-        if float(lead_speed_cap_ms) > 0.1:
-          out_ms = min(float(out_ms), float(lead_speed_cap_ms))
+        out_ms = min(float(out_ms), float(lead_speed_cap_ms))
       out_src = f"{out_src}+state[LEAD_CRITICAL]"
       return float(out_ms), out_src
 
     if lead_follow:
       self._set_arbitration_state(state="LEAD_FOLLOW", now_ms=int(now_ms))
       self._reset_curve_hold()
-      if planner_below_reference and float(planner_floor_ms) > 0.1:
+      if planner_below_reference and math.isfinite(float(planner_floor_ms)) and float(planner_floor_ms) >= 0.0:
         out_ms = min(float(out_ms), float(planner_floor_ms))
       if lead_closing and float(current_set_ms) > 0.1:
         out_ms = min(float(out_ms), max(0.0, float(current_set_ms)))
@@ -4296,7 +4301,7 @@ class LongController:
 
 
   def _planner_drag_reasons(self, *, now_ms: int, base_target_ms: float, planner_ms: float, current_set_ms: float, v_ego_ms: float) -> list[str]:
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return []
     if self._stale_planner_lead_without_live_lead(
       now_ms=int(now_ms),
@@ -4802,7 +4807,7 @@ class LongController:
       and (
         (not lp_fresh)
         or (int(self._stable_plan_samples) < 2)
-        or (float(planner_last_ms) <= 0.1)
+        or ((not math.isfinite(float(planner_last_ms))) or float(planner_last_ms) < 0.0)
         or (
           float(set_speed_floor_ms) > 0.1
           and float(v_ego_ms) > float(set_speed_floor_ms)
