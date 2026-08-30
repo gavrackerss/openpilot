@@ -184,7 +184,8 @@ class _CsaCanReader:
 
 
 class LongController:
-  MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
+  # Tesla low-speed longitudinal is now valid through standstill; do not impose the legacy 17.1 mph set-speed floor.
+  MIN_CRUISE_SPEED_MS = 0.0
   _NATIVE_TACC_ENABLE_FILE = "/data/xnor_enable_native_tacc_passthrough"
   _NATIVE_TACC_DISABLE_FILE = "/data/xnor_disable_native_tacc_passthrough"
   _NATIVE_TACC_BOOTSTRAP_ENABLE_FILE = "/data/xnor_enable_native_tacc_setspeed_bootstrap"
@@ -563,7 +564,7 @@ class LongController:
   # momentary near-zero CSA curvature reading at an apex transition cannot let speed creep up
   # mid-circulation. Fail-safe: no mapd / stale mapd / no roundabout name => no cap.
   _ROUNDABOUT_ENABLE = True
-  _ROUNDABOUT_CAP_MS = 23.0 * CV.MPH_TO_MS   # circulation cap (floored at MIN_CRUISE_SPEED_MS ~17.1 mph). Raised from 20.0 for more leeway on larger roundabouts; tight ones are still pulled lower by CSA/mapd curvature via min() (revert to 20.0 to restore)
+  _ROUNDABOUT_CAP_MS = 23.0 * CV.MPH_TO_MS   # circulation cap. Tight roundabouts can still be pulled lower by CSA/mapd curvature via min().
   _ROUNDABOUT_NAME_TOKEN = "roundabout"      # case-insensitive substring matched in mapd wayName / roadName
 
   # --- mapd vision curve source disable -------------------------------------

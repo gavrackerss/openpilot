@@ -59,7 +59,8 @@ class AccDecision:
 
 
 class ACCController:
-  MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
+  # Tesla low-speed longitudinal is now valid through standstill; do not impose the legacy 17.1 mph set-speed floor.
+  MIN_CRUISE_SPEED_MS = 0.0
   _ZERO_FLOOR_SET_SPEED_ENABLE_FILE = "/data/xnor_enable_zero_floor_setspeed"
   _ZERO_FLOOR_SET_SPEED_DISABLE_FILE = "/data/xnor_disable_zero_floor_setspeed"
 
