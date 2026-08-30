@@ -147,32 +147,16 @@ class TeslaCAN:
     return self.packer.make_can_msg("DAS_lanes", int(bus), values)
 
   def create_telemetry_road_info(self, left_lane_visible: bool, right_lane_visible: bool,
-                                 left_lane_quality: int, right_lane_quality: int,
+                                 left_lane_color: int, right_lane_color: int,
                                  alca_state: int, bus: int):
-    # Unity semantics: marker color here describes the physical road marking; the IC's
-    # blue Autopilot path/lane rendering comes from the coherent DAS_status + DAS_lanes state.
-    left_lane_type = 1 if bool(left_lane_visible) else 7
-    left_lane_color = 2 if bool(left_lane_visible) else 0
-    left_marker_quality = 3 if bool(left_lane_visible) else 0
-    if int(left_lane_quality) == 1:
-      left_lane_type = 3
-      left_lane_color = 1
-
-    right_lane_type = 1 if bool(right_lane_visible) else 7
-    right_lane_color = 2 if bool(right_lane_visible) else 0
-    right_marker_quality = 3 if bool(right_lane_visible) else 0
-    if int(right_lane_quality) == 1:
-      right_lane_type = 3
-      right_lane_color = 1
-
     values = {
       "DAS_telemetryMultiplexer": 0,
-      "DAS_telLeftLaneType": left_lane_type,
-      "DAS_telRightLaneType": right_lane_type,
-      "DAS_telLeftMarkerQuality": left_marker_quality,
-      "DAS_telRightMarkerQuality": right_marker_quality,
-      "DAS_telLeftMarkerColor": left_lane_color,
-      "DAS_telRightMarkerColor": right_lane_color,
+      "DAS_telLeftLaneType": 3 if bool(left_lane_visible) else 7,   # dashed / unknown
+      "DAS_telRightLaneType": 3 if bool(right_lane_visible) else 7,  # dashed / unknown
+      "DAS_telLeftMarkerQuality": 3 if bool(left_lane_visible) else 0,
+      "DAS_telRightMarkerQuality": 3 if bool(right_lane_visible) else 0,
+      "DAS_telLeftMarkerColor": int(left_lane_color) if bool(left_lane_visible) else 0,
+      "DAS_telRightMarkerColor": int(right_lane_color) if bool(right_lane_visible) else 0,
       "DAS_telLeftLaneCrossing": 1 if int(alca_state) == 1 else 0,
       "DAS_telRightLaneCrossing": 1 if int(alca_state) == 2 else 0,
     }

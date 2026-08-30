@@ -62,7 +62,7 @@ BTN_DOWN1 = 32
 #   Test C (stalk only, bounded): CHASSIS False, STALK True
 #   Test D (both, the target):    both True
 # Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
-_ARM_ENABLE_CHASSIS = False  # OFF (isolate GTW MITM test)
+_ARM_ENABLE_CHASSIS = True   # Unity parity: keep chassis DAS_control present while native ACC is actively engaged
 _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
 
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
@@ -412,66 +412,27 @@ class CarController(CarControllerBase):
 
 
 
-  def _ic_lane_model_state(self, CS) -> tuple[float, bool, bool, float, float, float, float, float, int, int]:
-    # Semantic port of Unity HUD_module's modelV2 -> DAS_lanes mapping. Keep xnor's
-    # controller/gating architecture; only transplant the lane data it was missing.
-    lane_width_m = 4.0
-    lane_range_m = 50.0
-    left_visible = False
-    right_visible = False
-    left_quality = 0
-    right_quality = 0
-    c0 = c1 = c2 = c3 = 0.0
-
-    model = getattr(CS, "ic_model_data", None)
-    if not isinstance(model, dict):
-      return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
-
-    try:
-      probs = tuple(float(v) for v in model.get("lane_probs", ()))
-      if len(probs) >= 4:
-        left_visible = probs[1] > 0.45
-        right_visible = probs[2] > 0.45
-        left_quality = 1 if probs[0] > 0.25 else 0
-        right_quality = 1 if probs[3] > 0.25 else 0
-
-      x = np.asarray(model.get("position_x", ()), dtype=float)
-      y = np.asarray(model.get("position_y", ()), dtype=float)
-      n = min(int(x.size), int(y.size))
-      if n >= 4:
-        x = x[:n]
-        y = y[:n]
-        valid = np.isfinite(x) & np.isfinite(y) & (x >= 0.0) & (x <= 100.0)
-        x_fit = x[valid]
-        y_fit = y[valid]
-        if x_fit.size >= 4:
-          coefs = np.polyfit(x_fit, y_fit, 3)
-          # Unity's IC path is displayed at 2x scale (IC_LANE_SCALE = 0.5), and
-          # Unity intentionally suppresses C1 to keep the rendered path centered.
-          scale = 2.0
-          c0 = float(np.clip(coefs[3], -3.5, 3.5))
-          c1 = 0.0
-          c2 = float(np.clip(coefs[1] * scale * scale, -0.0025, 0.0025))
-          c3 = float(np.clip(coefs[0] * scale * scale * scale, -0.00003, 0.00003))
-    except (TypeError, ValueError, np.linalg.LinAlgError):
-      pass
-
-    return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
-
   def _hud_alca_state(self, CS) -> int:
     turn = int(getattr(CS, "alca_direction", 0) or 0)
     if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
       return 8 + turn
 
-    # Unity advertises lane-change availability from the two outer lane-line probabilities.
-    # Keeping this coherent with DAS_lanes avoids telling the IC "no lanes" while drawing them.
-    *_, left_quality, right_quality = self._ic_lane_model_state(CS)
-    if left_quality and right_quality:
-      return 8
-    if left_quality:
-      return 6
-    if right_quality:
-      return 7
+    # Unity HUD_module advertises lane availability using the two outer model lane-line
+    # probabilities (>0.25). This changes only DAS_autoLaneChangeState on DAS_status;
+    # DAS_lanes/DAS_telemetry remain entirely stock so existing IC lane geometry is untouched.
+    probs = getattr(CS, "ic_lane_probs", None)
+    try:
+      if probs is not None and len(probs) >= 4:
+        left_available = float(probs[0]) > 0.25
+        right_available = float(probs[3]) > 0.25
+        if left_available and right_available:
+          return 8
+        if left_available:
+          return 6
+        if right_available:
+          return 7
+    except (TypeError, ValueError):
+      pass
     return 1
 
   def _hud_speed_limit_uom(self, CS) -> float:
@@ -521,7 +482,7 @@ class CarController(CarControllerBase):
 
     op_status = 5 if op_enabled else 2
     hands_on_state = 3 if bool(human_control) and op_enabled else 2
-    alca_state = int(self._hud_alca_state(CS))
+    alca_state = int(self._hud_alca_state(CS)) if op_enabled else 1
     blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
     blind_right = bool(getattr(cs_out, "rightBlindspot", False)) if cs_out is not None else False
     fleet_state = int(getattr(CS, "fleet_speed_state", 0) or 0)
@@ -548,69 +509,6 @@ class CarController(CarControllerBase):
     return 0
 
 
-
-  def _telemetry_alca_state(self, CS) -> int:
-    turn = int(getattr(CS, "alca_direction", 0) or 0)
-    if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
-      return turn
-    return 0
-
-  def _process_lane_telemetry(self, CS, can_sends, lane_active: bool) -> None:
-    prev_active = bool(getattr(self, "_telemetry_prev_active", False))
-
-    # Unity IC path: DAS_lanes (0x239) carries presence + path geometry and DAS_telemetry
-    # (0x3A9) carries physical marker style/quality. xnor remains the control master.
-    if not lane_active and not prev_active:
-      return
-
-    should_send = lane_active or (not lane_active and prev_active)
-    if (not should_send) or (lane_active and (self.frame % 10 != 0)):
-      self._telemetry_prev_active = bool(lane_active)
-      return
-
-    (lane_width_m, left_visible, right_visible, lane_range_m,
-     c0, c1, c2, c3, left_quality, right_quality) = self._ic_lane_model_state(CS)
-
-    if not lane_active:
-      left_visible = False
-      right_visible = False
-      lane_range_m = 0.0
-      c0 = c1 = c2 = c3 = 0.0
-      left_quality = 0
-      right_quality = 0
-
-    # The panda overlays this payload onto the stock AP 0x239 frame and preserves the stock
-    # rolling counter. Use a non-zero placeholder here so the capture-validity guard accepts it.
-    lane_counter = 1
-
-    can_sends.append(
-      self._body_controls_can.create_lane_message(
-        lane_width_m,
-        left_visible,
-        right_visible,
-        lane_range_m,
-        c0,
-        c1,
-        c2,
-        c3,
-        left_quality,
-        right_quality,
-        int(CANBUS.party),
-        lane_counter,
-      )
-    )
-    can_sends.append(
-      self._body_controls_can.create_telemetry_road_info(
-        left_visible,
-        right_visible,
-        left_quality,
-        right_quality,
-        self._telemetry_alca_state(CS),
-        int(CANBUS.party),
-      )
-    )
-
-    self._telemetry_prev_active = bool(lane_active)
 
   def _lane_positioned_target_angle(self, desired_angle_deg: float, current_angle_deg: float, v_ego: float) -> float:
     desired_angle_deg = float(desired_angle_deg)
@@ -776,8 +674,6 @@ class CarController(CarControllerBase):
       (not human_control) and
       (not steer_inhibit)
     )
-
-    self._process_lane_telemetry(CS, can_sends, lat_active)
 
     # Steering warm-up: for a short window after lateral becomes active, command current wheel angle.
     # This prevents an initial command step (EPS inhibit) when engaging with the wheel turned.
