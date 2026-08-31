@@ -62,7 +62,7 @@ BTN_DOWN1 = 32
 #   Test C (stalk only, bounded): CHASSIS False, STALK True
 #   Test D (both, the target):    both True
 # Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
-_ARM_ENABLE_CHASSIS = True   # Unity parity: keep chassis DAS_control present while native ACC is actively engaged
+_ARM_ENABLE_CHASSIS = False  # IMPORTANT: no unsolicited chassis 0x2B9; it inhibits EPAS on this vehicle
 _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
 
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
@@ -505,6 +505,57 @@ class CarController(CarControllerBase):
     self._hud_prev_enabled = op_enabled
 
 
+  def _process_lane_telemetry(self, CC, CS, can_sends) -> None:
+    """Colour the vehicle's existing IC lane lines blue while OP owns the drive.
+
+    Keep DAS_lanes (0x239) completely stock: the AP already provides the correct lane
+    geometry.  We only add DAS_telemetry (0x3A9), which carries marker colour/type/quality.
+    Unity publishes this road-info telemetry at ~10 Hz.
+    """
+    op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    stock_ap_enabled = bool(getattr(CS, "autopilot_enabled", False))
+    telemetry_active = bool(op_enabled and not stock_ap_enabled)
+    prev_active = bool(getattr(self, "_telemetry_prev_active", False))
+
+    # While active, refresh at 10 Hz.  On the falling edge send one neutral frame so the
+    # IC cannot retain a blue marker colour after OP disengages.
+    edge_clear = bool(prev_active and not telemetry_active)
+    if not edge_clear and (not telemetry_active or (self.frame % 10 != 0)):
+      self._telemetry_prev_active = telemetry_active
+      return
+
+    left_valid = False
+    right_valid = False
+    if telemetry_active:
+      probs = getattr(CS, "ic_lane_probs", None)
+      try:
+        if probs is not None and len(probs) >= 4:
+          # Unity's actual displayed left/right lane validity uses the two inner model
+          # lane lines at >0.45.  [0]/[3] are outer-lane quality used for ALC state.
+          left_valid = float(probs[1]) > 0.45
+          right_valid = float(probs[2]) > 0.45
+      except (TypeError, ValueError):
+        left_valid = False
+        right_valid = False
+
+    alca_state = 0
+    if telemetry_active and bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)):
+      turn = int(getattr(CS, "alca_direction", 0) or 0)
+      if turn in (1, 2):
+        alca_state = turn
+
+    can_sends.append(self.tesla_can.create_telemetry_road_info(
+      left_valid,
+      right_valid,
+      3 if left_valid else 0,   # 3 = BLUE
+      3 if right_valid else 0,  # 3 = BLUE
+      alca_state,
+      int(CANBUS.party),
+    ))
+
+    self._telemetry_prev_active = telemetry_active
+
+
   def _hud_hands_on(self, CS) -> int:
     return 0
 
@@ -664,6 +715,7 @@ class CarController(CarControllerBase):
     self._process_stalk_actions(CS, can_sends)
     self._process_body_controls(CS, can_sends)
     self._process_hud_status(CC, CS, can_sends, human_control)
+    self._process_lane_telemetry(CC, CS, can_sends)
 
     self._speed_limit_sync(CC, CS, can_sends)
 

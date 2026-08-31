@@ -990,7 +990,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
-    {0x2B9, 0, 8, .check_relay = false},  // DAS_control (chassis) — low-speed DI arming, accel-limited in tx_hook
+    {0x3A9, 0, 8, .check_relay = false},  // DAS_telemetry: IC lane marker colour/type/quality only
     {0x398, 2, 8, .check_relay = false},  // GTW_carConfig autopilot=2 native on bus2 (config-unlock experiment)
 
   };
@@ -1001,6 +1001,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
+    {0x3A9, 0, 8, .check_relay = false},  // DAS_telemetry: non-actuating IC road-info frame
 
   };
 
