@@ -544,7 +544,7 @@ class CarController(CarControllerBase):
       if turn in (1, 2):
         alca_state = turn
 
-    can_sends.append(self.tesla_can.create_telemetry_road_info(
+    can_sends.append(self._body_controls_can.create_telemetry_road_info(
       left_valid,
       right_valid,
       3 if left_valid else 0,   # 3 = BLUE
