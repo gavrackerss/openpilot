@@ -147,16 +147,39 @@ class TeslaCAN:
     return self.packer.make_can_msg("DAS_lanes", int(bus), values)
 
   def create_telemetry_road_info(self, left_lane_visible: bool, right_lane_visible: bool,
-                                 left_lane_color: int, right_lane_color: int,
+                                 left_lane_quality_raw: int, right_lane_quality_raw: int,
                                  alca_state: int, bus: int):
+    """Unity-compatible DAS_telemetry road-information message.
+
+    The outer model lane probabilities are represented as the Unity quality-raw flags. A visible
+    line with quality raw=1 is rendered as dashed/white; otherwise Unity uses solid/yellow. Marker
+    quality itself is HIGH whenever that lane is visible.
+    """
+    left_visible = bool(left_lane_visible)
+    right_visible = bool(right_lane_visible)
+
+    left_type = 1 if left_visible else 7
+    left_color = 2 if left_visible else 0
+    left_quality = 3 if left_visible else 0
+    if left_visible and int(left_lane_quality_raw) == 1:
+      left_type = 3
+      left_color = 1
+
+    right_type = 1 if right_visible else 7
+    right_color = 2 if right_visible else 0
+    right_quality = 3 if right_visible else 0
+    if right_visible and int(right_lane_quality_raw) == 1:
+      right_type = 3
+      right_color = 1
+
     values = {
       "DAS_telemetryMultiplexer": 0,
-      "DAS_telLeftLaneType": 3 if bool(left_lane_visible) else 7,   # dashed / unknown
-      "DAS_telRightLaneType": 3 if bool(right_lane_visible) else 7,  # dashed / unknown
-      "DAS_telLeftMarkerQuality": 3 if bool(left_lane_visible) else 0,
-      "DAS_telRightMarkerQuality": 3 if bool(right_lane_visible) else 0,
-      "DAS_telLeftMarkerColor": int(left_lane_color) if bool(left_lane_visible) else 0,
-      "DAS_telRightMarkerColor": int(right_lane_color) if bool(right_lane_visible) else 0,
+      "DAS_telLeftLaneType": left_type,
+      "DAS_telRightLaneType": right_type,
+      "DAS_telLeftMarkerQuality": left_quality,
+      "DAS_telRightMarkerQuality": right_quality,
+      "DAS_telLeftMarkerColor": left_color,
+      "DAS_telRightMarkerColor": right_color,
       "DAS_telLeftLaneCrossing": 1 if int(alca_state) == 1 else 0,
       "DAS_telRightLaneCrossing": 1 if int(alca_state) == 2 else 0,
     }

@@ -412,27 +412,64 @@ class CarController(CarControllerBase):
 
 
 
+  def _ic_lane_model_state(self, CS) -> tuple[float, bool, bool, float, float, float, float, float, int, int]:
+    """Unity modelV2 -> legacy IC virtual/fused lane mapping."""
+    lane_width_m = 4.0
+    lane_range_m = 50.0
+    left_visible = False
+    right_visible = False
+    left_quality = 0
+    right_quality = 0
+    c0 = c1 = c2 = c3 = 0.0
+
+    model = getattr(CS, "ic_model_data", None)
+    if not isinstance(model, dict):
+      return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
+
+    try:
+      probs = tuple(float(v) for v in model.get("lane_probs", ()))
+      if len(probs) >= 4:
+        # Unity HUD_module: inner lines determine visibility; outer lines provide quality/ALC availability.
+        left_visible = probs[1] > 0.45
+        right_visible = probs[2] > 0.45
+        left_quality = 1 if probs[0] > 0.25 else 0
+        right_quality = 1 if probs[3] > 0.25 else 0
+
+      x = np.asarray(model.get("position_x", ()), dtype=float)
+      y = np.asarray(model.get("position_y", ()), dtype=float)
+      n = min(int(x.size), int(y.size))
+      if n >= 4:
+        x = x[:n]
+        y = y[:n]
+        valid = np.isfinite(x) & np.isfinite(y) & (x >= 0.0) & (x <= 100.0)
+        x_fit = x[valid]
+        y_fit = y[valid]
+        if x_fit.size >= 4:
+          coefs = np.polyfit(x_fit, y_fit, 3)
+          # Unity IC_LANE_SCALE = 0.5, so the rendered path coefficients are scaled 2x.
+          # Unity also intentionally suppresses C1 for the IC representation.
+          scale = 2.0
+          c0 = float(np.clip(coefs[3], -3.5, 3.5))
+          c1 = 0.0
+          c2 = float(np.clip(coefs[1] * scale * scale, -0.0025, 0.0025))
+          c3 = float(np.clip(coefs[0] * scale * scale * scale, -0.00003, 0.00003))
+    except (TypeError, ValueError, np.linalg.LinAlgError):
+      pass
+
+    return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
+
   def _hud_alca_state(self, CS) -> int:
     turn = int(getattr(CS, "alca_direction", 0) or 0)
     if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
       return 8 + turn
 
-    # Unity HUD_module advertises lane availability using the two outer model lane-line
-    # probabilities (>0.25). This changes only DAS_autoLaneChangeState on DAS_status;
-    # DAS_lanes/DAS_telemetry remain entirely stock so existing IC lane geometry is untouched.
-    probs = getattr(CS, "ic_lane_probs", None)
-    try:
-      if probs is not None and len(probs) >= 4:
-        left_available = float(probs[0]) > 0.25
-        right_available = float(probs[3]) > 0.25
-        if left_available and right_available:
-          return 8
-        if left_available:
-          return 6
-        if right_available:
-          return 7
-    except (TypeError, ValueError):
-      pass
+    *_, left_quality, right_quality = self._ic_lane_model_state(CS)
+    if left_quality and right_quality:
+      return 8
+    if left_quality:
+      return 6
+    if right_quality:
+      return 7
     return 1
 
   def _hud_speed_limit_uom(self, CS) -> float:
@@ -505,56 +542,75 @@ class CarController(CarControllerBase):
     self._hud_prev_enabled = op_enabled
 
 
-  def _process_lane_telemetry(self, CC, CS, can_sends) -> None:
-    """Colour the vehicle's existing IC lane lines blue while OP owns the drive.
+  def _telemetry_alca_state(self, CS) -> int:
+    turn = int(getattr(CS, "alca_direction", 0) or 0)
+    if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
+      return turn
+    return 0
 
-    Keep DAS_lanes (0x239) completely stock: the AP already provides the correct lane
-    geometry.  We only add DAS_telemetry (0x3A9), which carries marker colour/type/quality.
-    Unity publishes this road-info telemetry at ~10 Hz.
+  def _process_lane_telemetry(self, CC, CS, can_sends) -> None:
+    """Unity-style fused lane ownership while OP is enabled.
+
+    0x239 is submitted as an overlay payload; panda blocks direct TX and merges it onto the
+    genuine AP 0x239, preserving the stock rolling counter/timing. 0x3A9 has no stock source on
+    this car, so it is transmitted directly with Unity's white/yellow marker semantics.
     """
     op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
     stock_ap_enabled = bool(getattr(CS, "autopilot_enabled", False))
-    telemetry_active = bool(op_enabled and not stock_ap_enabled)
+    lane_active = bool(op_enabled and not stock_ap_enabled)
     prev_active = bool(getattr(self, "_telemetry_prev_active", False))
 
-    # While active, refresh at 10 Hz.  On the falling edge send one neutral frame so the
-    # IC cannot retain a blue marker colour after OP disengages.
-    edge_clear = bool(prev_active and not telemetry_active)
-    if not edge_clear and (not telemetry_active or (self.frame % 10 != 0)):
-      self._telemetry_prev_active = telemetry_active
+    # Refresh the Unity IC lane pair at ~10 Hz while OP owns the HUD. On disengage, do not send
+    # a synthetic 0x239 clear: letting the overlay expire immediately restores the untouched stock
+    # AP lane frame. Send one neutral 0x3A9 only to clear any telemetry state the IC may retain.
+    edge_clear = bool(prev_active and not lane_active)
+    if not edge_clear and (not lane_active or (self.frame % 10 != 0)):
+      self._telemetry_prev_active = lane_active
       return
 
-    left_valid = False
-    right_valid = False
-    if telemetry_active:
-      probs = getattr(CS, "ic_lane_probs", None)
-      try:
-        if probs is not None and len(probs) >= 4:
-          # Unity's actual displayed left/right lane validity uses the two inner model
-          # lane lines at >0.45.  [0]/[3] are outer-lane quality used for ALC state.
-          left_valid = float(probs[1]) > 0.45
-          right_valid = float(probs[2]) > 0.45
-      except (TypeError, ValueError):
-        left_valid = False
-        right_valid = False
+    if edge_clear:
+      can_sends.append(self._body_controls_can.create_telemetry_road_info(
+        False, False, 0, 0, 0, int(CANBUS.party),
+      ))
+      self._telemetry_prev_active = False
+      return
 
-    alca_state = 0
-    if telemetry_active and bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)):
-      turn = int(getattr(CS, "alca_direction", 0) or 0)
-      if turn in (1, 2):
-        alca_state = turn
+    (lane_width_m, left_visible, right_visible, lane_range_m,
+     c0, c1, c2, c3, left_quality, right_quality) = self._ic_lane_model_state(CS)
+
+    # During an active ALC Unity forces both virtual lane-exists bits on. Otherwise visibility
+    # follows the model's inner lane probabilities (>0.45).
+    alca_active = bool(getattr(CS, "alca_engaged", False))
+    lane_left_visible = bool(left_visible or alca_active)
+    lane_right_visible = bool(right_visible or alca_active)
+
+    # Panda preserves the real AP rolling counter. A fixed non-zero placeholder makes the
+    # userspace overlay payload pass the counter-presence guard without inventing timing.
+    can_sends.append(self._body_controls_can.create_lane_message(
+      lane_width_m,
+      lane_left_visible,
+      lane_right_visible,
+      lane_range_m,
+      c0,
+      c1,
+      c2,
+      c3,
+      left_quality,
+      right_quality,
+      int(CANBUS.party),
+      1,
+    ))
 
     can_sends.append(self._body_controls_can.create_telemetry_road_info(
-      left_valid,
-      right_valid,
-      3 if left_valid else 0,   # 3 = BLUE
-      3 if right_valid else 0,  # 3 = BLUE
-      alca_state,
+      left_visible,
+      right_visible,
+      left_quality,
+      right_quality,
+      self._telemetry_alca_state(CS),
       int(CANBUS.party),
     ))
 
-    self._telemetry_prev_active = telemetry_active
-
+    self._telemetry_prev_active = True
 
   def _hud_hands_on(self, CS) -> int:
     return 0
