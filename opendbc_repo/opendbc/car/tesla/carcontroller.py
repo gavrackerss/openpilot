@@ -549,20 +549,22 @@ class CarController(CarControllerBase):
     return 0
 
   def _process_lane_telemetry(self, CC, CS, can_sends) -> None:
-    """Unity-style fused lane ownership while OP is enabled.
+    """Unity-style fused lane ownership whenever native Autopilot is disabled.
 
-    0x239 is submitted as an overlay payload; panda blocks direct TX and merges it onto the
-    genuine AP 0x239, preserving the stock rolling counter/timing. 0x3A9 has no stock source on
-    this car, so it is transmitted directly with Unity's white/yellow marker semantics.
+    Unity keeps 0x239/0x3A9 established continuously in the AP-disabled configuration, including
+    while openpilot itself is disengaged. Engagement is therefore only the HUD status transition
+    from DAS_autopilotState AVAILABLE (2) to ACTIVE (5), not the point where the lane stream first
+    appears. 0x239 is still submitted as an overlay payload so panda preserves the genuine AP
+    rolling counter/timing; 0x3A9 has no stock source on this car and is transmitted directly.
     """
-    op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
     stock_ap_enabled = bool(getattr(CS, "autopilot_enabled", False))
-    lane_active = bool(op_enabled and not stock_ap_enabled)
+    ap_disabled = bool(getattr(CS, "autopilot_disabled", False) or getattr(self, "_cached_autopilot_disabled", False))
+    lane_active = bool(ap_disabled and not stock_ap_enabled)
     prev_active = bool(getattr(self, "_telemetry_prev_active", False))
 
-    # Refresh the Unity IC lane pair at ~10 Hz while OP owns the HUD. On disengage, do not send
-    # a synthetic 0x239 clear: letting the overlay expire immediately restores the untouched stock
-    # AP lane frame. Send one neutral 0x3A9 only to clear any telemetry state the IC may retain.
+    # Refresh the Unity IC lane pair at ~10 Hz for the whole native-AP-disabled lifecycle. If native
+    # AP ownership returns, do not send a synthetic 0x239 clear: letting the overlay expire restores
+    # the untouched stock AP lane frame. Send one neutral 0x3A9 only to clear retained telemetry.
     edge_clear = bool(prev_active and not lane_active)
     if not edge_clear and (not lane_active or (self.frame % 10 != 0)):
       self._telemetry_prev_active = lane_active
