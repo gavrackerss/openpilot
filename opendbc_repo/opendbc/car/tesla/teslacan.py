@@ -138,10 +138,14 @@ class TeslaCAN:
       "DAS_virtualLaneC1": float(c1),
       "DAS_virtualLaneC2": float(c2),
       "DAS_virtualLaneC3": float(c3),
-      "DAS_leftLineUsage": 2 if bool(left_lane_visible) else 0,
-      "DAS_rightLineUsage": 2 if bool(right_lane_visible) else 0,
-      "DAS_leftFork": int(left_fork),
-      "DAS_rightFork": int(right_fork),
+      # Native Autosteer/blue-line capture: both usages become FUSED and both fork states
+      # clear to NONE when DAS_autopilotState enters ACTIVE_1 (3), even when a LaneExists
+      # bit is temporarily false. Keep geometry/existence model-derived, but match these
+      # presentation semantics exactly.
+      "DAS_leftLineUsage": 2,
+      "DAS_rightLineUsage": 2,
+      "DAS_leftFork": 0,
+      "DAS_rightFork": 0,
       "DAS_lanesCounter": int(counter) % 16,
     }
     return self.packer.make_can_msg("DAS_lanes", int(bus), values)

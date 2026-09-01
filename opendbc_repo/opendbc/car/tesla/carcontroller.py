@@ -459,17 +459,11 @@ class CarController(CarControllerBase):
     return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
 
   def _hud_alca_state(self, CS) -> int:
+    # Native AP1/MCU1 blue-lane captures do not require the Unity 6/7/8 lane-availability
+    # states. Keep the normal no-ALC state unless an actual OP lane change is in progress.
     turn = int(getattr(CS, "alca_direction", 0) or 0)
     if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
       return 8 + turn
-
-    *_, left_quality, right_quality = self._ic_lane_model_state(CS)
-    if left_quality and right_quality:
-      return 8
-    if left_quality:
-      return 6
-    if right_quality:
-      return 7
     return 1
 
   def _hud_speed_limit_uom(self, CS) -> float:
@@ -517,7 +511,7 @@ class CarController(CarControllerBase):
     except (TypeError, ValueError):
       cruise_speed = speed_limit
 
-    op_status = 5 if op_enabled else 2
+    op_status = 3 if op_enabled else 2
     hands_on_state = 3 if bool(human_control) and op_enabled else 2
     alca_state = int(self._hud_alca_state(CS)) if op_enabled else 1
     blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
@@ -549,55 +543,31 @@ class CarController(CarControllerBase):
     return 0
 
   def _process_lane_telemetry(self, CC, CS, can_sends) -> None:
-    """Unity-style fused lane ownership whenever native Autopilot is disabled.
+    """Native-parity IC lane overlay while OP is enabled.
 
-    Unity keeps 0x239/0x3A9 established continuously in the AP-disabled configuration, including
-    while openpilot itself is disengaged. Engagement is therefore only the HUD status transition
-    from DAS_autopilotState AVAILABLE (2) to ACTIVE (5), not the point where the lane stream first
-    appears. 0x239 is still submitted as an overlay payload so panda preserves the genuine AP
-    rolling counter/timing; 0x3A9 has no stock source on this car and is transmitted directly.
+    Dashcam/native-Autosteer captures on this car show blue lanes with DAS_autopilotState
+    transitioning 2->3, no DAS_telemetry (0x3A9), and DAS_lanes (0x239) switching both
+    LineUsage fields to FUSED with both Fork fields cleared. Submit only a bus-0 overlay
+    payload; panda merges it onto the genuine AP 0x239 so stock timing and the rolling
+    counter remain authoritative.
     """
+    op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
     stock_ap_enabled = bool(getattr(CS, "autopilot_enabled", False))
-    ap_disabled = bool(getattr(CS, "autopilot_disabled", False) or getattr(self, "_cached_autopilot_disabled", False))
-    # BUS-2 ORIGIN TEST: keep disengaged lane traffic completely stock. Only take lane ownership
-    # while OP is actually engaged, reducing duplicate-ID traffic on the physical AP segment and
-    # making the IC presentation change a clean engage/disengage A/B test.
-    op_enabled = bool(getattr(CC, "enabled", False))
-    lane_active = bool(ap_disabled and not stock_ap_enabled and op_enabled)
-    prev_active = bool(getattr(self, "_telemetry_prev_active", False))
+    lane_active = bool(op_enabled and not stock_ap_enabled)
 
-    # Refresh the Unity IC lane pair at ~10 Hz for the whole native-AP-disabled lifecycle. If native
-    # AP ownership returns, do not send a synthetic 0x239 clear: letting the overlay expire restores
-    # the untouched stock AP lane frame. Send one neutral 0x3A9 only to clear retained telemetry.
-    edge_clear = bool(prev_active and not lane_active)
-    if not edge_clear and (not lane_active or (self.frame % 10 != 0)):
+    if not lane_active or (self.frame % 10 != 0):
       self._telemetry_prev_active = lane_active
-      return
-
-    if edge_clear:
-      can_sends.append(self._body_controls_can.create_telemetry_road_info(
-        False, False, 0, 0, 0, int(CANBUS.party),
-      ))
-      self._telemetry_prev_active = False
       return
 
     (lane_width_m, left_visible, right_visible, lane_range_m,
      c0, c1, c2, c3, left_quality, right_quality) = self._ic_lane_model_state(CS)
 
-    # During an active ALC Unity forces both virtual lane-exists bits on. Otherwise visibility
-    # follows the model's inner lane probabilities (>0.45).
     alca_active = bool(getattr(CS, "alca_engaged", False))
     lane_left_visible = bool(left_visible or alca_active)
     lane_right_visible = bool(right_visible or alca_active)
 
-    # BUS-2 ORIGIN TEST: transmit DAS_lanes natively onto the AP-module segment instead of
-    # submitting a bus-0 overlay payload. Panda safety caches this exact bus-2 TX and substitutes
-    # it for the stock AP 0x239 at the bus2->bus0 forwarding boundary, so the IC sees only XNOR's
-    # lane payload during the test. The AP module still physically emits its own 0x239 on bus 2;
-    # software cannot silence that transmitter, but its copy is not allowed through to the IC.
-    # Because this is now a real sender rather than a counter-preserving overlay request, generate
-    # a proper 4-bit rolling counter at the 10 Hz lane cadence.
-    lane_counter = int((self.frame // 10) & 0x0F)
+    # Counter is only a non-zero placeholder for the capture guard. Panda replaces the
+    # high-nibble counter with the genuine AP 0x239 counter on the forwarded frame.
     can_sends.append(self._body_controls_can.create_lane_message(
       lane_width_m,
       lane_left_visible,
@@ -609,17 +579,8 @@ class CarController(CarControllerBase):
       c3,
       left_quality,
       right_quality,
-      int(CANBUS.autopilot_party),
-      lane_counter,
-    ))
-
-    can_sends.append(self._body_controls_can.create_telemetry_road_info(
-      left_visible,
-      right_visible,
-      left_quality,
-      right_quality,
-      self._telemetry_alca_state(CS),
       int(CANBUS.party),
+      1,
     ))
 
     self._telemetry_prev_active = True
