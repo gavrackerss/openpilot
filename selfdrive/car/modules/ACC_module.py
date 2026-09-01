@@ -96,18 +96,6 @@ class ACCController:
   _LEAD_FOLLOW_PERSIST_BAND_MPH = 2.0
   _LEAD_FOLLOW_PERSIST_MS = 900
 
-  # Stop/go resume: once LONG has raised the target above zero and radar confirms the
-  # stopped lead is pulling away, issue bounded 1-step RES pulses even though vEgo is
-  # still exactly zero. The normal accel path is intentionally gated at vEgo > 0, so
-  # without this explicit standstill path Tesla remains latched at 0 mph until the
-  # accelerator pedal is touched.
-  _STANDSTILL_RESUME_MIN_TARGET_MS = 0.45      # ~1 mph positive planner/LONG intent
-  _STANDSTILL_RESUME_MIN_DREL_M = 2.0
-  _STANDSTILL_RESUME_MIN_VREL_MS = 0.12
-  _STANDSTILL_RESUME_MIN_OPENING_RATE_MS = 0.12
-  _STANDSTILL_RESUME_MAX_VEGO_MS = 0.35
-  _STANDSTILL_RESUME_COOLDOWN_MS = 650
-
 
   def __init__(self) -> None:
     self.human_action_time_ms = 0
@@ -141,9 +129,6 @@ class ACCController:
     self._lead_follow_offset_since_ms = 0
     self._standby_autoengage_started_ms = 0
     self._standby_autoengage_last_set_ms = 0
-    self._standstill_lead_prev_drel_m = 0.0
-    self._standstill_lead_prev_ms = 0
-    self._standstill_lead_opening_rate_ms = 0.0
 
     self._radar_sm = messaging.SubMaster(["radarState"])
 
@@ -389,62 +374,6 @@ class ACCController:
       self._lead_cleared_time_ms = int(now_ms)
 
     self._last_lead_status = lead_present
-
-  def _standstill_lead_opening_rate(self, *, lead: LeadInfo, now_ms: int) -> float:
-    if not lead.status or float(lead.d_rel) <= 0.0:
-      self._standstill_lead_prev_drel_m = 0.0
-      self._standstill_lead_prev_ms = 0
-      self._standstill_lead_opening_rate_ms = 0.0
-      return 0.0
-
-    if int(self._standstill_lead_prev_ms) > 0:
-      dt_s = (int(now_ms) - int(self._standstill_lead_prev_ms)) / 1000.0
-      if 0.05 <= float(dt_s) <= 1.5:
-        raw_rate = (float(lead.d_rel) - float(self._standstill_lead_prev_drel_m)) / float(dt_s)
-        # Smooth enough to reject a single radar-range nibble while still responding
-        # within a few 5 Hz LONG/ACC cycles when the lead genuinely starts moving.
-        self._standstill_lead_opening_rate_ms = (
-          0.55 * float(self._standstill_lead_opening_rate_ms)
-          + 0.45 * max(-5.0, min(5.0, float(raw_rate)))
-        )
-
-    self._standstill_lead_prev_drel_m = float(lead.d_rel)
-    self._standstill_lead_prev_ms = int(now_ms)
-    return float(self._standstill_lead_opening_rate_ms)
-
-  def _standstill_resume_needed(
-    self,
-    *,
-    now_ms: int,
-    stock_state: str,
-    desired_speed_ms: float,
-    v_ego_ms: float,
-    brake_pressed: bool,
-    lead: LeadInfo,
-  ) -> bool:
-    opening_rate_ms = self._standstill_lead_opening_rate(lead=lead, now_ms=now_ms)
-
-    if str(stock_state or "").upper() != "STANDSTILL":
-      return False
-    if bool(brake_pressed) or float(v_ego_ms) > float(self._STANDSTILL_RESUME_MAX_VEGO_MS):
-      return False
-    if (not math.isfinite(float(desired_speed_ms))) or float(desired_speed_ms) < float(self._STANDSTILL_RESUME_MIN_TARGET_MS):
-      return False
-    if not lead.status or float(lead.d_rel) < float(self._STANDSTILL_RESUME_MIN_DREL_M):
-      return False
-
-    lead_moving = bool(
-      float(lead.v_rel) >= float(self._STANDSTILL_RESUME_MIN_VREL_MS)
-      or float(opening_rate_ms) >= float(self._STANDSTILL_RESUME_MIN_OPENING_RATE_MS)
-    )
-    if not lead_moving:
-      return False
-
-    return self._no_automated_action_for(
-      now_ms=now_ms,
-      milliseconds=int(self._STANDSTILL_RESUME_COOLDOWN_MS),
-    )
-
 
   def _lead_blocks_fast_accel(self, *, lead: LeadInfo, v_ego_ms: float) -> bool:
     if not self._lead_is_accel_relevant(lead=lead, v_ego_ms=v_ego_ms):
@@ -868,29 +797,6 @@ class ACCController:
 
     if not self._no_automated_action_for(now_ms=now_ms, milliseconds=self._AUTO_COOLDOWN_MS):
       return AccDecision(None, "gated: cooldown", current_kph, current_kph, current_kph)
-
-    # A 0 mph Tesla set-speed is legitimate while stopped behind a lead. Do not let
-    # the generic "current set speed missing" sentinel swallow the pull-away event:
-    # once LONG raises the target and radar confirms the lead is opening, tap RES.
-    if self._standstill_resume_needed(
-      now_ms=now_ms,
-      stock_state=stock_state,
-      desired_speed_ms=float(desired_speed_ms),
-      v_ego_ms=float(v_ego_ms),
-      brake_pressed=bool(brake_pressed),
-      lead=lead,
-    ):
-      button = int(CruiseButtons.RES_ACCEL)
-      self._reset_accel_burst()
-      self._reset_lead_follow_deadband()
-      self._record_button(now_ms=now_ms, button=button, speed_units=speed_units)
-      return AccDecision(
-        button,
-        "standstill_resume: moving lead",
-        float(desired_speed_ms) * CV.MS_TO_KPH,
-        current_kph,
-        current_kph + float(half_kph),
-      )
 
     if (not math.isfinite(float(desired_speed_ms))) or float(desired_speed_ms) < 0.0 or float(current_set_speed_ms) <= 0.1:
       return AccDecision(None, "gated: invalid target/current", current_kph, current_kph, current_kph)

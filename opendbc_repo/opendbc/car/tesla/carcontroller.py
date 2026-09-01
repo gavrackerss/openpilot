@@ -64,6 +64,10 @@ BTN_DOWN1 = 32
 # Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
 _ARM_ENABLE_CHASSIS = False  # IMPORTANT: no unsolicited chassis 0x2B9; it inhibits EPAS on this vehicle
 _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
+# Unity-style stop/go: author a chassis 0x2B9 TEMPLATE only. Panda captures it, blocks direct TX,
+# and overlays it onto the genuine AP 0x2B9 as that frame crosses bus2->bus0, preserving stock
+# cadence/counter. This is intentionally different from _ARM_ENABLE_CHASSIS (unsolicited direct TX).
+_UNITY_2B9_OVERLAY_TEMPLATE = True
 
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
 # Transmit a full GTW_carConfig (0x398) frame with GTW_autopilot=2 NATIVELY on the AP module's
@@ -903,6 +907,36 @@ class CarController(CarControllerBase):
         # long_active is false (disengaged or non-native): clear the edge latch so the next
         # engagement starts a fresh, bounded arming attempt. No stalk/chassis TX here.
         self._arm_long_active_prev = False
+
+    # Unity-style chassis DAS_control ownership for stop/go. This frame is NOT put on the wire
+    # directly: tesla_legacy safety captures the userspace 0x2B9 as a validated template and
+    # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
+    # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
+    if (
+      _UNITY_2B9_OVERLAY_TEMPLATE
+      and self.CP.openpilotLongitudinalControl
+      and (self.CP.carFingerprint in LEGACY_CARS)
+      and hasattr(self.tesla_can, "create_longitudinal_command_chassis")
+      and (self.frame % 2 == 0)
+    ):
+      native_acc_overlay = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      long_active_overlay = bool(CC.longActive) and ((not autopilot_disabled) or native_acc_overlay)
+      if long_active_overlay and native_acc_overlay:
+        overlay_state = 13 if CC.cruiseControl.cancel else 4
+        overlay_accel = float(np.clip(
+          float(actuators.accel),
+          CarControllerParams.ACCEL_MIN,
+          CarControllerParams.ACCEL_MAX,
+        ))
+        # Counter=1 is deliberate: this packet is only a cache template. Panda strips this
+        # template counter and preserves the genuine AP 0x2B9 counter before recomputing checksum.
+        can_sends.append(self.tesla_can.create_longitudinal_command_chassis(
+          overlay_state,
+          overlay_accel,
+          1,
+          float(CS.out.vEgo),
+          True,
+        ))
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = float(self.apply_angle_last)
