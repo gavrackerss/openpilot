@@ -3632,28 +3632,32 @@ class LongController:
     curve_candidates: list[float] = []
     owner_parts: list[str] = []
 
-    # Option A: CSA is the primary curve authority. When CSA confirms a bend it leads the
-    # candidate set; planner / mapd-map / mapd-vision can only LOWER the target via min().
-    # CSA is route-independent and arrives ~8s/~110m ahead, so it must not be out-voted or
-    # vetoed by the v_ego-relative urgency gate that suppressed pre-emptive caps.
+    # CSA-preferred curve weighting. A fresh, advancing CSA bend is the authoritative
+    # *curve* target; planner/mapD remain fallbacks rather than being allowed to out-vote
+    # CSA simply because they ask for a lower speed. This preference is confined to curve
+    # arbitration: lead following, posted limits and roadworks still constrain elsewhere.
+    # Explicit roundabout geometry remains a lower safety/backstop cap.
     csa_primary = bool(csa_supports)
     if csa_primary:
       curve_candidates.append(float(csa_target_ms))
-      owner_parts.append("csa")
+      owner_parts.append("csa_preferred")
 
-    # Roundabout cap rides alongside CSA as a geometric authority: it only LOWERS via min(),
-    # is never softened upward, and is exempt from the v_ego urgency veto (slowing for a
-    # roundabout must be pre-emptive, before circulation).
-    if roundabout_supports:
-      curve_candidates.append(float(roundabout_target_ms))
-      owner_parts.append("roundabout")
-
-    if planner_curve_active:
-      planner_cand_ms = float(planner_near_ms)
       if roundabout_supports:
-        planner_cand_ms = max(planner_cand_ms, float(roundabout_target_ms))
-      curve_candidates.append(planner_cand_ms)
-      owner_parts.append("planner")
+        curve_candidates.append(float(roundabout_target_ms))
+        owner_parts.append("roundabout")
+    else:
+      # When CSA is unavailable/stale/too gentle, preserve the existing planner/mapD/
+      # roundabout fallback behavior exactly.
+      if roundabout_supports:
+        curve_candidates.append(float(roundabout_target_ms))
+        owner_parts.append("roundabout")
+
+      if planner_curve_active:
+        planner_cand_ms = float(planner_near_ms)
+        if roundabout_supports:
+          planner_cand_ms = max(planner_cand_ms, float(roundabout_target_ms))
+        curve_candidates.append(planner_cand_ms)
+        owner_parts.append("planner")
 
     curve_specific_ms = self._curve_specific_mapd_target_ms(
       now_ns=int(now_ns),
@@ -3662,12 +3666,11 @@ class LongController:
       current_angle_deg=float(current_angle_deg),
       planner_curve_active=bool(planner_curve_active),
     )
-    if curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
+    if (not csa_primary) and curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
       mapd_cand_ms = float(curve_specific_ms)
       # Fix #2: mapd under-reads big named roundabouts (Delme: mapCurveSpeed 15 -> floored to 18,
       # too slow; ~23 is fine). On a named roundabout don't let the mapd/planner candidate pull the
-      # target below the roundabout circulation cap. CSA (real geometry, added unfloored above) may
-      # still lower it for a genuinely tight roundabout. (Revert: drop these two roundabout floors.)
+      # target below the roundabout circulation cap.
       if roundabout_supports:
         mapd_cand_ms = max(mapd_cand_ms, float(roundabout_target_ms))
       curve_candidates.append(mapd_cand_ms)
@@ -4229,7 +4232,14 @@ class LongController:
         target_ms = min(float(target_ms), previous_curve_ms + float(self._ARBITRATION_CURVE_EXIT_STEP_MS) * dt_s)
 
       self._arbitration_curve_target_ms = float(target_ms)
-      out_ms = min(float(out_ms), float(target_ms))
+      if "csa_preferred" in str(curve_source):
+        # Earlier compatibility paths may already have applied a planner/mapD curve cap.
+        # Once fresh CSA owns the curve, discard those lower *curve-only* reductions and
+        # rebuild from the non-curve reference ceiling. reference_ms already incorporates
+        # posted-limit/roadworks constraints; lead-critical/follow returned above.
+        out_ms = min(float(reference_ms), float(target_ms))
+      else:
+        out_ms = min(float(out_ms), float(target_ms))
       out_src = f"{out_src}+state[{state}:{curve_source}]"
       return float(out_ms), out_src
 
