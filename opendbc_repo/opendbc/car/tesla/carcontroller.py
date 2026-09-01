@@ -101,6 +101,7 @@ class CarController(CarControllerBase):
     # Hybrid mode is latched at CarController startup. UI changes apply next drive/restart so
     # CarParams, panda safety ownership, and longitudinal authority cannot change mid-drive.
     self._cached_hybrid_native_ap = bool(self.params.get_bool("TinklaHybridNativeAP")) and not bool(self.params.get_bool("TinklaAutopilotDisabled"))
+    self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
     self._cached_pedal_enabled = False
     self._cached_adjust_acc_with_speed_limit = False
     self._cached_speed_limit_offset_uom = 0.0
@@ -172,6 +173,7 @@ class CarController(CarControllerBase):
     # stock-cruise dependency and no 17.1 mph engage floor. Cached here so the longitudinal
     # gate below can keep long_active true in that mode.
     self._cached_enable_acc = bool(self.params.get_bool("TinklaEnableACC"))
+    self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
     self._cached_pedal_enabled = bool(
       self.params.get_bool("TinklaPedalEnabled") or
       self.params.get_bool("PedalEnabled")
@@ -289,6 +291,7 @@ class CarController(CarControllerBase):
           stalk_main=main_edge,
           stalk_cancel=cancel_edge,
           hybrid_native_ap=(self._cached_hybrid_native_ap and not self._cached_autopilot_disabled),
+          autosteer_247_test=self._cached_autosteer_247_test,
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -725,7 +728,7 @@ class CarController(CarControllerBase):
 
     # Config-unlock experiment: transmit GTW_carConfig(0x398) with autopilot=2 natively on bus 2
     # (the AP module's own segment), ~1Hz. Fixed valid payload; no checksum/counter on this frame.
-    if _GTW_TX_AUTOPILOT2_BUS2 and (self.frame % 100 == 0):
+    if _GTW_TX_AUTOPILOT2_BUS2 and (not self._cached_hybrid_native_ap) and (self.frame % 100 == 0):
       can_sends.append((0x398, bytes(_GTW_CARCONFIG_AP2_PAYLOAD), int(CANBUS.autopilot_party)))
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)

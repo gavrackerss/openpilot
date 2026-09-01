@@ -61,6 +61,7 @@ class TeslaLayout(Widget):
       param_toggle_item("Ignore Stock AEB", "Ignore Tesla stock Automatic Emergency Braking events.", self._params, "TinklaIgnoreStockAeb"),
       param_toggle_item("Autopilot Disabled", "Unity mode: steering assist when Tesla Autopilot is disabled.", self._params, "TinklaAutopilotDisabled", exclusive_key="TinklaHybridNativeAP"),
       param_toggle_item("Hybrid Native Autopilot", "Experimental: keep native Tesla Autosteer/TACC and IC visuals active while openpilot substitutes only the steering command. Mutually exclusive with Autopilot Disabled; takes effect after restart/next drive.", self._params, "TinklaHybridNativeAP", exclusive_key="TinklaAutopilotDisabled"),
+      param_toggle_item("0x247 Autosteer State Test", "Experimental IC test: while normal xnor Autopilot-Disabled control is engaged, rewrite the native AP 0x247 unknown state field from its standby value to the value observed during genuine Tesla Autosteer. Does not run in Hybrid mode.", self._params, "TinklaAutosteer247Test"),
       param_toggle_item("Tesla VTB Steering", "Virtual Torque Blending: blends light driver steering input into Tesla angle control for smoother handoff. Default off.", self._params, "XnorTeslaVirtualTorqueBlending"),
       param_toggle_item("Mute Engage/Disengage Sounds", "Disables the start and stop sounds.", self._params, "TinklaDisableStartStopSounds"),
       param_toggle_item("Mute Prompt Sounds", "Disables prompt sounds.", self._params, "TinklaDisablePromptSounds"),

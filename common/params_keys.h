@@ -138,6 +138,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TinklaAlcDelay", {PERSISTENT, FLOAT, "2.0"}},
     {"TinklaAutopilotDisabled", {PERSISTENT, BOOL, "0"}},
     {"TinklaHybridNativeAP", {PERSISTENT, BOOL, "0"}},
+    {"TinklaAutosteer247Test", {PERSISTENT, BOOL, "0"}},
     {"TinklaDisablePromptSounds", {PERSISTENT, BOOL, "0"}},
     {"TinklaDisableStartStopSounds", {PERSISTENT, BOOL, "0"}},
     {"TinklaEnableACC", {PERSISTENT, BOOL, "1"}},

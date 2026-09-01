@@ -20,11 +20,12 @@ def _crc8_j1850(data: bytes) -> int:
 
 def create_fake_das_msg(pedal_enabled: bool, autopilot_disabled: bool, bus: int,
                         stalk_main: bool = False, stalk_cancel: bool = False,
-                        hybrid_native_ap: bool = False):
+                        hybrid_native_ap: bool = False, autosteer_247_test: bool = False):
   dat = bytearray(8)
   dat[5] = ((0x20 if pedal_enabled else 0) |
             (0x80 if autopilot_disabled else 0) |
             (0x40 if hybrid_native_ap else 0) |
+            (0x10 if autosteer_247_test else 0) |
             (0x02 if stalk_main else 0) |
             (0x01 if stalk_cancel else 0))
   return (0x659, bytes(dat), bus)
@@ -32,10 +33,10 @@ def create_fake_das_msg(pedal_enabled: bool, autopilot_disabled: bool, bus: int,
 
 def create_fake_das_message(pedal_enabled: bool, autopilot_disabled: bool, *,
                             stalk_main: bool = False, stalk_cancel: bool = False,
-                            hybrid_native_ap: bool = False, bus: int = 0):
+                            hybrid_native_ap: bool = False, autosteer_247_test: bool = False, bus: int = 0):
   return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
                              stalk_main=stalk_main, stalk_cancel=stalk_cancel,
-                             hybrid_native_ap=hybrid_native_ap)
+                             hybrid_native_ap=hybrid_native_ap, autosteer_247_test=autosteer_247_test)
 
 
 class TeslaCAN:
@@ -52,10 +53,10 @@ class TeslaCAN:
 
   def _create_fake_das(self, pedal_enabled: bool, autopilot_disabled: bool, bus: int,
                        stalk_main: bool = False, stalk_cancel: bool = False,
-                       hybrid_native_ap: bool = False):
+                       hybrid_native_ap: bool = False, autosteer_247_test: bool = False):
     return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
                                stalk_main=stalk_main, stalk_cancel=stalk_cancel,
-                               hybrid_native_ap=hybrid_native_ap)
+                               hybrid_native_ap=hybrid_native_ap, autosteer_247_test=autosteer_247_test)
 
   def create_steering_control(self, angle, enabled):
     values = {

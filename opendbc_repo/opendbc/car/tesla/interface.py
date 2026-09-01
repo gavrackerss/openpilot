@@ -58,7 +58,7 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def _apply_xnor_safety_flags(ret: structs.CarParams) -> None:
     params = Params()
-    if params.get_bool("TinklaAutopilotDisabled") or params.get_bool("TinklaHybridNativeAP"):
+    if params.get_bool("TinklaAutopilotDisabled"):
       for cfg in ret.safetyConfigs:
         cfg.safetyParam |= int(TeslaSafetyFlags.OP_STALK_ENABLE)
 

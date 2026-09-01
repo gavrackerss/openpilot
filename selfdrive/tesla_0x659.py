@@ -12,6 +12,7 @@ byte5 is interpreted as:
   - bit 0x80: op_autopilot_disabled (gate for allowing OP actuation on AP HW cars)
   - bit 0x40: hybrid_native_ap (native AP visuals/TACC, OP steering substitution)
   - bit 0x20: pedal_enabled (optional)
+  - bit 0x10: autosteer_247_test (experimental IC presentation-state rewrite)
   - bit 0x02: OP stalk MAIN edge (used to call pcm_cruise_check(true) when OP_STALK_ENABLE flag is set)
   - bit 0x01: OP stalk CANCEL edge (used to call pcm_cruise_check(false) when OP_STALK_ENABLE flag is set)
 
@@ -48,6 +49,9 @@ AP_DISABLED_KEYS = (
 )
 HYBRID_NATIVE_AP_KEYS = (
   "TinklaHybridNativeAP",
+)
+AUTOSTEER_247_TEST_KEYS = (
+  "TinklaAutosteer247Test",
 )
 PEDAL_ENABLED_KEYS = (
   "TinklaPedalEnabled",
@@ -96,6 +100,7 @@ class Tesla659Carrier:
     self._params_cache_ts = 0.0
     self._ap_disabled = True   # conservative default for AP HW cars
     self._pedal_enabled = False
+    self._autosteer_247_test = any(bool(_safe_get_bool(self._params, k)) for k in AUTOSTEER_247_TEST_KEYS)
     # Hybrid is intentionally latched at process start; the UI marks it as next-drive/restart.
     self._hybrid_native_ap = any(bool(_safe_get_bool(self._params, k)) for k in HYBRID_NATIVE_AP_KEYS)
 
@@ -156,6 +161,12 @@ class Tesla659Carrier:
         self._pedal_enabled = v
         break
 
+    for k in AUTOSTEER_247_TEST_KEYS:
+      v = _safe_get_bool(self._params, k)
+      if v is not None:
+        self._autosteer_247_test = v
+        break
+
   def _build_b5(self) -> int:
     self._refresh_params()
 
@@ -166,6 +177,8 @@ class Tesla659Carrier:
       b5 |= 0x40
     if self._pedal_enabled:
       b5 |= 0x20
+    if self._autosteer_247_test:
+      b5 |= 0x10
     if self._edges.main_edge:
       b5 |= 0x02
     if self._edges.cancel_edge:
