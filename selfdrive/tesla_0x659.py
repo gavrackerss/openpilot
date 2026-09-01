@@ -10,6 +10,7 @@ TX hook as an internal contract between userspace and the safety hooks.
 In this fork's Tesla Legacy safety (opendbc_repo/opendbc/safety/modes/tesla_legacy.h),
 byte5 is interpreted as:
   - bit 0x80: op_autopilot_disabled (gate for allowing OP actuation on AP HW cars)
+  - bit 0x40: hybrid_native_ap (native AP visuals/TACC, OP steering substitution)
   - bit 0x20: pedal_enabled (optional)
   - bit 0x02: OP stalk MAIN edge (used to call pcm_cruise_check(true) when OP_STALK_ENABLE flag is set)
   - bit 0x01: OP stalk CANCEL edge (used to call pcm_cruise_check(false) when OP_STALK_ENABLE flag is set)
@@ -44,6 +45,9 @@ ADDR_STALK = 0x045  # STW_ACTN_RQ
 AP_DISABLED_KEYS = (
   "TinklaAutopilotDisabled",
   "AutopilotDisabled",
+)
+HYBRID_NATIVE_AP_KEYS = (
+  "TinklaHybridNativeAP",
 )
 PEDAL_ENABLED_KEYS = (
   "TinklaPedalEnabled",
@@ -92,6 +96,8 @@ class Tesla659Carrier:
     self._params_cache_ts = 0.0
     self._ap_disabled = True   # conservative default for AP HW cars
     self._pedal_enabled = False
+    # Hybrid is intentionally latched at process start; the UI marks it as next-drive/restart.
+    self._hybrid_native_ap = any(bool(_safe_get_bool(self._params, k)) for k in HYBRID_NATIVE_AP_KEYS)
 
   @property
   def spdctrl(self) -> int:
@@ -156,6 +162,8 @@ class Tesla659Carrier:
     b5 = 0
     if self._ap_disabled:
       b5 |= 0x80
+    if self._hybrid_native_ap and not self._ap_disabled:
+      b5 |= 0x40
     if self._pedal_enabled:
       b5 |= 0x20
     if self._edges.main_edge:

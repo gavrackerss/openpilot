@@ -13,15 +13,18 @@ from openpilot.system.ui.widgets.toggle import HEIGHT as TOGGLE_HEIGHT, Toggle, 
 
 
 class ParamToggleAction(ItemAction):
-  def __init__(self, params: Params, key: str):
+  def __init__(self, params: Params, key: str, exclusive_key: str | None = None):
     super().__init__(width=TOGGLE_WIDTH, enabled=True)
     self._params = params
     self._key = key
+    self._exclusive_key = exclusive_key
     self._toggle = Toggle(initial_state=params.get_bool(key))
     self._toggle.set_touch_valid_callback(lambda: False)
 
   def _handle_mouse_release(self, _mouse_pos):
     new_state = not self._params.get_bool(self._key)
+    if new_state and self._exclusive_key is not None:
+      self._params.put_bool(self._exclusive_key, False)
     self._params.put_bool(self._key, new_state)
     self._toggle.set_state(new_state)
 
@@ -33,8 +36,8 @@ class ParamToggleAction(ItemAction):
     return False
 
 
-def param_toggle_item(title: str, description: str, params: Params, key: str) -> ListItem:
-  return ListItem(title=lambda: tr(title), description=lambda: tr(description), action_item=ParamToggleAction(params, key))
+def param_toggle_item(title: str, description: str, params: Params, key: str, exclusive_key: str | None = None) -> ListItem:
+  return ListItem(title=lambda: tr(title), description=lambda: tr(description), action_item=ParamToggleAction(params, key, exclusive_key))
 
 
 class TeslaLayout(Widget):
@@ -56,7 +59,8 @@ class TeslaLayout(Widget):
       param_toggle_item("Radar Upside Down", "Use if your Tesla radar is mounted upside down.", self._params, "TinklaUseTeslaRadarUpsideDown"),
       param_toggle_item("Ignore Radar SGU Error", "Ignore SGU hardware fail on Tesla radar.", self._params, "TinklaTeslaRadarIgnoreSGUError"),
       param_toggle_item("Ignore Stock AEB", "Ignore Tesla stock Automatic Emergency Braking events.", self._params, "TinklaIgnoreStockAeb"),
-      param_toggle_item("Autopilot Disabled", "Unity mode: steering assist when Tesla Autopilot is disabled.", self._params, "TinklaAutopilotDisabled"),
+      param_toggle_item("Autopilot Disabled", "Unity mode: steering assist when Tesla Autopilot is disabled.", self._params, "TinklaAutopilotDisabled", exclusive_key="TinklaHybridNativeAP"),
+      param_toggle_item("Hybrid Native Autopilot", "Experimental: keep native Tesla Autosteer/TACC and IC visuals active while openpilot substitutes only the steering command. Mutually exclusive with Autopilot Disabled; takes effect after restart/next drive.", self._params, "TinklaHybridNativeAP", exclusive_key="TinklaAutopilotDisabled"),
       param_toggle_item("Tesla VTB Steering", "Virtual Torque Blending: blends light driver steering input into Tesla angle control for smoother handoff. Default off.", self._params, "XnorTeslaVirtualTorqueBlending"),
       param_toggle_item("Mute Engage/Disengage Sounds", "Disables the start and stop sounds.", self._params, "TinklaDisableStartStopSounds"),
       param_toggle_item("Mute Prompt Sounds", "Disables prompt sounds.", self._params, "TinklaDisablePromptSounds"),

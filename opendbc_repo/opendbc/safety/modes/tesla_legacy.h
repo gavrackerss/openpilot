@@ -84,6 +84,7 @@ static int tesla_legacy_das_control_addr = 0x2BF;
 
 // internal OP->safety carrier (0x659) — Unity parity bits (byte5)
 static bool tesla_legacy_op_autopilot_disabled = false;  // bit7
+static bool tesla_legacy_op_hybrid_native_ap = false;     // bit6: native AP visuals/TACC + OP steering substitution
 static bool tesla_legacy_pedal_enabled = false;          // 0x659 byte5 bit5 (Unity parity)
 static bool tesla_legacy_op_stalk_main_edge = false;     // bit1 (edge)
 static bool tesla_legacy_op_stalk_cancel_edge = false;   // bit0 (edge)
@@ -253,11 +254,12 @@ static void tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {
 }
 
 static bool tesla_legacy_is_hud_status_msg(int addr) {
-  // 0x399/0x389 are status overlays; 0x239 is the fused-lane overlay. 0x2B9 is the
+  // 0x399/0x389 are status overlays; 0x239 is the fused-lane overlay; 0x488 is the
+  // Hybrid Native AP steering template. 0x2B9 is the
   // Unity-style chassis DAS_control overlay used for stop/go: userspace authors the desired
   // payload, but panda never transmits that packet directly. Instead it is merged onto the
   // genuine AP 0x2B9 so the AP cadence/counter remain authoritative.
-  return (addr == 0x399) || (addr == 0x389) || (addr == 0x239) || (addr == 0x2B9);
+  return (addr == 0x399) || (addr == 0x389) || (addr == 0x239) || (addr == 0x2B9) || (addr == 0x488);
 }
 
 typedef struct {
@@ -280,6 +282,9 @@ static TeslaLegacyHudForwardData tesla_legacy_hud_forward_data[] = {
   {0x389, 2, 0, 8, 500000U, 0x00F0FF3CU, 0xFFFF3FFFU, 0U, 0U, 0U, 0U, false},
   // DAS_lanes: preserve byte7 high-nibble rolling counter from the genuine AP frame.
   {0x239, 2, 0, 8, 1000000U, 0xF0000000U, 0x00000000U, 0U, 0U, 0U, 0U, false},
+  // Hybrid DAS_steeringControl: preserve genuine AP 4-bit counter in byte2 low nibble;
+  // replace OP angle/type/haptic and recompute the additive checksum in byte3.
+  {0x488, 2, 0, 4, 100000U, 0x00000000U, 0x000F0000U, 0U, 0U, 0U, 0U, false},
   // DAS_control chassis: preserve genuine AP counter (bits 53..55); recompute additive checksum.
   {0x2B9, 2, 0, 8, 50000U, 0x00E00000U, 0x00000000U, 0U, 0U, 0U, 0U, false},
 };
@@ -299,8 +304,9 @@ static void tesla_legacy_set_u32_le(uint8_t *data, uint32_t value) {
 }
 
 static bool tesla_legacy_hud_tx_has_valid_counter(const CANPacket_t *msg, const TeslaLegacyHudForwardData *fwd) {
+  const int len = GET_LEN(msg);
   const uint32_t data_l = tesla_legacy_get_u32_le(&msg->data[0]);
-  const uint32_t data_h = tesla_legacy_get_u32_le(&msg->data[4]);
+  const uint32_t data_h = (len > 4) ? tesla_legacy_get_u32_le(&msg->data[4]) : 0U;
   return ((fwd->counter_mask_h | fwd->counter_mask_l) == 0U) ||
          (((data_h & fwd->counter_mask_h) | (data_l & fwd->counter_mask_l)) != 0U);
 }
@@ -321,7 +327,7 @@ static bool tesla_legacy_capture_hud_tx(const CANPacket_t *msg, bool violation) 
       fwd->last_capture_ts = now;
       if (!violation && tesla_legacy_hud_tx_has_valid_counter(msg, fwd)) {
         const uint32_t data_l = tesla_legacy_get_u32_le(&msg->data[0]);
-        const uint32_t data_h = tesla_legacy_get_u32_le(&msg->data[4]);
+        const uint32_t data_h = (len > 4) ? tesla_legacy_get_u32_le(&msg->data[4]) : 0U;
         fwd->data_l = data_l & ~fwd->counter_mask_l;
         fwd->data_h = data_h & ~fwd->counter_mask_h;
         fwd->valid = true;
@@ -354,6 +360,13 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
       if ((addr == 0x2B9) && ((to_fwd->data[2] & 0x03U) != 0U)) {
         return false;
       }
+      // Hybrid steering is fail-open to native AP: substitute only while native Autosteer is
+      // genuinely active, OP remains allowed, and the driver is not overriding the wheel.
+      if ((addr == 0x488) && (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
+                              !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled ||
+                              tesla_legacy_hands_on)) {
+        return false;
+      }
 
       const uint32_t now = microsecond_timer_get();
       const bool fresh = fwd->valid &&
@@ -365,17 +378,19 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
       }
 
       const uint32_t stock_l = tesla_legacy_get_u32_le(&to_fwd->data[0]);
-      const uint32_t stock_h = tesla_legacy_get_u32_le(&to_fwd->data[4]);
+      const uint32_t stock_h = (len > 4) ? tesla_legacy_get_u32_le(&to_fwd->data[4]) : 0U;
       tesla_legacy_set_u32_le(&to_fwd->data[0], fwd->data_l | (stock_l & fwd->counter_mask_l));
-      tesla_legacy_set_u32_le(&to_fwd->data[4], fwd->data_h | (stock_h & fwd->counter_mask_h));
+      if (len > 4) {
+        tesla_legacy_set_u32_le(&to_fwd->data[4], fwd->data_h | (stock_h & fwd->counter_mask_h));
+      }
 
       if (addr == 0x389) {
         to_fwd->data[1] = (uint8_t)(to_fwd->data[1] & 0xE3U);
       }
 
-      // DAS_status/DAS_status2 and DAS_control use Tesla's additive checksum in byte7.
-      // DAS_lanes uses byte7 high nibble as its rolling counter and has no additive checksum.
-      if ((addr == 0x399) || (addr == 0x389) || (addr == 0x2B9)) {
+      // DAS_status/DAS_status2/DAS_control and DAS_steeringControl use Tesla's additive
+      // last-byte checksum. DAS_lanes uses byte7 high nibble as counter and no checksum.
+      if ((addr == 0x399) || (addr == 0x389) || (addr == 0x2B9) || (addr == 0x488)) {
         tesla_legacy_set_last_byte_checksum(to_fwd);
       }
       fwd->last_apply_ts = fwd->last_capture_ts;
@@ -555,8 +570,8 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   }
 
   // Unity stalk gating on 0x45 (bus0)
-  if ((bus == 0) && (addr == 0x45) && tesla_legacy_op_stalk_enable) {
-    if ((!tesla_legacy_has_ap_hw) || tesla_legacy_op_autopilot_disabled) {
+  if ((bus == 0) && (addr == 0x45) && (tesla_legacy_op_stalk_enable || tesla_legacy_op_hybrid_native_ap)) {
+    if ((!tesla_legacy_has_ap_hw) || tesla_legacy_op_autopilot_disabled || tesla_legacy_op_hybrid_native_ap) {
       const int ap_lever_position = (int)(msg->data[0] & 0x3F);
       if (ap_lever_position == 2) {
         pcm_cruise_check(true);
@@ -571,8 +586,12 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   if (bus == 2) {
     if (!tesla_legacy_external_panda && (addr == 0x488)) {
       const int steer_control_type = (int)((msg->data[2] >> 6) & 0x03);
+      const bool was_stock_lkas = tesla_legacy_stock_lkas;
       tesla_legacy_stock_lkas = (steer_control_type == 2) || (steer_control_type == 3);
-      if (tesla_legacy_stock_lkas) {
+      if (!tesla_legacy_op_hybrid_native_ap && tesla_legacy_stock_lkas) {
+        controls_allowed = false;
+      } else if (tesla_legacy_op_hybrid_native_ap && was_stock_lkas && !tesla_legacy_stock_lkas) {
+        // Native Autosteer dropped: immediately revoke OP substitution authority.
         controls_allowed = false;
       }
     } else if (tesla_legacy_external_panda && tesla_legacy_is_das_control_msg(addr)) {
@@ -587,8 +606,11 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (!tesla_legacy_external_panda && tesla_legacy_has_ap_hw) {
       if (addr == 0x399) {
         const uint8_t st = msg->data[0] & 0x0FU;  // AutopilotStatus is the LOW nibble on this DBC
+        const bool was_autopilot_enabled = tesla_legacy_autopilot_enabled;
         tesla_legacy_autopilot_enabled = (st == 3U) || (st == 4U);
-        if (tesla_legacy_autopilot_enabled) {
+        if (!tesla_legacy_op_hybrid_native_ap && tesla_legacy_autopilot_enabled) {
+          controls_allowed = false;
+        } else if (tesla_legacy_op_hybrid_native_ap && was_autopilot_enabled && !tesla_legacy_autopilot_enabled) {
           controls_allowed = false;
         }
       } else if (addr == 0x219) {
@@ -596,7 +618,8 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
         const int psc_status = (int)((msg->data[0] >> 1) & 0x1FU);
         tesla_legacy_eac_enabled = (eac_status == 2) || (eac_status == 3);
         tesla_legacy_autopark_enabled = (psc_status == 14) || ((psc_status >= 1) && (psc_status <= 8));
-        if (tesla_legacy_autopilot_enabled || tesla_legacy_eac_enabled || tesla_legacy_autopark_enabled) {
+        if (tesla_legacy_autopark_enabled ||
+            (!tesla_legacy_op_hybrid_native_ap && (tesla_legacy_autopilot_enabled || tesla_legacy_eac_enabled))) {
           controls_allowed = false;
         }
       } else {
@@ -638,6 +661,37 @@ static bool tesla_legacy_chassis_overlay_violation(const CANPacket_t *msg) {
   return false;
 }
 
+// Validate a Hybrid Native AP steering TEMPLATE. The userspace packet is never sent directly;
+// its angle/type are merged onto a genuine AP 0x488 later, preserving native cadence/counter.
+static bool tesla_legacy_hybrid_steering_overlay_violation(const CANPacket_t *msg) {
+  if (tesla_legacy_external_panda || ((int)msg->addr != 0x488) || ((int)msg->bus != 0)) {
+    return true;
+  }
+  if (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
+      !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled || tesla_legacy_hands_on) {
+    return true;
+  }
+
+  const int steer_control_type = (int)((msg->data[2] >> 6) & 0x03U);
+  if (steer_control_type != 1) {  // hybrid accepts only active OP ANGLE_CONTROL templates
+    return true;
+  }
+
+  const int raw_angle_can = (((int)(msg->data[0] & 0x7FU)) << 8) | (int)msg->data[1];
+  const int desired_angle = raw_angle_can - 16384;
+  const AngleSteeringLimits limits = {
+    .max_angle = 3600,
+    .angle_deg_to_can = 10.0f,
+    .frequency = 50U,
+  };
+  const AngleSteeringParams params = {
+    .slip_factor = -0.000750000000000000f,
+    .steer_ratio = 16.5f,
+    .wheelbase = 2.96f,
+  };
+  return steer_angle_cmd_checks_vm(desired_angle, true, limits, params);
+}
+
 // --- TX hook ---
 static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   const int addr = (int)msg->addr;
@@ -647,9 +701,11 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     const uint8_t b5 = msg->data[5];
     tesla_legacy_pedal_enabled = (b5 & 0x20U) != 0U;
     tesla_legacy_op_autopilot_disabled = (b5 & 0x80U) != 0U;
+    tesla_legacy_op_hybrid_native_ap = (b5 & 0x40U) != 0U;
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
-        if (tesla_legacy_op_stalk_enable && (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
+        if ((tesla_legacy_op_stalk_enable || tesla_legacy_op_hybrid_native_ap) &&
+            (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled || tesla_legacy_op_hybrid_native_ap)) {
       if (tesla_legacy_op_stalk_main_edge) {
         pcm_cruise_check(true);
       }
@@ -675,13 +731,24 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return false;
   }
 
-  // Unity-style HUD ownership: consume OP HUD status frames, but never transmit them directly.
-  // The cached payload is merged onto stock AP frames in fwd_msg so the IC sees one coherent stream.
-  if (tesla_legacy_capture_hud_tx(msg, false)) {
+  // Hybrid Native AP steering ownership: validate/cache OP 0x488, but NEVER transmit the
+  // userspace frame directly. It is substituted onto the next genuine native-AP 0x488 in fwd.
+  if (!tesla_legacy_external_panda && (addr == 0x488) && ((int)msg->bus == 0) &&
+      tesla_legacy_op_hybrid_native_ap) {
+    const bool violation = tesla_legacy_hybrid_steering_overlay_violation(msg);
+    (void)tesla_legacy_capture_hud_tx(msg, violation);
     return false;
   }
 
-  // Unity parity: on AP hardware cars, block OP actuation unless stock AP is disabled
+  // Unity-style HUD ownership: consume OP HUD status frames, but never transmit them directly.
+  // 0x488 is excluded here because outside Hybrid mode it follows the existing direct steering path.
+  if ((addr != 0x488) && tesla_legacy_capture_hud_tx(msg, false)) {
+    return false;
+  }
+
+  // On AP hardware cars normal xnor actuation remains blocked unless stock AP is disabled.
+  // Hybrid is the sole exception for steering, and that 0x488 was already captured above;
+  // longitudinal and the OP EPAS-allow message remain blocked so native AP owns them.
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
     if ((addr == 0x488) || (addr == 0x27D) || tesla_legacy_is_das_control_msg(addr)) {
       return false;
@@ -934,14 +1001,24 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // Main panda: stock LKAS passthrough (bus2 -> car)
-  if ((bus_num == 2) && ((addr == 0x488) || (addr == 0x27D))) {
+  // Main panda: stock LKAS passthrough (bus2 -> car). In Hybrid mode the genuine AP 0x488
+  // remains the timing carrier, but its steering payload is replaced with the validated OP
+  // template. If no fresh/valid template exists, fail open to the untouched native AP frame.
+  if ((bus_num == 2) && (addr == 0x488)) {
+    if (tesla_legacy_op_hybrid_native_ap && tesla_legacy_stock_lkas) {
+      (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
+      return false;
+    }
+    return !tesla_legacy_stock_lkas;
+  }
+  if ((bus_num == 2) && (addr == 0x27D)) {
     return !tesla_legacy_stock_lkas;
   }
 
   // Unity mods only on main panda with AP HW
   if (!tesla_legacy_has_ap_hw) {
-        if (tesla_legacy_op_stalk_enable && (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
+        if ((tesla_legacy_op_stalk_enable || tesla_legacy_op_hybrid_native_ap) &&
+            (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled || tesla_legacy_op_hybrid_native_ap)) {
       if (tesla_legacy_op_stalk_main_edge) {
         pcm_cruise_check(true);
       }
@@ -1030,6 +1107,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_das_control_addr = tesla_legacy_external_panda ? 0x2BF : 0x2B9;
 
   tesla_legacy_op_autopilot_disabled = false;
+  tesla_legacy_op_hybrid_native_ap = false;
   tesla_legacy_pedal_enabled = false;
 
   tesla_legacy_autopilot_enabled = false;

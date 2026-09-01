@@ -22,6 +22,7 @@ ButtonType = structs.CarState.ButtonEvent.Type
 @dataclass
 class _TinklaConfig:
   autopilot_disabled: bool = False
+  hybrid_native_ap: bool = False
   hands_on_level: float = 2.0
   adjust_acc_with_speed_limit: bool = True
   speed_limit_offset: float = 0.0
@@ -148,12 +149,16 @@ class CarState(CarStateBase):
     try:
       self._reload_tinkla_params()
       self.autopilot_disabled = bool(self._tinkla.autopilot_disabled)
+      # Hybrid mode is intentionally latched for the drive. The UI toggle takes effect after
+      # restart/next drive so CarParams/safety/controller ownership cannot change mid-engagement.
+      self.hybrid_native_ap = bool(self._tinkla.hybrid_native_ap) and not self.autopilot_disabled
     except Exception:
       pass
 
 
   def _reload_tinkla_params(self) -> None:
     self._tinkla.autopilot_disabled = load_bool_param("TinklaAutopilotDisabled", False)
+    self._tinkla.hybrid_native_ap = load_bool_param("TinklaHybridNativeAP", False)
     self._tinkla.hands_on_level = load_float_param("TinklaHandsOnLevel", 2.0)
     self._tinkla.adjust_acc_with_speed_limit = load_bool_param("TinklaAdjustAccWithSpeedLimit", False)
     self._tinkla.speed_limit_offset = load_float_param("TinklaSpeedLimitOffset", 0.0)
@@ -325,7 +330,7 @@ class CarState(CarStateBase):
 
     - Two MAIN pulls within 750ms enables adaptive matching.
     - One MAIN pull while enabled disables it.
-    - Auto-disables only when stock cruise is no longer in a usable state.
+    - Auto-disables when stock cruise is not ENABLED/STANDBY or speed is below minimum.
     """
     btn = int(getattr(self, "cruise_buttons", 0) or 0)
     prev_btn = int(getattr(self, "_prev_pull_button", 0) or 0)
@@ -346,7 +351,7 @@ class CarState(CarStateBase):
         self._last_cruise_stalk_pull_ms = int(now_ms)
 
         stock_state = str(getattr(self, "stock_cruise_state", "") or "")
-        ready = stock_state in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")
+        ready = (stock_state in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")) and (float(v_ego_ms) > (17.1 * CV.MPH_TO_MS))
 
         if ready and (not bool(getattr(self, "enable_adaptive_cruise", False))):
           if double_pull:
@@ -357,7 +362,7 @@ class CarState(CarStateBase):
 
     # auto-disable when cruise not ready
     stock_state = str(getattr(self, "stock_cruise_state", "") or "")
-    if stock_state not in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL"):
+    if (stock_state not in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")) or (float(v_ego_ms) <= (17.1 * CV.MPH_TO_MS)):
       self.enable_adaptive_cruise = False
 
     self._prev_pull_button = int(btn)
@@ -1051,6 +1056,10 @@ class CarState(CarStateBase):
       ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
+    # Native AP lateral state is the engagement source in Hybrid Native AP mode. Keep this
+    # derived from the raw AP-side 0x488, before panda substitutes the IC/EPAS-facing copy.
+    native_lkas_active = int(cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"]) == 2
+
     # Cruise state
     cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
     self.stock_cruise_state = str(cruise_state or "")
@@ -1166,9 +1175,19 @@ class CarState(CarStateBase):
         pass
     self._param_frame += 1
 
-    if self.autopilot_disabled or self.enableACC:
-      # Native ACC: openpilot is the longitudinal authority and can remain available through
-      # standstill. Keep the same door/gear/seatbelt sanity as the existing autopilot_disabled path.
+    if self.hybrid_native_ap:
+      # Hybrid Native AP: openpilot engages only once Tesla's own Autosteer is genuinely active.
+      # Native TACC remains the longitudinal authority and its native IC/status/lane/object stream
+      # stays untouched; openpilot only substitutes the steering command downstream in panda.
+      ret.cruiseState.available = True
+      ret.cruiseState.enabled = bool(native_lkas_active) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      self.cruiseEnabled = bool(ret.cruiseState.enabled)
+    elif self.autopilot_disabled or self.enableACC:
+      # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
+      # virtual cruise stalk (set just above) with NO stock-cruise dependency and NO 17.1 mph
+      # engage floor. This deliberately bypasses GATE B (_update_adaptive_cruise_mode, the
+      # stock-passthrough 17.1 mph lock) which a car without factory TACC cannot use anyway.
+      # Same door/gear/seatbelt sanity as the existing autopilot_disabled path.
       ret.cruiseState.available = True
       ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)
@@ -1177,7 +1196,7 @@ class CarState(CarStateBase):
     ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
 
     # LKAS
-    ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == 2  # LANE_KEEP_ASSIST
+    ret.stockLkas = bool(native_lkas_active)  # native AP LANE_KEEP_ASSIST, raw bus-2 state
 
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
