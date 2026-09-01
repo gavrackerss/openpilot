@@ -64,6 +64,17 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 // entitlement, not a live-CAN artifact. Bench/rig ONLY.
 #define TESLA_LEGACY_MITM_BLOCK_STOCK_GTW 1
 
+// --- IC lane bus-origin experiment -------------------------------------------------------------
+// XNOR transmits DAS_lanes (0x239) directly on the AP-module segment (bus 2). The AP module still
+// physically transmits its own 0x239 on that same wire -- a panda cannot silence another ECU's CAN
+// controller in software -- but while AP-disabled ownership is active we suppress the STOCK
+// bus2->bus0 copy and substitute the latest XNOR bus-2 payload instead. This makes XNOR's lane
+// payload the only 0x239 that reaches the IC while also proving that XNOR itself really transmitted
+// the frame on bus 2. If XNOR's test stream goes stale, stock 0x239 remains blocked for the duration
+// of AP-disabled ownership; this is intentionally an isolated display experiment, not a fallback
+// production mode. Set to 0 to restore the normal counter-preserving bus-0 overlay design.
+#define TESLA_LEGACY_BUS2_LANE_TX_TEST 1
+
 // --- Unity timing ---
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
@@ -253,11 +264,9 @@ static void tesla_legacy_scrub_das_control_aeb(CANPacket_t *msg) {
 }
 
 static bool tesla_legacy_is_hud_status_msg(int addr) {
-  // 0x399/0x389 are status overlays. 0x239 is the Unity-style fused-lane overlay;
-  // direct userspace TX is captured and merged onto the genuine AP frame so its rolling
-  // counter and stock cadence remain authoritative. 0x3A9 is intentionally NOT captured:
-  // this vehicle has no stock 0x3A9 source, so Unity-style road telemetry is sent directly.
-  return (addr == 0x399) || (addr == 0x389) || (addr == 0x239);
+  // Status-only overlays. DAS_lanes (0x239) is handled separately by the bus-2 origin experiment;
+  // DAS_telemetry (0x3A9) has no stock source on this car and is sent directly on bus 0.
+  return (addr == 0x399) || (addr == 0x389);
 }
 
 typedef struct {
@@ -278,8 +287,6 @@ typedef struct {
 static TeslaLegacyHudForwardData tesla_legacy_hud_forward_data[] = {
   {0x399, 2, 0, 8, 500000U, 0x00F8031FU, 0xFF3FFFF0U, 0U, 0U, 0U, 0U, false},
   {0x389, 2, 0, 8, 500000U, 0x00F0FF3CU, 0xFFFF3FFFU, 0U, 0U, 0U, 0U, false},
-  // DAS_lanes: preserve byte7 high-nibble rolling counter from the genuine AP frame.
-  {0x239, 2, 0, 8, 1000000U, 0xF0000000U, 0x00000000U, 0U, 0U, 0U, 0U, false},
 };
 
 static uint32_t tesla_legacy_get_u32_le(const uint8_t *data) {
@@ -295,6 +302,33 @@ static void tesla_legacy_set_u32_le(uint8_t *data, uint32_t value) {
   data[2] = (uint8_t)((value >> 16) & 0xFFU);
   data[3] = (uint8_t)((value >> 24) & 0xFFU);
 }
+
+#if TESLA_LEGACY_BUS2_LANE_TX_TEST
+static uint32_t tesla_legacy_bus2_lane_data_l = 0U;
+static uint32_t tesla_legacy_bus2_lane_data_h = 0U;
+static uint32_t tesla_legacy_bus2_lane_last_tx_us = 0U;
+static bool tesla_legacy_bus2_lane_valid = false;
+
+static void tesla_legacy_cache_bus2_lane_tx(const CANPacket_t *msg) {
+  if (((int)msg->addr == 0x239) && ((int)msg->bus == 2) && (GET_LEN(msg) == 8)) {
+    tesla_legacy_bus2_lane_data_l = tesla_legacy_get_u32_le(&msg->data[0]);
+    tesla_legacy_bus2_lane_data_h = tesla_legacy_get_u32_le(&msg->data[4]);
+    tesla_legacy_bus2_lane_last_tx_us = microsecond_timer_get();
+    tesla_legacy_bus2_lane_valid = true;
+  }
+}
+
+static bool tesla_legacy_bus2_lane_payload_fresh(void) {
+  return tesla_legacy_bus2_lane_valid &&
+         (tesla_legacy_bus2_lane_last_tx_us != 0U) &&
+         (get_ts_elapsed(microsecond_timer_get(), tesla_legacy_bus2_lane_last_tx_us) <= 300000U);
+}
+
+static void tesla_legacy_apply_bus2_lane_payload(CANPacket_t *to_fwd) {
+  tesla_legacy_set_u32_le(&to_fwd->data[0], tesla_legacy_bus2_lane_data_l);
+  tesla_legacy_set_u32_le(&to_fwd->data[4], tesla_legacy_bus2_lane_data_h);
+}
+#endif
 
 static bool tesla_legacy_hud_tx_has_valid_counter(const CANPacket_t *msg, const TeslaLegacyHudForwardData *fwd) {
   const uint32_t data_l = tesla_legacy_get_u32_le(&msg->data[0]);
@@ -626,7 +660,16 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return !tesla_legacy_external_panda;   // main panda: allow on bus0; external panda: block on bus4
   }
 
-  // Unity-style HUD ownership: consume OP HUD status frames, but never transmit them directly.
+#if TESLA_LEGACY_BUS2_LANE_TX_TEST
+  // Lane-origin experiment: unlike 0x399/0x389, allow XNOR's 0x239 to REALLY transmit on bus 2.
+  // Cache the exact payload so fwd_msg can replace the stock AP copy at the IC boundary.
+  if (!tesla_legacy_external_panda && (addr == 0x239) && ((int)msg->bus == 2)) {
+    tesla_legacy_cache_bus2_lane_tx(msg);
+    return true;
+  }
+#endif
+
+  // Unity-style HUD status ownership: consume OP 0x399/0x389, but never transmit them directly.
   // The cached payload is merged onto stock AP frames in fwd_msg so the IC sees one coherent stream.
   if (tesla_legacy_capture_hud_tx(msg, false)) {
     return false;
@@ -917,11 +960,21 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // bus2 -> bus0: Unity-style HUD/lane overlay.
-  // OP's userspace 0x399/0x389/0x239 is cached in tx_hook and blocked from direct TX. When the
-  // matching stock AP frame arrives here, selected OP-owned payload bits are overlaid while
-  // preserving stock timing/counters. Additive checksum is recomputed only for 0x399/0x389.
+  // bus2 -> bus0: Unity-style HUD status overlay plus the isolated direct-bus2 lane test.
+  // 0x399/0x389 remain cached bus-0 overlays. For 0x239, XNOR itself transmits on bus 2; when the
+  // stock AP's 0x239 arrives for forwarding, replace it byte-for-byte with the latest XNOR bus-2
+  // payload. Thus only XNOR's lane content reaches the IC during AP-disabled ownership.
   if (bus_num == 2) {
+#if TESLA_LEGACY_BUS2_LANE_TX_TEST
+    if ((addr == 0x239) && tesla_legacy_op_autopilot_disabled && controls_allowed) {
+      if (tesla_legacy_bus2_lane_payload_fresh()) {
+        tesla_legacy_apply_bus2_lane_payload(to_fwd);
+        return false;
+      }
+      return true;  // deliberate exclusive-source test: do not leak stock 0x239 to the IC
+    }
+#endif
+
     if (tesla_legacy_is_hud_status_msg(addr)) {
       (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
     }
@@ -988,6 +1041,12 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_controls_allowed_prev = false;
   tesla_legacy_hide_errors_armed = false;
   tesla_legacy_last_aeb_hud_warning_us = 0U;
+#if TESLA_LEGACY_BUS2_LANE_TX_TEST
+  tesla_legacy_bus2_lane_data_l = 0U;
+  tesla_legacy_bus2_lane_data_h = 0U;
+  tesla_legacy_bus2_lane_last_tx_us = 0U;
+  tesla_legacy_bus2_lane_valid = false;
+#endif
   tesla_legacy_in_reverse = false;
   tesla_legacy_last_gear = 0U;
 
@@ -1000,7 +1059,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
-    {0x239, 0, 8, .check_relay = false},  // DAS_lanes captured; stock AP counter preserved on forward
+    {0x239, 2, 8, .check_relay = false},  // BUS-2 lane-origin test: XNOR transmits natively on AP segment
     {0x3A9, 0, 8, .check_relay = false},  // DAS_telemetry sent directly (no stock source on this car)
     {0x398, 2, 8, .check_relay = false},  // GTW_carConfig autopilot=2 native on bus2 (config-unlock experiment)
 
@@ -1012,7 +1071,6 @@ static safety_config tesla_legacy_init(uint16_t param) {
     {0x45, 0, 8, .check_relay = false},  // STW_ACTN_RQ
     {0x399, 0, 8, .check_relay = false},  // DAS_status captured for HUD overlay
     {0x389, 0, 8, .check_relay = false},  // DAS_status2 captured for HUD overlay
-    {0x239, 0, 8, .check_relay = false},  // DAS_lanes captured; stock AP counter preserved on forward
     {0x3A9, 0, 8, .check_relay = false},  // DAS_telemetry direct non-actuating IC road-info frame
 
   };

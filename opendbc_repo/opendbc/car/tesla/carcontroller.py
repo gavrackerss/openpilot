@@ -559,7 +559,11 @@ class CarController(CarControllerBase):
     """
     stock_ap_enabled = bool(getattr(CS, "autopilot_enabled", False))
     ap_disabled = bool(getattr(CS, "autopilot_disabled", False) or getattr(self, "_cached_autopilot_disabled", False))
-    lane_active = bool(ap_disabled and not stock_ap_enabled)
+    # BUS-2 ORIGIN TEST: keep disengaged lane traffic completely stock. Only take lane ownership
+    # while OP is actually engaged, reducing duplicate-ID traffic on the physical AP segment and
+    # making the IC presentation change a clean engage/disengage A/B test.
+    op_enabled = bool(getattr(CC, "enabled", False))
+    lane_active = bool(ap_disabled and not stock_ap_enabled and op_enabled)
     prev_active = bool(getattr(self, "_telemetry_prev_active", False))
 
     # Refresh the Unity IC lane pair at ~10 Hz for the whole native-AP-disabled lifecycle. If native
@@ -586,8 +590,14 @@ class CarController(CarControllerBase):
     lane_left_visible = bool(left_visible or alca_active)
     lane_right_visible = bool(right_visible or alca_active)
 
-    # Panda preserves the real AP rolling counter. A fixed non-zero placeholder makes the
-    # userspace overlay payload pass the counter-presence guard without inventing timing.
+    # BUS-2 ORIGIN TEST: transmit DAS_lanes natively onto the AP-module segment instead of
+    # submitting a bus-0 overlay payload. Panda safety caches this exact bus-2 TX and substitutes
+    # it for the stock AP 0x239 at the bus2->bus0 forwarding boundary, so the IC sees only XNOR's
+    # lane payload during the test. The AP module still physically emits its own 0x239 on bus 2;
+    # software cannot silence that transmitter, but its copy is not allowed through to the IC.
+    # Because this is now a real sender rather than a counter-preserving overlay request, generate
+    # a proper 4-bit rolling counter at the 10 Hz lane cadence.
+    lane_counter = int((self.frame // 10) & 0x0F)
     can_sends.append(self._body_controls_can.create_lane_message(
       lane_width_m,
       lane_left_visible,
@@ -599,8 +609,8 @@ class CarController(CarControllerBase):
       c3,
       left_quality,
       right_quality,
-      int(CANBUS.party),
-      1,
+      int(CANBUS.autopilot_party),
+      lane_counter,
     ))
 
     can_sends.append(self._body_controls_can.create_telemetry_road_info(
