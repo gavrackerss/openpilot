@@ -725,17 +725,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
         pcm_cruise_check(false);
       }
     }
-    // Unity parity for 0x659: Unity blocks the carrier only `if (has_das_hw)`, which is FALSE on AP
-    // cars, so on an AP car Unity lets 0x659 onto the CHASSIS bus. Match that on the MAIN (chassis/
-    // party = bus 0) panda -> allow it on the wire. Keep blocking it on the EXTERNAL panda, whose
-    // bus is the separate powertrain bus 4; Unity's AP1 topology has CAN_POWERTRAIN=chassis(0), so
-    // it never puts 0x659 on a dedicated powertrain bus. Bits were already consumed above.
-    // Hybrid must be electrically passive before native Autosteer engages. Keep the synthetic
-    // carrier internal to panda so the IC/gateway never see this fake Unity/Tinkla message.
-    if (tesla_legacy_op_hybrid_native_ap) {
-      return false;
-    }
-    return !tesla_legacy_external_panda;   // non-hybrid Unity parity
+    // 0x659 is an XNOR userspace->panda control carrier, not a vehicle command. Always consume
+    // it internally after decoding the flags above. In the previous 0x247 revision the new bit4
+    // test flag was allowed onto the real chassis bus in non-Hybrid mode; that changed an on-wire
+    // synthetic frame before OP could engage and could disturb native AP/TACC availability.
+    // Both pandas still receive/process their respective sendcan copies before this return.
+    return false;
   }
 
   // Unity-style chassis DAS_control ownership: validate/capture a desired 0x2B9 template, but
@@ -918,7 +913,10 @@ static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
   // Clean MITM: block the stock GTW_carConfig (0x398) from being forwarded, so the only 0x398 the
   // AP module sees is openpilot's injected autopilot=2 (no competing stock autopilot=0 -> no
   // DISABLED-flicker mismatch). Pairs with _GTW_TX_AUTOPILOT2_BUS2 in carcontroller.
-  if (addr == 0x398) {
+  // Hybrid must leave the genuine GTW configuration path completely stock. The previous
+  // Hybrid revision disabled the synthetic AP2 0x398 in userspace but still blocked the real
+  // GTW_carConfig here, starving the native AP ECU and making TACC/Autosteer unavailable.
+  if ((addr == 0x398) && !tesla_legacy_op_hybrid_native_ap) {
     return true;
   }
 #endif
