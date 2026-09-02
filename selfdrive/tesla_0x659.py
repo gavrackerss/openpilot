@@ -96,6 +96,11 @@ class Tesla659Carrier:
     self._spd = 0
     self._edges = _Edges()
 
+    # STW edges can occur between the 10 Hz carrier transmissions. Latch them until
+    # a 0x659 is actually emitted so neither panda can miss an engagement edge.
+    self._pending_main_edge = False
+    self._pending_cancel_edge = False
+
     self._params = Params() if Params is not None else None
     self._params_cache_ts = 0.0
     self._ap_disabled = True   # conservative default for AP HW cars
@@ -129,8 +134,9 @@ class Tesla659Carrier:
       if spd == 2 and self._last_spd != 2:
         main_edge = True
 
-      # CANCEL edge: transition away from RWD pull (including to IDLE)
-      if spd != 2 and self._last_spd == 2:
+      # CANCEL is the explicit forward stalk position (spd==1). Releasing MAIN back
+      # to IDLE (2 -> 0) is NOT cancel; the old logic immediately undid MAIN engagement.
+      if spd == 1 and self._last_spd != 1:
         cancel_edge = True
 
       self._spd = spd
@@ -141,6 +147,8 @@ class Tesla659Carrier:
       pass
 
     self._edges = _Edges(main_edge=main_edge, cancel_edge=cancel_edge)
+    self._pending_main_edge = self._pending_main_edge or main_edge
+    self._pending_cancel_edge = self._pending_cancel_edge or cancel_edge
 
   def _refresh_params(self) -> None:
     """Throttle params reads to ~2 Hz."""
@@ -179,16 +187,21 @@ class Tesla659Carrier:
       b5 |= 0x20
     if self._autosteer_247_test:
       b5 |= 0x10
-    if self._edges.main_edge:
+    if self._pending_main_edge:
       b5 |= 0x02
-    if self._edges.cancel_edge:
+    if self._pending_cancel_edge:
       b5 |= 0x01
     return b5
 
   def build_msgs(self) -> list[CanData]:
     b5 = self._build_b5()
     dat = bytes([0, 0, 0, 0, 0, b5, 0, 0])
-    return [CanData(ADDR_CARRIER, dat, bus) for bus in self._buses]
+    msgs = [CanData(ADDR_CARRIER, dat, bus) for bus in self._buses]
+
+    # Clear only after the pending edge was included in an emitted carrier frame.
+    self._pending_main_edge = False
+    self._pending_cancel_edge = False
+    return msgs
 
   def tick(self, can_list: Sequence[CanData]) -> list[CanData]:
     self.update_from_can(can_list)
