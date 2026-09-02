@@ -22,7 +22,6 @@ v80 adds an optional zero-floor set-speed test path via /data/xnor_enable_zero_f
 
 from __future__ import annotations
 
-import math
 import os
 import time
 from dataclasses import dataclass
@@ -798,8 +797,8 @@ class ACCController:
     if not self._no_automated_action_for(now_ms=now_ms, milliseconds=self._AUTO_COOLDOWN_MS):
       return AccDecision(None, "gated: cooldown", current_kph, current_kph, current_kph)
 
-    if (not math.isfinite(float(desired_speed_ms))) or float(desired_speed_ms) < 0.0 or float(current_set_speed_ms) <= 0.1:
-      return AccDecision(None, "gated: invalid target/current", current_kph, current_kph, current_kph)
+    if float(desired_speed_ms) <= 0.1 or float(current_set_speed_ms) <= 0.1:
+      return AccDecision(None, "gated: missing target/current", current_kph, current_kph, current_kph)
 
     # Keep emergency/below-min handling narrow. On no-lead curve/map targets that dip a
     # little below Tesla's minimum set-speed, prefer holding MIN instead of dropping ACC.

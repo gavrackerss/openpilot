@@ -62,12 +62,8 @@ BTN_DOWN1 = 32
 #   Test C (stalk only, bounded): CHASSIS False, STALK True
 #   Test D (both, the target):    both True
 # Module-level constants on purpose: no param registration / no UI / no rebuild of the params lib.
-_ARM_ENABLE_CHASSIS = False  # IMPORTANT: no unsolicited chassis 0x2B9; it inhibits EPAS on this vehicle
+_ARM_ENABLE_CHASSIS = False  # OFF (isolate GTW MITM test)
 _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
-# Unity-style stop/go: author a chassis 0x2B9 TEMPLATE only. Panda captures it, blocks direct TX,
-# and overlays it onto the genuine AP 0x2B9 as that frame crosses bus2->bus0, preserving stock
-# cadence/counter. This is intentionally different from _ARM_ENABLE_CHASSIS (unsolicited direct TX).
-_UNITY_2B9_OVERLAY_TEMPLATE = True
 
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
 # Transmit a full GTW_carConfig (0x398) frame with GTW_autopilot=2 NATIVELY on the AP module's
@@ -417,7 +413,8 @@ class CarController(CarControllerBase):
 
 
   def _ic_lane_model_state(self, CS) -> tuple[float, bool, bool, float, float, float, float, float, int, int]:
-    """Unity modelV2 -> legacy IC virtual/fused lane mapping."""
+    # Semantic port of Unity HUD_module's modelV2 -> DAS_lanes mapping. Keep xnor's
+    # controller/gating architecture; only transplant the lane data it was missing.
     lane_width_m = 4.0
     lane_range_m = 50.0
     left_visible = False
@@ -433,7 +430,6 @@ class CarController(CarControllerBase):
     try:
       probs = tuple(float(v) for v in model.get("lane_probs", ()))
       if len(probs) >= 4:
-        # Unity HUD_module: inner lines determine visibility; outer lines provide quality/ALC availability.
         left_visible = probs[1] > 0.45
         right_visible = probs[2] > 0.45
         left_quality = 1 if probs[0] > 0.25 else 0
@@ -450,8 +446,8 @@ class CarController(CarControllerBase):
         y_fit = y[valid]
         if x_fit.size >= 4:
           coefs = np.polyfit(x_fit, y_fit, 3)
-          # Unity IC_LANE_SCALE = 0.5, so the rendered path coefficients are scaled 2x.
-          # Unity also intentionally suppresses C1 for the IC representation.
+          # Unity's IC path is displayed at 2x scale (IC_LANE_SCALE = 0.5), and
+          # Unity intentionally suppresses C1 to keep the rendered path centered.
           scale = 2.0
           c0 = float(np.clip(coefs[3], -3.5, 3.5))
           c1 = 0.0
@@ -463,11 +459,19 @@ class CarController(CarControllerBase):
     return lane_width_m, left_visible, right_visible, lane_range_m, c0, c1, c2, c3, left_quality, right_quality
 
   def _hud_alca_state(self, CS) -> int:
-    # Native AP1/MCU1 blue-lane captures do not require the Unity 6/7/8 lane-availability
-    # states. Keep the normal no-ALC state unless an actual OP lane change is in progress.
     turn = int(getattr(CS, "alca_direction", 0) or 0)
     if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
       return 8 + turn
+
+    # Unity advertises lane-change availability from the two outer lane-line probabilities.
+    # Keeping this coherent with DAS_lanes avoids telling the IC "no lanes" while drawing them.
+    *_, left_quality, right_quality = self._ic_lane_model_state(CS)
+    if left_quality and right_quality:
+      return 8
+    if left_quality:
+      return 6
+    if right_quality:
+      return 7
     return 1
 
   def _hud_speed_limit_uom(self, CS) -> float:
@@ -515,9 +519,9 @@ class CarController(CarControllerBase):
     except (TypeError, ValueError):
       cruise_speed = speed_limit
 
-    op_status = 3 if op_enabled else 2
+    op_status = 5 if op_enabled else 2
     hands_on_state = 3 if bool(human_control) and op_enabled else 2
-    alca_state = int(self._hud_alca_state(CS)) if op_enabled else 1
+    alca_state = int(self._hud_alca_state(CS))
     blind_left = bool(getattr(cs_out, "leftBlindspot", False)) if cs_out is not None else False
     blind_right = bool(getattr(cs_out, "rightBlindspot", False)) if cs_out is not None else False
     fleet_state = int(getattr(CS, "fleet_speed_state", 0) or 0)
@@ -540,59 +544,73 @@ class CarController(CarControllerBase):
     self._hud_prev_enabled = op_enabled
 
 
+  def _hud_hands_on(self, CS) -> int:
+    return 0
+
+
+
   def _telemetry_alca_state(self, CS) -> int:
     turn = int(getattr(CS, "alca_direction", 0) or 0)
     if bool(getattr(CS, "alca_pre_engage", False) or getattr(CS, "alca_engaged", False)) and turn in (1, 2):
       return turn
     return 0
 
-  def _process_lane_telemetry(self, CC, CS, can_sends) -> None:
-    """Native-parity IC lane overlay while OP is enabled.
+  def _process_lane_telemetry(self, CS, can_sends, lane_active: bool) -> None:
+    prev_active = bool(getattr(self, "_telemetry_prev_active", False))
 
-    Dashcam/native-Autosteer captures on this car show blue lanes with DAS_autopilotState
-    transitioning 2->3, no DAS_telemetry (0x3A9), and DAS_lanes (0x239) switching both
-    LineUsage fields to FUSED with both Fork fields cleared. Submit only a bus-0 overlay
-    payload; panda merges it onto the genuine AP 0x239 so stock timing and the rolling
-    counter remain authoritative.
-    """
-    op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    stock_ap_enabled = bool(getattr(CS, "autopilot_enabled", False))
-    lane_active = bool(op_enabled and not stock_ap_enabled)
+    # Unity IC path: DAS_lanes (0x239) carries presence + path geometry and DAS_telemetry
+    # (0x3A9) carries physical marker style/quality. xnor remains the control master.
+    if not lane_active and not prev_active:
+      return
 
-    if not lane_active or (self.frame % 10 != 0):
-      self._telemetry_prev_active = lane_active
+    should_send = lane_active or (not lane_active and prev_active)
+    if (not should_send) or (lane_active and (self.frame % 10 != 0)):
+      self._telemetry_prev_active = bool(lane_active)
       return
 
     (lane_width_m, left_visible, right_visible, lane_range_m,
      c0, c1, c2, c3, left_quality, right_quality) = self._ic_lane_model_state(CS)
 
-    alca_active = bool(getattr(CS, "alca_engaged", False))
-    lane_left_visible = bool(left_visible or alca_active)
-    lane_right_visible = bool(right_visible or alca_active)
+    if not lane_active:
+      left_visible = False
+      right_visible = False
+      lane_range_m = 0.0
+      c0 = c1 = c2 = c3 = 0.0
+      left_quality = 0
+      right_quality = 0
 
-    # Counter is only a non-zero placeholder for the capture guard. Panda replaces the
-    # high-nibble counter with the genuine AP 0x239 counter on the forwarded frame.
-    can_sends.append(self._body_controls_can.create_lane_message(
-      lane_width_m,
-      lane_left_visible,
-      lane_right_visible,
-      lane_range_m,
-      c0,
-      c1,
-      c2,
-      c3,
-      left_quality,
-      right_quality,
-      int(CANBUS.party),
-      1,
-    ))
+    # The panda overlays this payload onto the stock AP 0x239 frame and preserves the stock
+    # rolling counter. Use a non-zero placeholder here so the capture-validity guard accepts it.
+    lane_counter = 1
 
-    self._telemetry_prev_active = True
+    can_sends.append(
+      self._body_controls_can.create_lane_message(
+        lane_width_m,
+        left_visible,
+        right_visible,
+        lane_range_m,
+        c0,
+        c1,
+        c2,
+        c3,
+        left_quality,
+        right_quality,
+        int(CANBUS.party),
+        lane_counter,
+      )
+    )
+    can_sends.append(
+      self._body_controls_can.create_telemetry_road_info(
+        left_visible,
+        right_visible,
+        left_quality,
+        right_quality,
+        self._telemetry_alca_state(CS),
+        int(CANBUS.party),
+      )
+    )
 
-  def _hud_hands_on(self, CS) -> int:
-    return 0
-
-
+    self._telemetry_prev_active = bool(lane_active)
 
   def _lane_positioned_target_angle(self, desired_angle_deg: float, current_angle_deg: float, v_ego: float) -> float:
     desired_angle_deg = float(desired_angle_deg)
@@ -748,7 +766,6 @@ class CarController(CarControllerBase):
     self._process_stalk_actions(CS, can_sends)
     self._process_body_controls(CS, can_sends)
     self._process_hud_status(CC, CS, can_sends, human_control)
-    self._process_lane_telemetry(CC, CS, can_sends)
 
     self._speed_limit_sync(CC, CS, can_sends)
 
@@ -759,6 +776,8 @@ class CarController(CarControllerBase):
       (not human_control) and
       (not steer_inhibit)
     )
+
+    self._process_lane_telemetry(CS, can_sends, lat_active)
 
     # Steering warm-up: for a short window after lateral becomes active, command current wheel angle.
     # This prevents an initial command step (EPS inhibit) when engaging with the wheel turned.
@@ -907,36 +926,6 @@ class CarController(CarControllerBase):
         # long_active is false (disengaged or non-native): clear the edge latch so the next
         # engagement starts a fresh, bounded arming attempt. No stalk/chassis TX here.
         self._arm_long_active_prev = False
-
-    # Unity-style chassis DAS_control ownership for stop/go. This frame is NOT put on the wire
-    # directly: tesla_legacy safety captures the userspace 0x2B9 as a validated template and
-    # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
-    # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
-    if (
-      _UNITY_2B9_OVERLAY_TEMPLATE
-      and self.CP.openpilotLongitudinalControl
-      and (self.CP.carFingerprint in LEGACY_CARS)
-      and hasattr(self.tesla_can, "create_longitudinal_command_chassis")
-      and (self.frame % 2 == 0)
-    ):
-      native_acc_overlay = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
-      long_active_overlay = bool(CC.longActive) and ((not autopilot_disabled) or native_acc_overlay)
-      if long_active_overlay and native_acc_overlay:
-        overlay_state = 13 if CC.cruiseControl.cancel else 4
-        overlay_accel = float(np.clip(
-          float(actuators.accel),
-          CarControllerParams.ACCEL_MIN,
-          CarControllerParams.ACCEL_MAX,
-        ))
-        # Counter=1 is deliberate: this packet is only a cache template. Panda strips this
-        # template counter and preserves the genuine AP 0x2B9 counter before recomputing checksum.
-        can_sends.append(self.tesla_can.create_longitudinal_command_chassis(
-          overlay_state,
-          overlay_accel,
-          1,
-          float(CS.out.vEgo),
-          True,
-        ))
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = float(self.apply_angle_last)

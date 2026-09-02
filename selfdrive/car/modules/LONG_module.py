@@ -971,8 +971,7 @@ class LongController:
 
     planner_confirms_low = bool(
       planner_near_ms is not None
-      and math.isfinite(float(planner_near_ms))
-      and float(planner_near_ms) >= 0.0
+      and float(planner_near_ms) > 0.1
       and float(planner_near_ms) <= (low_ms + float(self._MAPD_DISAGREE_PLANNER_CONFIRM_MS))
     )
     steering_confirms_low = abs(float(current_angle_deg)) >= float(self._MAPD_DISAGREE_STEER_CONFIRM_DEG)
@@ -1063,7 +1062,7 @@ class LongController:
       return False
     if raw_vision_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_VISION_CLEAR_MS)):
       return False
-    if math.isfinite(planner_near_ms) and planner_near_ms >= 0.0 and planner_near_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_PLANNER_CLEAR_MS)):
+    if planner_near_ms > 0.1 and planner_near_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_PLANNER_CLEAR_MS)):
       return False
     if current_angle_deg > float(self._MAPD_STRAIGHT_STALE_STEER_DEG):
       return False
@@ -1596,7 +1595,7 @@ class LongController:
     if int(self._lead_hold_until_ms) <= 0 or int(now_ms) > int(self._lead_hold_until_ms):
       self._lead_hold_until_ms = 0
       return False
-    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
+    if float(planner_ms) <= 0.1:
       return False
     if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
       self._lead_hold_until_ms = 0
@@ -2724,7 +2723,7 @@ class LongController:
       return False
     if float(v_ego_ms) > float(self._LP_QUEUE_FALLBACK_MAX_SPEED_MS):
       return False
-    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
+    if float(planner_ms) <= 0.1:
       return False
 
     materially_below_base = float(planner_ms) < (float(base_target_ms) - float(self._LP_QUEUE_FALLBACK_DROP_MS))
@@ -2741,7 +2740,7 @@ class LongController:
   def _lead_planner_guard_active(self, *, base_target_ms: float, planner_ms: float, current_set_ms: float, v_ego_ms: float) -> bool:
     if (not self._lead_present) or float(self._lead_drel) <= 0.0:
       return False
-    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
+    if float(planner_ms) <= 0.1:
       return False
     if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
       return False
@@ -2903,7 +2902,7 @@ class LongController:
     if float(v_ego_ms) > float(self._LEAD_APPROACH_CANCEL_MAX_SPEED_MS):
       self._lead_approach_force_candidate_since_ms = 0
       return False
-    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
+    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
       self._lead_approach_force_candidate_since_ms = 0
       return False
 
@@ -2914,8 +2913,7 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      math.isfinite(planner_floor_ms)
-      and planner_floor_ms >= 0.0
+      planner_floor_ms > 0.1
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_APPROACH_CANCEL_PLANNER_MARGIN_MS))
       and (
         planner_floor_ms < (float(v_ego_ms) - (0.25 * CV.MPH_TO_MS))
@@ -2998,7 +2996,7 @@ class LongController:
       self._reset_lead_approach_cancel()
       self._reset_lead_close_cancel()
       return False
-    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
+    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
       self._reset_lead_approach_cancel()
       self._reset_lead_close_cancel()
       return False
@@ -3010,8 +3008,7 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      math.isfinite(planner_floor_ms)
-      and planner_floor_ms >= 0.0
+      planner_floor_ms > 0.1
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_APPROACH_CANCEL_PLANNER_MARGIN_MS))
       and (
         planner_floor_ms < (float(v_ego_ms) - (0.4 * CV.MPH_TO_MS))
@@ -3088,7 +3085,7 @@ class LongController:
       self._reset_lead_stuck_cancel()
       self._reset_lead_approach_cancel()
       return False
-    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
+    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
       self._reset_lead_stuck_cancel()
       self._reset_lead_approach_cancel()
       return False
@@ -3101,8 +3098,7 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      math.isfinite(planner_floor_ms)
-      and planner_floor_ms >= 0.0
+      planner_floor_ms > 0.1
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_STUCK_CANCEL_PLANNER_MARGIN_MS))
     )
     if not planner_supported:
@@ -3495,8 +3491,7 @@ class LongController:
   ) -> tuple[Optional[float], str]:
     planner_curve_active = bool(
       bool(lp_fresh)
-      and math.isfinite(float(planner_near_ms))
-      and float(planner_near_ms) >= 0.0
+      and float(planner_near_ms) > 0.1
       and float(planner_near_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
     )
 
@@ -3632,32 +3627,28 @@ class LongController:
     curve_candidates: list[float] = []
     owner_parts: list[str] = []
 
-    # CSA-preferred curve weighting. A fresh, advancing CSA bend is the authoritative
-    # *curve* target; planner/mapD remain fallbacks rather than being allowed to out-vote
-    # CSA simply because they ask for a lower speed. This preference is confined to curve
-    # arbitration: lead following, posted limits and roadworks still constrain elsewhere.
-    # Explicit roundabout geometry remains a lower safety/backstop cap.
+    # Option A: CSA is the primary curve authority. When CSA confirms a bend it leads the
+    # candidate set; planner / mapd-map / mapd-vision can only LOWER the target via min().
+    # CSA is route-independent and arrives ~8s/~110m ahead, so it must not be out-voted or
+    # vetoed by the v_ego-relative urgency gate that suppressed pre-emptive caps.
     csa_primary = bool(csa_supports)
     if csa_primary:
       curve_candidates.append(float(csa_target_ms))
-      owner_parts.append("csa_preferred")
+      owner_parts.append("csa")
 
-      if roundabout_supports:
-        curve_candidates.append(float(roundabout_target_ms))
-        owner_parts.append("roundabout")
-    else:
-      # When CSA is unavailable/stale/too gentle, preserve the existing planner/mapD/
-      # roundabout fallback behavior exactly.
-      if roundabout_supports:
-        curve_candidates.append(float(roundabout_target_ms))
-        owner_parts.append("roundabout")
+    # Roundabout cap rides alongside CSA as a geometric authority: it only LOWERS via min(),
+    # is never softened upward, and is exempt from the v_ego urgency veto (slowing for a
+    # roundabout must be pre-emptive, before circulation).
+    if roundabout_supports:
+      curve_candidates.append(float(roundabout_target_ms))
+      owner_parts.append("roundabout")
 
-      if planner_curve_active:
-        planner_cand_ms = float(planner_near_ms)
-        if roundabout_supports:
-          planner_cand_ms = max(planner_cand_ms, float(roundabout_target_ms))
-        curve_candidates.append(planner_cand_ms)
-        owner_parts.append("planner")
+    if planner_curve_active:
+      planner_cand_ms = float(planner_near_ms)
+      if roundabout_supports:
+        planner_cand_ms = max(planner_cand_ms, float(roundabout_target_ms))
+      curve_candidates.append(planner_cand_ms)
+      owner_parts.append("planner")
 
     curve_specific_ms = self._curve_specific_mapd_target_ms(
       now_ns=int(now_ns),
@@ -3666,11 +3657,12 @@ class LongController:
       current_angle_deg=float(current_angle_deg),
       planner_curve_active=bool(planner_curve_active),
     )
-    if (not csa_primary) and curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
+    if curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
       mapd_cand_ms = float(curve_specific_ms)
       # Fix #2: mapd under-reads big named roundabouts (Delme: mapCurveSpeed 15 -> floored to 18,
       # too slow; ~23 is fine). On a named roundabout don't let the mapd/planner candidate pull the
-      # target below the roundabout circulation cap.
+      # target below the roundabout circulation cap. CSA (real geometry, added unfloored above) may
+      # still lower it for a genuinely tight roundabout. (Revert: drop these two roundabout floors.)
       if roundabout_supports:
         mapd_cand_ms = max(mapd_cand_ms, float(roundabout_target_ms))
       curve_candidates.append(mapd_cand_ms)
@@ -4007,8 +3999,7 @@ class LongController:
     )
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_below_reference = bool(
-      math.isfinite(float(planner_floor_ms))
-      and float(planner_floor_ms) >= 0.0
+      float(planner_floor_ms) > 0.1
       and float(planner_floor_ms) < (float(reference_ms) - float(self._ARBITRATION_LEAD_PLANNER_DROP_MS))
     )
 
@@ -4086,20 +4077,21 @@ class LongController:
       self._set_arbitration_state(state="LEAD_CRITICAL", now_ms=int(now_ms))
       self._reset_curve_hold()
       self._reset_lead_curve_hold()
-      if math.isfinite(float(planner_floor_ms)) and float(planner_floor_ms) >= 0.0:
+      if float(planner_floor_ms) > 0.1:
         out_ms = min(float(out_ms), float(planner_floor_ms))
       if float(current_set_ms) > 0.1:
         out_ms = min(float(out_ms), float(current_set_ms))
       if lead_closing:
         lead_speed_cap_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel) + (0.5 * CV.MPH_TO_MS))
-        out_ms = min(float(out_ms), float(lead_speed_cap_ms))
+        if float(lead_speed_cap_ms) > 0.1:
+          out_ms = min(float(out_ms), float(lead_speed_cap_ms))
       out_src = f"{out_src}+state[LEAD_CRITICAL]"
       return float(out_ms), out_src
 
     if lead_follow:
       self._set_arbitration_state(state="LEAD_FOLLOW", now_ms=int(now_ms))
       self._reset_curve_hold()
-      if planner_below_reference and math.isfinite(float(planner_floor_ms)) and float(planner_floor_ms) >= 0.0:
+      if planner_below_reference and float(planner_floor_ms) > 0.1:
         out_ms = min(float(out_ms), float(planner_floor_ms))
       if lead_closing and float(current_set_ms) > 0.1:
         out_ms = min(float(out_ms), max(0.0, float(current_set_ms)))
@@ -4232,14 +4224,7 @@ class LongController:
         target_ms = min(float(target_ms), previous_curve_ms + float(self._ARBITRATION_CURVE_EXIT_STEP_MS) * dt_s)
 
       self._arbitration_curve_target_ms = float(target_ms)
-      if "csa_preferred" in str(curve_source):
-        # Earlier compatibility paths may already have applied a planner/mapD curve cap.
-        # Once fresh CSA owns the curve, discard those lower *curve-only* reductions and
-        # rebuild from the non-curve reference ceiling. reference_ms already incorporates
-        # posted-limit/roadworks constraints; lead-critical/follow returned above.
-        out_ms = min(float(reference_ms), float(target_ms))
-      else:
-        out_ms = min(float(out_ms), float(target_ms))
+      out_ms = min(float(out_ms), float(target_ms))
       out_src = f"{out_src}+state[{state}:{curve_source}]"
       return float(out_ms), out_src
 
@@ -4311,7 +4296,7 @@ class LongController:
 
 
   def _planner_drag_reasons(self, *, now_ms: int, base_target_ms: float, planner_ms: float, current_set_ms: float, v_ego_ms: float) -> list[str]:
-    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
+    if float(planner_ms) <= 0.1:
       return []
     if self._stale_planner_lead_without_live_lead(
       now_ms=int(now_ms),
@@ -4817,7 +4802,7 @@ class LongController:
       and (
         (not lp_fresh)
         or (int(self._stable_plan_samples) < 2)
-        or ((not math.isfinite(float(planner_last_ms))) or float(planner_last_ms) < 0.0)
+        or (float(planner_last_ms) <= 0.1)
         or (
           float(set_speed_floor_ms) > 0.1
           and float(v_ego_ms) > float(set_speed_floor_ms)
