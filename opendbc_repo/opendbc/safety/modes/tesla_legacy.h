@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V170_STEERING_HANDOVER 1
+#define XNOR_V171_HYBRID_NATIVE_PREFORWARD 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V170_STEERING_HANDOVER";
+    "XNOR_V171_HYBRID_NATIVE_PREFORWARD";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -1016,17 +1016,32 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // Main panda: stock LKAS passthrough (bus2 -> car). In Hybrid mode the genuine AP 0x488
-  // remains the timing carrier, but its steering payload is replaced with the validated OP
-  // template. If no fresh/valid template exists, fail open to the untouched native AP frame.
+  // Main panda: stock LKAS passthrough (bus2 -> car).
+  //
+  // XNOR_V171_HYBRID_NATIVE_PREFORWARD:
+  // Hybrid must forward the *idle/pre-engagement* native 0x488 and 0x27D stream as well as the
+  // active stream. Tesla Autosteer needs that native AP->EPAS handshake to reach the car before
+  // DAS_steeringControlType changes to the active native state. The previous gate waited for
+  // tesla_legacy_stock_lkas first, which could block the very frames required to make it true.
+  //
+  // Once native LKAS is genuinely active, keep the existing single-source overlay architecture:
+  // cache/validate OP's bus-0 0x488 template, then merge only its steering payload onto the next
+  // genuine native bus-2 0x488. Native cadence/counter remain authoritative. If OP has no fresh
+  // valid template (or controls are not allowed / driver overrides), apply_hud_forward_data()
+  // returns false and the untouched Tesla frame passes through — fail-open to native Autosteer.
   if ((bus_num == 2) && (addr == 0x488)) {
-    if (tesla_legacy_op_hybrid_native_ap && tesla_legacy_stock_lkas) {
-      (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
-      return false;
+    if (tesla_legacy_op_hybrid_native_ap) {
+      if (tesla_legacy_stock_lkas) {
+        (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
+      }
+      return false;  // always forward native 0x488 in Hybrid, idle or active
     }
     return !tesla_legacy_stock_lkas;
   }
   if ((bus_num == 2) && (addr == 0x27D)) {
+    if (tesla_legacy_op_hybrid_native_ap) {
+      return false;  // native EPAS handshake must remain continuous in Hybrid
+    }
     return !tesla_legacy_stock_lkas;
   }
 
