@@ -98,10 +98,6 @@ class CarController(CarControllerBase):
     self.params = Params()
     self._long_module = LongController()
     self._cached_autopilot_disabled = False
-    # Hybrid mode is latched at CarController startup. UI changes apply next drive/restart so
-    # CarParams, panda safety ownership, and longitudinal authority cannot change mid-drive.
-    self._cached_hybrid_native_ap = bool(self.params.get_bool("TinklaHybridNativeAP")) and not bool(self.params.get_bool("TinklaAutopilotDisabled"))
-    self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
     self._cached_pedal_enabled = False
     self._cached_adjust_acc_with_speed_limit = False
     self._cached_speed_limit_offset_uom = 0.0
@@ -173,7 +169,6 @@ class CarController(CarControllerBase):
     # stock-cruise dependency and no 17.1 mph engage floor. Cached here so the longitudinal
     # gate below can keep long_active true in that mode.
     self._cached_enable_acc = bool(self.params.get_bool("TinklaEnableACC"))
-    self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
     self._cached_pedal_enabled = bool(
       self.params.get_bool("TinklaPedalEnabled") or
       self.params.get_bool("PedalEnabled")
@@ -290,8 +285,6 @@ class CarController(CarControllerBase):
           bus=bus,
           stalk_main=main_edge,
           stalk_cancel=cancel_edge,
-          hybrid_native_ap=(self._cached_hybrid_native_ap and not self._cached_autopilot_disabled),
-          autosteer_247_test=self._cached_autosteer_247_test,
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -728,11 +721,10 @@ class CarController(CarControllerBase):
 
     # Config-unlock experiment: transmit GTW_carConfig(0x398) with autopilot=2 natively on bus 2
     # (the AP module's own segment), ~1Hz. Fixed valid payload; no checksum/counter on this frame.
-    if _GTW_TX_AUTOPILOT2_BUS2 and (not self._cached_hybrid_native_ap) and (self.frame % 100 == 0):
+    if _GTW_TX_AUTOPILOT2_BUS2 and (self.frame % 100 == 0):
       can_sends.append((0x398, bytes(_GTW_CARCONFIG_AP2_PAYLOAD), int(CANBUS.autopilot_party)))
 
     autopilot_disabled = bool(self._cached_autopilot_disabled)
-    hybrid_native_ap = bool(self._cached_hybrid_native_ap) and not autopilot_disabled
 
     # Always define before use
     cs_out = getattr(CS, "out", None)
@@ -753,21 +745,16 @@ class CarController(CarControllerBase):
         pass
     self._op_enabled_prev = bool(op_enabled)
 
-    if not hybrid_native_ap:
-      self._process_stalk_actions(CS, can_sends)
-      self._process_body_controls(CS, can_sends)
-      self._process_hud_status(CC, CS, can_sends, human_control)
-      self._process_lane_telemetry(CC, CS, can_sends)
-      self._speed_limit_sync(CC, CS, can_sends)
+    self._process_stalk_actions(CS, can_sends)
+    self._process_body_controls(CS, can_sends)
+    self._process_hud_status(CC, CS, can_sends, human_control)
+    self._process_lane_telemetry(CC, CS, can_sends)
 
-    # Normal xnor: OP owns lateral only in Autopilot Disabled mode.
-    # Hybrid: native AP must be genuinely steering (raw stockLkas=True); OP then supplies only
-    # the angle template which panda merges onto the native-timed 0x488. If native AP drops out,
-    # lat_active drops immediately and no fresh OP template is supplied.
-    native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
+    self._speed_limit_sync(CC, CS, can_sends)
+
     lat_active = (
       bool(CC.latActive) and
-      (autopilot_disabled or (hybrid_native_ap and native_ap_lateral_active)) and
+      autopilot_disabled and
       (not CS.out.cruiseState.standstill) and
       (not human_control) and
       (not steer_inhibit)
@@ -814,27 +801,21 @@ class CarController(CarControllerBase):
 
       if self.CP.carFingerprint in LEGACY_CARS:
         counter = (self.frame // 2) % 16
-        # In Hybrid mode this bus-0 packet is a TEMPLATE only: panda validates/caches it, blocks
-        # direct TX, then substitutes it onto the next genuine native-AP 0x488 while preserving
-        # native cadence/counter. Use a fixed non-zero template counter because panda discards it;
-        # this avoids the overlay cache's zero-counter guard dropping every 16th template.
-        if (not hybrid_native_ap) or lat_active:
-          template_counter = 1 if hybrid_native_ap else counter
-          can_sends.append(
-            self.tesla_can.create_steering_control(template_counter, self.apply_angle_last, lat_active)
-          )
+        can_sends.append(
+          self.tesla_can.create_steering_control(counter, self.apply_angle_last, lat_active)
+        )
       else:
         can_sends.append(
           self.tesla_can.create_steering_control(self.apply_angle_last, lat_active)
         )
 
-    # Native AP owns the EPAS handshake in hybrid mode; do not inject a competing 0x27D.
-    if (not hybrid_native_ap) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
+    # EPS allow (legacy): keep EPAS handshake continuous during relay/ownership handover.
+    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
       counter = (self.frame // 2) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # Longitudinal (optional). Hybrid leaves native Tesla TACC/stop-go completely untouched.
-    if (not hybrid_native_ap) and self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
+    # Longitudinal (optional)
+    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),
@@ -932,8 +913,7 @@ class CarController(CarControllerBase):
     # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
     # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
     if (
-      (not hybrid_native_ap)
-      and _UNITY_2B9_OVERLAY_TEMPLATE
+      _UNITY_2B9_OVERLAY_TEMPLATE
       and self.CP.openpilotLongitudinalControl
       and (self.CP.carFingerprint in LEGACY_CARS)
       and hasattr(self.tesla_can, "create_longitudinal_command_chassis")
