@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V171_HYBRID_NATIVE_PREFORWARD 1
+#define XNOR_V172_HYBRID_DUAL_LATERAL_OWNERSHIP 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V171_HYBRID_NATIVE_PREFORWARD";
+    "XNOR_V172_HYBRID_DUAL_LATERAL_OWNERSHIP";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -68,6 +68,7 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
 static const uint32_t TESLA_LEGACY_AEB_HUD_SCRUB_US       = 3500000U;
+static const uint32_t TESLA_LEGACY_HYBRID_DIRECT_STEER_HOLD_US = 100000U;
 
 // --- runtime state (namespaced; safety.h includes tesla.h too) ---
 static bool tesla_legacy_external_panda = false;
@@ -93,6 +94,9 @@ static bool tesla_legacy_op_stalk_cancel_edge = false;   // bit0 (edge)
 // stock system detection on AP-side bus (bus2)
 static bool tesla_legacy_stock_lkas = false;  // from 0x488 steerControlType
 static bool tesla_legacy_stock_aeb = false;   // from 0x2BF AEB event
+// Timestamp of the last safety-approved direct OP 0x488 in Hybrid fallback mode. While fresh,
+// native idle 0x488/0x27D are blocked so there is exactly one EPAS steering owner.
+static uint32_t tesla_legacy_last_hybrid_direct_steer_us = 0U;
 
 // stock AP states from DAS/AP frames
 static bool tesla_legacy_autopilot_enabled = false;  // 0x399
@@ -132,10 +136,19 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_controls_allowed_prev = false;
   tesla_legacy_hide_errors_armed = false;
   tesla_legacy_last_aeb_hud_warning_us = 0U;
+  tesla_legacy_last_hybrid_direct_steer_us = 0U;
 }
 
 
 // --- helpers ---
+
+static bool tesla_legacy_hybrid_direct_steering_active(void) {
+  return tesla_legacy_op_hybrid_native_ap &&
+         !tesla_legacy_stock_lkas &&
+         (tesla_legacy_last_hybrid_direct_steer_us != 0U) &&
+         (get_ts_elapsed(microsecond_timer_get(), tesla_legacy_last_hybrid_direct_steer_us) <=
+          TESLA_LEGACY_HYBRID_DIRECT_STEER_HOLD_US);
+}
 
 static void tesla_legacy_track_controls_allowed_edge(void) {
   if (tesla_legacy_controls_allowed_prev && !controls_allowed) {
@@ -571,13 +584,15 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   }
 
   // Unity stalk gating on 0x45 (bus0)
-  if ((bus == 0) && (addr == 0x45) && tesla_legacy_op_stalk_enable && !tesla_legacy_op_hybrid_native_ap) {
-    if ((!tesla_legacy_has_ap_hw) || tesla_legacy_op_autopilot_disabled) {
+  if ((bus == 0) && (addr == 0x45) &&
+      (tesla_legacy_op_stalk_enable || tesla_legacy_op_hybrid_native_ap)) {
+    if (tesla_legacy_op_hybrid_native_ap || (!tesla_legacy_has_ap_hw) || tesla_legacy_op_autopilot_disabled) {
       const int ap_lever_position = (int)(msg->data[0] & 0x3F);
       if (ap_lever_position == 2) {
         pcm_cruise_check(true);
       } else if (ap_lever_position == 1) {
         pcm_cruise_check(false);
+        tesla_legacy_last_hybrid_direct_steer_us = 0U;
       } else {
       }
     }
@@ -587,19 +602,11 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   if (bus == 2) {
     if (!tesla_legacy_external_panda && (addr == 0x488)) {
       const int steer_control_type = (int)((msg->data[2] >> 6) & 0x03);
-      const bool was_stock_lkas = tesla_legacy_stock_lkas;
       tesla_legacy_stock_lkas = (steer_control_type == 2) || (steer_control_type == 3);
+      // Non-Hybrid preserves the stock-system exclusion. Hybrid engagement is now independent:
+      // native LKAS selects overlay-vs-direct steering ownership, but does not arm/disarm OP.
       if (!tesla_legacy_op_hybrid_native_ap && tesla_legacy_stock_lkas) {
         controls_allowed = false;
-      } else if (tesla_legacy_op_hybrid_native_ap) {
-        // Hybrid is deliberately passive until the NATIVE AP itself is steering. Do not arm
-        // controls from the driver's stalk pull: that can activate pre-engagement forwarding
-        // rewrites and prevent Tesla Autosteer from entering ACTIVE. Native LKAS is the authority.
-        if (!was_stock_lkas && tesla_legacy_stock_lkas) {
-          pcm_cruise_check(true);
-        } else if (was_stock_lkas && !tesla_legacy_stock_lkas) {
-          pcm_cruise_check(false);
-        }
       }
     } else if (tesla_legacy_external_panda && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(msg->data[2] & 0x03);
@@ -613,16 +620,9 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (!tesla_legacy_external_panda && tesla_legacy_has_ap_hw) {
       if (addr == 0x399) {
         const uint8_t st = msg->data[0] & 0x0FU;  // AutopilotStatus is the LOW nibble on this DBC
-        const bool was_autopilot_enabled = tesla_legacy_autopilot_enabled;
         tesla_legacy_autopilot_enabled = (st == 3U) || (st == 4U);
         if (!tesla_legacy_op_hybrid_native_ap && tesla_legacy_autopilot_enabled) {
           controls_allowed = false;
-        } else if (tesla_legacy_op_hybrid_native_ap) {
-          if (!was_autopilot_enabled && tesla_legacy_autopilot_enabled) {
-            pcm_cruise_check(true);
-          } else if (was_autopilot_enabled && !tesla_legacy_autopilot_enabled) {
-            pcm_cruise_check(false);
-          }
         }
       } else if (addr == 0x219) {
         const int eac_status = (int)((msg->data[1] >> 2) & 0x0FU);
@@ -716,13 +716,14 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     tesla_legacy_autosteer_247_test = (b5 & 0x10U) != 0U;
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
-        if (tesla_legacy_op_stalk_enable && !tesla_legacy_op_hybrid_native_ap &&
-            (!tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
+    if ((tesla_legacy_op_stalk_enable || tesla_legacy_op_hybrid_native_ap) &&
+        (tesla_legacy_op_hybrid_native_ap || !tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
       if (tesla_legacy_op_stalk_main_edge) {
         pcm_cruise_check(true);
       }
       if (tesla_legacy_op_stalk_cancel_edge) {
         pcm_cruise_check(false);
+        tesla_legacy_last_hybrid_direct_steer_us = 0U;
       }
     }
     // 0x659 is an XNOR userspace->panda control carrier, not a vehicle command. Always consume
@@ -743,10 +744,11 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return false;
   }
 
-  // Hybrid Native AP steering ownership: validate/cache OP 0x488, but NEVER transmit the
-  // userspace frame directly. It is substituted onto the next genuine native-AP 0x488 in fwd.
+  // Hybrid steering has two mutually-exclusive ownership paths:
+  //   native LKAS active -> cache OP 0x488 as a template and overlay it onto native cadence;
+  //   native LKAS inactive -> fall through to the normal direct 0x488 safety checks below.
   if (!tesla_legacy_external_panda && (addr == 0x488) && ((int)msg->bus == 0) &&
-      tesla_legacy_op_hybrid_native_ap) {
+      tesla_legacy_op_hybrid_native_ap && tesla_legacy_stock_lkas) {
     const bool violation = tesla_legacy_hybrid_steering_overlay_violation(msg);
     (void)tesla_legacy_capture_hud_tx(msg, violation);
     return false;
@@ -762,7 +764,15 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   // Hybrid is the sole exception for steering, and that 0x488 was already captured above;
   // longitudinal and the OP EPAS-allow message remain blocked so native AP owns them.
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
-    if ((addr == 0x488) || (addr == 0x27D) || tesla_legacy_is_das_control_msg(addr)) {
+    const bool hybrid_direct = tesla_legacy_op_hybrid_native_ap &&
+                               !tesla_legacy_stock_lkas && controls_allowed;
+    if ((addr == 0x488) && !hybrid_direct) {
+      return false;
+    }
+    if ((addr == 0x27D) && !(hybrid_direct && tesla_legacy_hybrid_direct_steering_active())) {
+      return false;
+    }
+    if (tesla_legacy_is_das_control_msg(addr)) {
       return false;
     }
   }
@@ -859,7 +869,11 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
         .wheelbase = 2.96f,
       };
 
-      return !steer_angle_cmd_checks_vm(desired_angle, steer_control_enabled, limits, params);
+      const bool steer_violation = steer_angle_cmd_checks_vm(desired_angle, steer_control_enabled, limits, params);
+      if (!steer_violation && tesla_legacy_op_hybrid_native_ap && !tesla_legacy_stock_lkas) {
+        tesla_legacy_last_hybrid_direct_steer_us = microsecond_timer_get();
+      }
+      return !steer_violation;
     }
 
     return true;
@@ -1018,29 +1032,24 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 
   // Main panda: stock LKAS passthrough (bus2 -> car).
   //
-  // XNOR_V171_HYBRID_NATIVE_PREFORWARD:
-  // Hybrid must forward the *idle/pre-engagement* native 0x488 and 0x27D stream as well as the
-  // active stream. Tesla Autosteer needs that native AP->EPAS handshake to reach the car before
-  // DAS_steeringControlType changes to the active native state. The previous gate waited for
-  // tesla_legacy_stock_lkas first, which could block the very frames required to make it true.
-  //
-  // Once native LKAS is genuinely active, keep the existing single-source overlay architecture:
-  // cache/validate OP's bus-0 0x488 template, then merge only its steering payload onto the next
-  // genuine native bus-2 0x488. Native cadence/counter remain authoritative. If OP has no fresh
-  // valid template (or controls are not allowed / driver overrides), apply_hud_forward_data()
-  // returns false and the untouched Tesla frame passes through — fail-open to native Autosteer.
+  // XNOR_V172_HYBRID_DUAL_LATERAL_OWNERSHIP:
+  // Disengaged Hybrid always passes native pre-engagement 0x488/0x27D so Tesla Autosteer remains
+  // available. Native-active Hybrid overlays OP steering onto native 0x488. If OP is engaged while
+  // native LKAS is unavailable, a fresh safety-approved direct OP 0x488 temporarily owns the EPAS
+  // path; native idle 0x488/0x27D are blocked during that freshness window to prevent two senders.
   if ((bus_num == 2) && (addr == 0x488)) {
     if (tesla_legacy_op_hybrid_native_ap) {
       if (tesla_legacy_stock_lkas) {
         (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
+        return false;
       }
-      return false;  // always forward native 0x488 in Hybrid, idle or active
+      return tesla_legacy_hybrid_direct_steering_active();
     }
     return !tesla_legacy_stock_lkas;
   }
   if ((bus_num == 2) && (addr == 0x27D)) {
     if (tesla_legacy_op_hybrid_native_ap) {
-      return false;  // native EPAS handshake must remain continuous in Hybrid
+      return tesla_legacy_hybrid_direct_steering_active();
     }
     return !tesla_legacy_stock_lkas;
   }
@@ -1158,6 +1167,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_op_hybrid_native_ap = false;
   tesla_legacy_autosteer_247_test = false;
   tesla_legacy_pedal_enabled = false;
+  tesla_legacy_last_hybrid_direct_steer_us = 0U;
 
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;

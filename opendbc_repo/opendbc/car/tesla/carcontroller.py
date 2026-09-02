@@ -751,6 +751,15 @@ class CarController(CarControllerBase):
         self.apply_angle_last = float(getattr(cs_out, "steeringAngleDeg", 0.0) if cs_out is not None else 0.0)
       except Exception:
         pass
+      # Hybrid grace window: keep native pre-engagement 0x488/0x27D untouched briefly after the
+      # stalk engages OP. This leaves enough time for a second stalk pull to engage native Tesla
+      # Autosteer. If native LKAS does not become active, OP direct lateral fallback starts after
+      # ~1 second. Without this grace, the first pull could make OP seize EPAS before Tesla sees
+      # the second pull, defeating the native-Autosteer path we restored in V171.
+      if hybrid_native_ap:
+        self._hybrid_direct_fallback_after_frame = int(self.frame) + 100
+    if not op_enabled:
+      self._hybrid_direct_fallback_after_frame = -1
     self._op_enabled_prev = bool(op_enabled)
 
     if not hybrid_native_ap:
@@ -761,13 +770,18 @@ class CarController(CarControllerBase):
       self._speed_limit_sync(CC, CS, can_sends)
 
     # Normal xnor: OP owns lateral only in Autopilot Disabled mode.
-    # Hybrid: native AP must be genuinely steering (raw stockLkas=True); OP then supplies only
-    # the angle template which panda merges onto the native-timed 0x488. If native AP drops out,
-    # lat_active drops immediately and no fresh OP template is supplied.
+    # Hybrid: OP lateral is independent of native-Autosteer availability. With native LKAS active,
+    # panda treats this 0x488 as an overlay template. Without native LKAS, the same command becomes
+    # the single direct lateral source (paired with 0x27D below).
     native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
+    hybrid_direct_ready = (
+      hybrid_native_ap and
+      (not native_ap_lateral_active) and
+      (int(self.frame) >= int(getattr(self, "_hybrid_direct_fallback_after_frame", self.frame + 100)))
+    )
     lat_active = (
       bool(CC.latActive) and
-      (autopilot_disabled or (hybrid_native_ap and native_ap_lateral_active)) and
+      (autopilot_disabled or (hybrid_native_ap and (native_ap_lateral_active or hybrid_direct_ready))) and
       (not CS.out.cruiseState.standstill) and
       (not human_control) and
       (not steer_inhibit)
@@ -828,8 +842,12 @@ class CarController(CarControllerBase):
           self.tesla_can.create_steering_control(self.apply_angle_last, lat_active)
         )
 
-    # Native AP owns the EPAS handshake in hybrid mode; do not inject a competing 0x27D.
-    if (not hybrid_native_ap) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
+    # EPAS handshake ownership:
+    # - native active Hybrid: Tesla's genuine 0x27D remains authoritative; do not inject another.
+    # - native inactive Hybrid + OP lateral active: send OP 0x27D as part of the direct fallback.
+    # Panda blocks the native idle 0x27D only while a fresh direct OP steering command exists.
+    hybrid_direct_lateral = hybrid_native_ap and lat_active and (not native_ap_lateral_active)
+    if ((not hybrid_native_ap) or hybrid_direct_lateral) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
       counter = (self.frame // 2) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(counter))
 

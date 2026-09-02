@@ -1058,7 +1058,8 @@ class CarState(CarStateBase):
 
     # Native AP lateral state is the engagement source in Hybrid Native AP mode. Keep this
     # derived from the raw AP-side 0x488, before panda substitutes the IC/EPAS-facing copy.
-    native_lkas_active = int(cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"]) == 2
+    native_steer_type = int(cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"])
+    native_lkas_active = native_steer_type in (2, 3)
 
     # Cruise state
     cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
@@ -1130,9 +1131,10 @@ class CarState(CarStateBase):
       self.blinker_controller.tap_direction = 0
 
 
-    if self.autopilot_disabled or self.enableACC:
-      # Native-ACC engagement source: the virtual cruise stalk drives openpilot's own
-      # longitudinal enable (MAIN=on / CANCEL=off), independent of stock Tesla cruise.
+    if self.autopilot_disabled or self.enableACC or self.hybrid_native_ap:
+      # OP engagement source: physical MAIN/CANCEL latches openpilot independently of native
+      # Autosteer availability. In Hybrid, Tesla still owns longitudinal; this latch controls OP
+      # engagement/lateral ownership only.
       if self.cruise_buttons == 2:  # MAIN
         self.cruiseEnabled = True
       if self.cruise_buttons == 1:  # CANCEL
@@ -1176,11 +1178,11 @@ class CarState(CarStateBase):
     self._param_frame += 1
 
     if self.hybrid_native_ap:
-      # Hybrid Native AP: openpilot engages only once Tesla's own Autosteer is genuinely active.
-      # Native TACC remains the longitudinal authority and its native IC/status/lane/object stream
-      # stays untouched; openpilot only substitutes the steering command downstream in panda.
+      # Hybrid Native AP: OP engagement is stalk-latched and independent of native Autosteer.
+      # Tesla remains the longitudinal authority. If native Autosteer is active, panda overlays
+      # OP steering onto Tesla's native 0x488 carrier; otherwise OP uses the direct lateral fallback.
       ret.cruiseState.available = True
-      ret.cruiseState.enabled = bool(native_lkas_active) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)
     elif self.autopilot_disabled or self.enableACC:
       # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
