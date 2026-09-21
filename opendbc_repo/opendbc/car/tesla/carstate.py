@@ -1131,9 +1131,10 @@ class CarState(CarStateBase):
       self.blinker_controller.tap_direction = 0
 
 
-    if self.autopilot_disabled or self.enableACC:
-      # Native-ACC engagement source: the virtual cruise stalk drives openpilot's own
-      # longitudinal enable (MAIN=on / CANCEL=off), independent of stock Tesla cruise.
+    if self.autopilot_disabled or self.enableACC or self.hybrid_native_ap:
+      # OP engagement source. In Hybrid this is deliberately independent of Tesla cruise/AP state:
+      # MAIN latches OP on and CANCEL latches it off. Native AP status only chooses the steering
+      # transport (native 0x488 overlay vs direct OP fallback); it must not own OP engagement.
       if self.cruise_buttons == 2:  # MAIN
         self.cruiseEnabled = True
       if self.cruise_buttons == 1:  # CANCEL
@@ -1177,11 +1178,10 @@ class CarState(CarStateBase):
     self._param_frame += 1
 
     if self.hybrid_native_ap:
-      # Hybrid Native AP: openpilot engages only once Tesla's own Autosteer is genuinely active.
-      # Native TACC remains the longitudinal authority and its native IC/status/lane/object stream
-      # stays untouched; openpilot only substitutes the steering command downstream in panda.
+      # Hybrid OP engagement is stalk-latched, not derived from native Autosteer/TACC state.
+      # Tesla remains longitudinal authority; native_lkas_active only selects lateral transport.
       ret.cruiseState.available = True
-      ret.cruiseState.enabled = bool(native_lkas_active) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)
     elif self.autopilot_disabled or self.enableACC:
       # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
