@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V176_HYBRID_NATIVE_CARRIER_ONLY 1
+#define XNOR_V177_HYBRID_OVERLAY_HANDSON_PASS 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V176_HYBRID_NATIVE_CARRIER_ONLY";
+    "XNOR_V177_HYBRID_OVERLAY_HANDSON_PASS";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -366,10 +366,10 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
         return false;
       }
       // Hybrid steering is fail-open to native AP: substitute only while native Autosteer is
-      // genuinely active, OP remains allowed, and the driver is not overriding the wheel.
+      // genuinely active and OP remains allowed. V177 deliberately does not use Tesla hands-on
+      // as a second overlay veto; upstream OP lateral/driver-override logic owns that decision.
       if ((addr == 0x488) && (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
-                              !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled ||
-                              tesla_legacy_hands_on)) {
+                              !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled)) {
         return false;
       }
 
@@ -678,8 +678,11 @@ static bool tesla_legacy_hybrid_steering_overlay_violation(const CANPacket_t *ms
   if (tesla_legacy_external_panda || ((int)msg->addr != 0x488) || ((int)msg->bus != 0)) {
     return true;
   }
+  // V177: hands-on is not a Hybrid overlay veto. The genuine native carrier remains in charge
+  // of Tesla's AP/EPAS lifecycle; OP's upstream lateral logic handles driver override. Keep the
+  // hard gates on Hybrid mode, controls_allowed, native LKAS/AP state, and steering limits.
   if (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
-      !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled || tesla_legacy_hands_on) {
+      !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled) {
     return true;
   }
 

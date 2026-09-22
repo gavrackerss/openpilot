@@ -775,11 +775,17 @@ class CarController(CarControllerBase):
     # native 0x488/0x27D pre-engagement handshake continuously and avoids the EPAS inhibit seen
     # when V174/V175 switched to direct OP 0x488+0x27D about one second after the first stalk pull.
     native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
+    hybrid_native_overlay = bool(hybrid_native_ap and native_ap_lateral_active)
+    # V177: Tesla's hands-on indication is not itself an overlay veto. In native-carrier Hybrid,
+    # the genuine Tesla 0x488/0x27D lifecycle stays authoritative and OP's upstream lateral/driver
+    # override logic remains responsible for whether CC.latActive is asserted. Preserve the old
+    # human-control suppression for normal/direct OP operation.
+    human_control_blocks_lateral = bool(human_control and not hybrid_native_overlay)
     lat_active = (
       bool(CC.latActive) and
-      (autopilot_disabled or (hybrid_native_ap and native_ap_lateral_active)) and
+      (autopilot_disabled or hybrid_native_overlay) and
       (not CS.out.cruiseState.standstill) and
-      (not human_control) and
+      (not human_control_blocks_lateral) and
       (not steer_inhibit)
     )
 
@@ -791,7 +797,7 @@ class CarController(CarControllerBase):
 
     # Steering (50Hz)
     if self.frame % 2 == 0:
-      if (not lat_active) or human_control or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
+      if (not lat_active) or human_control_blocks_lateral or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
         apply_angle = float(CS.out.steeringAngleDeg)
       else:
         desired_angle = self._lane_positioned_target_angle(
