@@ -68,7 +68,6 @@ static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
 static const uint32_t TESLA_LEGACY_AEB_HUD_SCRUB_US       = 3500000U;
-static const uint32_t TESLA_LEGACY_HYBRID_DIRECT_STEER_HOLD_US = 100000U;
 
 // --- runtime state (namespaced; safety.h includes tesla.h too) ---
 static bool tesla_legacy_external_panda = false;
@@ -141,14 +140,6 @@ static void tesla_legacy_reset_after_gear_change(void) {
 
 
 // --- helpers ---
-
-static bool tesla_legacy_hybrid_direct_steering_active(void) {
-  return tesla_legacy_op_hybrid_native_ap &&
-         !tesla_legacy_stock_lkas &&
-         (tesla_legacy_last_hybrid_direct_steer_us != 0U) &&
-         (get_ts_elapsed(microsecond_timer_get(), tesla_legacy_last_hybrid_direct_steer_us) <=
-          TESLA_LEGACY_HYBRID_DIRECT_STEER_HOLD_US);
-}
 
 static void tesla_legacy_track_controls_allowed_edge(void) {
   if (tesla_legacy_controls_allowed_prev && !controls_allowed) {
