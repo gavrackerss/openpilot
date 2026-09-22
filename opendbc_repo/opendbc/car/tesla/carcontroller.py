@@ -769,19 +769,15 @@ class CarController(CarControllerBase):
       self._process_lane_telemetry(CC, CS, can_sends)
       self._speed_limit_sync(CC, CS, can_sends)
 
-    # Normal xnor: OP owns lateral only in Autopilot Disabled mode.
-    # Hybrid: OP lateral is independent of native-Autosteer availability. With native LKAS active,
-    # panda treats this 0x488 as an overlay template. Without native LKAS, the same command becomes
-    # the single direct lateral source (paired with 0x27D below).
+    # Normal xnor: OP owns lateral directly only in Autopilot Disabled mode.
+    # Hybrid V176 is deliberately native-carrier-only: OP may remain independently engaged, but
+    # lateral commands are emitted only once genuine Tesla LKAS is active. This preserves the
+    # native 0x488/0x27D pre-engagement handshake continuously and avoids the EPAS inhibit seen
+    # when V174/V175 switched to direct OP 0x488+0x27D about one second after the first stalk pull.
     native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
-    hybrid_direct_ready = (
-      hybrid_native_ap and
-      (not native_ap_lateral_active) and
-      (int(self.frame) >= int(getattr(self, "_hybrid_direct_fallback_after_frame", self.frame + 100)))
-    )
     lat_active = (
       bool(CC.latActive) and
-      (autopilot_disabled or (hybrid_native_ap and (native_ap_lateral_active or hybrid_direct_ready))) and
+      (autopilot_disabled or (hybrid_native_ap and native_ap_lateral_active)) and
       (not CS.out.cruiseState.standstill) and
       (not human_control) and
       (not steer_inhibit)
@@ -843,11 +839,9 @@ class CarController(CarControllerBase):
         )
 
     # EPAS handshake ownership:
-    # - native active Hybrid: Tesla's genuine 0x27D remains authoritative; do not inject another.
-    # - native inactive Hybrid + OP lateral active: send OP 0x27D as part of the direct fallback.
-    # Panda blocks the native idle 0x27D only while a fresh direct OP steering command exists.
-    hybrid_direct_lateral = hybrid_native_ap and lat_active and (not native_ap_lateral_active)
-    if ((not hybrid_native_ap) or hybrid_direct_lateral) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
+    # Hybrid always leaves the genuine Tesla 0x27D stream authoritative. OP never sends a second
+    # EPAS-allow stream in Hybrid; this is the V176 native-carrier-only stabilization.
+    if (not hybrid_native_ap) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
       counter = (self.frame // 2) % 16
       can_sends.append(self.tesla_can.create_steering_allowed(counter))
 

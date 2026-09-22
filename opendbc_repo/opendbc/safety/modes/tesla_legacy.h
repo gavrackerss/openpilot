@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V174_STALK_EDGE_AND_AP_DISABLED_OWNERSHIP 1
+#define XNOR_V176_HYBRID_NATIVE_CARRIER_ONLY 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V174_STALK_EDGE_AND_AP_DISABLED_OWNERSHIP";
+    "XNOR_V176_HYBRID_NATIVE_CARRIER_ONLY";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -769,19 +769,11 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return false;
   }
 
-  // On AP hardware cars normal xnor actuation remains blocked unless stock AP is disabled.
-  // Hybrid is the sole exception for steering, and that 0x488 was already captured above;
-  // longitudinal and the OP EPAS-allow message remain blocked so native AP owns them.
+  // On AP hardware cars direct OP actuation remains blocked unless stock AP is explicitly
+  // disabled. Hybrid V176 is native-carrier-only: a valid 0x488 template is consumed above only
+  // while native LKAS is active, and OP never directly transmits 0x488/0x27D in Hybrid.
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
-    const bool hybrid_direct = tesla_legacy_op_hybrid_native_ap &&
-                               !tesla_legacy_stock_lkas && controls_allowed;
-    if ((addr == 0x488) && !hybrid_direct) {
-      return false;
-    }
-    if ((addr == 0x27D) && !(hybrid_direct && tesla_legacy_hybrid_direct_steering_active())) {
-      return false;
-    }
-    if (tesla_legacy_is_das_control_msg(addr)) {
+    if ((addr == 0x488) || (addr == 0x27D) || tesla_legacy_is_das_control_msg(addr)) {
       return false;
     }
   }
@@ -1044,13 +1036,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 
   // Main panda steering ownership (bus2 -> car).
   //
-  // XNOR_V174_STALK_EDGE_AND_AP_DISABLED_OWNERSHIP:
-  // - Autopilot Disabled: OP is the sole lateral owner. Always block the stock AP 0x488/0x27D
-  //   copies from reaching EPAS; OP's validated bus-0 commands are the only steering/allow source.
-  // - Hybrid disengaged: pass native pre-engagement 0x488/0x27D so Tesla Autosteer can engage.
-  // - Hybrid native-active: overlay OP's steering payload onto the genuine Tesla 0x488 carrier.
-  // - Hybrid native-inactive + OP direct fallback: block native idle frames only while a fresh,
-  //   safety-approved OP direct command owns EPAS.
+  // XNOR_V176_HYBRID_NATIVE_CARRIER_ONLY:
+  // - Autopilot Disabled: OP remains the sole direct lateral owner.
+  // - Hybrid, native LKAS inactive: ALWAYS forward genuine Tesla 0x488/0x27D unchanged so the
+  //   complete native pre-engagement/EPAS handshake remains continuous.
+  // - Hybrid, native LKAS active: overlay the safety-validated OP angle onto the genuine Tesla
+  //   0x488 while preserving native cadence/counter; genuine Tesla 0x27D remains authoritative.
   if ((bus_num == 2) && (addr == 0x488)) {
     if (tesla_legacy_op_autopilot_disabled) {
       return true;  // block stock 0x488: explicit OP-only lateral ownership
@@ -1058,9 +1049,8 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (tesla_legacy_op_hybrid_native_ap) {
       if (tesla_legacy_stock_lkas) {
         (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
-        return false;
       }
-      return tesla_legacy_hybrid_direct_steering_active();
+      return false;  // always forward the genuine native carrier in Hybrid
     }
     return !tesla_legacy_stock_lkas;
   }
@@ -1069,7 +1059,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       return true;  // block stock 0x27D: OP sends the single EPAS-allow stream
     }
     if (tesla_legacy_op_hybrid_native_ap) {
-      return tesla_legacy_hybrid_direct_steering_active();
+      return false;  // native EPAS handshake is always authoritative in Hybrid
     }
     return !tesla_legacy_stock_lkas;
   }
