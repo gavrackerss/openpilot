@@ -7,6 +7,7 @@
 #define XNOR_V180_HYBRID_IDLE_NATIVE_CARRIER 1
 #define XNOR_V182_HYBRID_COOP_HANDSON_DISABLE 1
 #define XNOR_V183_HYBRID_AP_SUPERVISION_COOP 1
+#define XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -15,6 +16,8 @@ static const char xnor_v182_hybrid_coop_handson_disable_marker[] __attribute__((
     "XNOR_V182_HYBRID_COOP_HANDSON_DISABLE";
 static const char *const xnor_v183_marker __attribute__((unused)) =
     "XNOR_V183_HYBRID_AP_SUPERVISION_COOP";
+static const char *const xnor_v184_marker __attribute__((unused)) =
+    "XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -111,6 +114,14 @@ static bool tesla_legacy_autopilot_enabled = false;  // 0x399
 static bool tesla_legacy_eac_enabled = false;        // 0x219
 static bool tesla_legacy_autopark_enabled = false;   // 0x219
 
+// V184: AP-authored supervision state observed directly in fwd_hook.
+static uint8_t tesla_legacy_ap_status_fwd = 0U;
+static uint8_t tesla_legacy_ap_hands_state_fwd = 0U;
+static uint32_t tesla_legacy_hands_pulse_start_us = 0U;
+static bool tesla_legacy_hands_pulse_positive = false;
+static const uint32_t TESLA_LEGACY_HANDS_PULSE_US = 300000U;
+static const uint32_t TESLA_LEGACY_HANDS_PULSE_RETRY_US = 1000000U;
+
 // hands on wheel (from 0x370)
 static bool tesla_legacy_hands_on = false;
 static uint32_t tesla_legacy_hands_on_last_signal = 0U;
@@ -136,6 +147,10 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;
   tesla_legacy_autopark_enabled = false;
+  tesla_legacy_ap_status_fwd = 0U;
+  tesla_legacy_ap_hands_state_fwd = 0U;
+  tesla_legacy_hands_pulse_start_us = 0U;
+  tesla_legacy_hands_pulse_positive = false;
 
   tesla_legacy_op_stalk_main_edge = false;
   tesla_legacy_op_stalk_cancel_edge = false;
@@ -180,6 +195,15 @@ static void tesla_legacy_set_last_byte_checksum(CANPacket_t *msg) {
   if (len > 0) {
     msg->data[len - 1] = tesla_legacy_calc_checksum8(msg, len);
   }
+}
+
+// EPAS_torsionBarTorque is raw=((byte2 low nibble)<<8)|byte3, scale 0.01, offset -20.5.
+// V184 uses +/-0.80 Nm only on the copy delivered to DAS; the real chassis measurement remains
+// untouched for EPAS, CarState and panda safety.
+static void tesla_legacy_set_ap_touch_torque(CANPacket_t *msg, bool positive) {
+  const uint16_t raw_torque = positive ? 2130U : 1970U;
+  msg->data[2] = (uint8_t)((msg->data[2] & 0xF0U) | ((raw_torque >> 8) & 0x0FU));
+  msg->data[3] = (uint8_t)(raw_torque & 0xFFU);
 }
 
 static bool tesla_legacy_is_das_control_msg(int addr) {
@@ -1086,40 +1110,42 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       return true;
     }
 
-    // V183 Hybrid AP-side supervision/co-op bridge. V182 proved that the documented
-    // UI_handsOnRequirementDisable bit reaches DAS but this AP firmware does not honour it:
-    // DAS_autopilotHandsOnState still escalated 2->4->5 while the bit was asserted.
-    //
-    // Instead, modify ONLY the EPAS status copy forwarded to the AP ECU. The real chassis copy
-    // has already passed safety_rx_hook and remains visible unchanged to CarState/Panda safety.
-    // While genuine native Autosteer is active, report the minimum non-zero hands-on level (1)
-    // to DAS so its own hands-on timer sees a continuously satisfied requirement. If a physical
-    // wheel takeover produces the specific EPAS EAC_ERROR_HANDS_ON transition seen in the V182
-    // logs (handsOnLevel=3, eacError=3, status 4/6), normalise ONLY that hands-on transition back
-    // to EAC_ACTIVE + EAC_ERROR_IDLE. Never mask any other EPAS error code/status.
-    //
-    // 0x370 uses the Tesla additive last-byte checksum, so recompute it after any edit.
-    if ((addr == 0x370) && tesla_legacy_op_hybrid_native_ap && controls_allowed && tesla_legacy_stock_lkas) {
+    // V184 Hybrid AP-side supervision/co-op bridge. V183 proved a permanently asserted
+    // handsOnLevel=1 reaches DAS with a valid checksum, but DAS still escalates its nag. Native
+    // captures show the timer resets after a stock-like hands transition accompanied by real
+    // torsion-bar torque. Reproduce that pattern only on the AP-facing 0x370 copy.
+    if ((addr == 0x370) && tesla_legacy_op_hybrid_native_ap && controls_allowed) {
       const uint8_t hands_on_level = (to_fwd->data[4] >> 6) & 0x03U;
       const uint8_t eac_status = (to_fwd->data[6] >> 5) & 0x07U;
       const uint8_t eac_error = (to_fwd->data[2] >> 4) & 0x0FU;
-      bool changed = false;
+      const uint16_t real_torque_raw = (uint16_t)((((uint16_t)to_fwd->data[2] & 0x0FU) << 8) | to_fwd->data[3]);
+      const bool real_torque_positive = real_torque_raw >= 2050U;
+      const bool ap_active = (tesla_legacy_ap_status_fwd == 3U) ||
+                             (tesla_legacy_ap_status_fwd == 4U) ||
+                             (tesla_legacy_ap_status_fwd == 5U);
+      const bool ap_requests_hands = (tesla_legacy_ap_hands_state_fwd >= 2U) &&
+                                     (tesla_legacy_ap_hands_state_fwd <= 5U);
+      const bool physical_hands_takeover = ap_active && (hands_on_level >= 3U) &&
+                                           ((eac_error == 0U) || (eac_error == 3U)) &&
+                                           ((eac_status == 2U) || (eac_status == 4U) || (eac_status == 6U));
+      const uint32_t now = microsecond_timer_get();
+      const uint32_t since_pulse = (tesla_legacy_hands_pulse_start_us == 0U) ?
+                                   0xFFFFFFFFU : get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
 
-      if ((eac_error == 0U) && (eac_status == 2U)) {
-        // Native Autosteer healthy: advertise a benign detected-hands level to satisfy DAS.
-        to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);
-        changed = hands_on_level != 1U;
-      } else if ((hands_on_level >= 3U) &&
-                 ((eac_error == 3U) || (eac_status == 4U) || (eac_status == 6U))) {
-        // Physical co-op takeover: suppress ONLY Tesla's hands-on disengage representation on
-        // the AP-facing copy. Driver torque/angle remain real on the chassis side.
-        to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);  // handsOnLevel = 1
-        to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x0FU);          // EAC_ERROR_IDLE = 0
-        to_fwd->data[6] = (uint8_t)((to_fwd->data[6] & 0x1FU) | (2U << 5));  // EAC_ACTIVE = 2
-        changed = true;
+      if (ap_active && ap_requests_hands && (since_pulse >= TESLA_LEGACY_HANDS_PULSE_RETRY_US)) {
+        tesla_legacy_hands_pulse_start_us = now;
+        tesla_legacy_hands_pulse_positive = !tesla_legacy_hands_pulse_positive;
       }
 
-      if (changed) {
+      const bool pulse_active = ap_active && (tesla_legacy_hands_pulse_start_us != 0U) &&
+                                (get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us) <= TESLA_LEGACY_HANDS_PULSE_US);
+
+      if (physical_hands_takeover || (pulse_active && (eac_error == 0U) && (eac_status == 2U))) {
+        // Present a short, plausible hands-detected/EAC-active sample to DAS only.
+        to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);  // handsOnLevel = 1
+        to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x0FU);            // EAC_ERROR_IDLE
+        to_fwd->data[6] = (uint8_t)((to_fwd->data[6] & 0x1FU) | (2U << 5));  // EAC_ACTIVE
+        tesla_legacy_set_ap_touch_torque(to_fwd, physical_hands_takeover ? real_torque_positive : tesla_legacy_hands_pulse_positive);
         tesla_legacy_set_last_byte_checksum(to_fwd);
       }
     } else if (addr == 0x370) {
@@ -1150,6 +1176,18 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     to_fwd->data[5] = (uint8_t)((to_fwd->data[5] & 0x1FU) | 0xA0U);  // unknown AP state -> 5
     if (additive_checksum) {
       tesla_legacy_set_last_byte_checksum(to_fwd);
+    }
+  }
+
+  // V184: observe genuine DAS supervision state in the forward path without adding 0x399 to
+  // RxCheck (so there is no new liveness dependency). Capture before any optional HUD overlay.
+  if ((bus_num == 2) && (addr == 0x399)) {
+    tesla_legacy_ap_status_fwd = (uint8_t)(to_fwd->data[0] & 0x0FU);
+    tesla_legacy_ap_hands_state_fwd = (uint8_t)((to_fwd->data[5] >> 2) & 0x0FU);
+    if (!((tesla_legacy_ap_status_fwd == 3U) ||
+          (tesla_legacy_ap_status_fwd == 4U) ||
+          (tesla_legacy_ap_status_fwd == 5U))) {
+      tesla_legacy_hands_pulse_start_us = 0U;
     }
   }
 
@@ -1220,6 +1258,10 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;
   tesla_legacy_autopark_enabled = false;
+  tesla_legacy_ap_status_fwd = 0U;
+  tesla_legacy_ap_hands_state_fwd = 0U;
+  tesla_legacy_hands_pulse_start_us = 0U;
+  tesla_legacy_hands_pulse_positive = false;
 
   tesla_legacy_hands_on = false;
   tesla_legacy_hands_on_last_signal = 0U;
