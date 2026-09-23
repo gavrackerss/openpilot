@@ -6,12 +6,15 @@
 #define XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX 1
 #define XNOR_V180_HYBRID_IDLE_NATIVE_CARRIER 1
 #define XNOR_V182_HYBRID_COOP_HANDSON_DISABLE 1
+#define XNOR_V183_HYBRID_AP_SUPERVISION_COOP 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
     "XNOR_V180_HYBRID_IDLE_NATIVE_CARRIER";
 static const char xnor_v182_hybrid_coop_handson_disable_marker[] __attribute__((used)) =
     "XNOR_V182_HYBRID_COOP_HANDSON_DISABLE";
+static const char *const xnor_v183_marker __attribute__((unused)) =
+    "XNOR_V183_HYBRID_AP_SUPERVISION_COOP";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -1083,19 +1086,44 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       return true;
     }
 
-    // V182 Hybrid co-op hands-on supervision experiment. UI_driverAssistControl (0x3E8) is
-    // authored by the vehicle/UI side and consumed by DAS. DBC bit 14 is
-    // UI_handsOnRequirementDisable (byte1 bit6). Assert it only while Hybrid OP controls are
-    // actively allowed, so a later native-Autosteer engagement is primed not to start Tesla's
-    // continuous hands-on requirement. When OP/Hybrid is inactive the genuine vehicle bit is
-    // forwarded untouched. 0x3E8 has no rolling counter/checksum in this DBC.
-    if ((addr == 0x3E8) && tesla_legacy_op_hybrid_native_ap && controls_allowed) {
-      to_fwd->data[1] |= 0x40U;
-    }
+    // V183 Hybrid AP-side supervision/co-op bridge. V182 proved that the documented
+    // UI_handsOnRequirementDisable bit reaches DAS but this AP firmware does not honour it:
+    // DAS_autopilotHandsOnState still escalated 2->4->5 while the bit was asserted.
+    //
+    // Instead, modify ONLY the EPAS status copy forwarded to the AP ECU. The real chassis copy
+    // has already passed safety_rx_hook and remains visible unchanged to CarState/Panda safety.
+    // While genuine native Autosteer is active, report the minimum non-zero hands-on level (1)
+    // to DAS so its own hands-on timer sees a continuously satisfied requirement. If a physical
+    // wheel takeover produces the specific EPAS EAC_ERROR_HANDS_ON transition seen in the V182
+    // logs (handsOnLevel=3, eacError=3, status 4/6), normalise ONLY that hands-on transition back
+    // to EAC_ACTIVE + EAC_ERROR_IDLE. Never mask any other EPAS error code/status.
+    //
+    // 0x370 uses the Tesla additive last-byte checksum, so recompute it after any edit.
+    if ((addr == 0x370) && tesla_legacy_op_hybrid_native_ap && controls_allowed && tesla_legacy_stock_lkas) {
+      const uint8_t hands_on_level = (to_fwd->data[4] >> 6) & 0x03U;
+      const uint8_t eac_status = (to_fwd->data[6] >> 5) & 0x07U;
+      const uint8_t eac_error = (to_fwd->data[2] >> 4) & 0x0FU;
+      bool changed = false;
 
-    // Keep the Unity EPAS_eacStatus rewrite that prevents stock AP from declaring steering
-    // temporarily unavailable while OP steers. Hybrid deliberately leaves this rewrite disabled.
-    if (addr == 0x370) {
+      if ((eac_error == 0U) && (eac_status == 2U)) {
+        // Native Autosteer healthy: advertise a benign detected-hands level to satisfy DAS.
+        to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);
+        changed = hands_on_level != 1U;
+      } else if ((hands_on_level >= 3U) &&
+                 ((eac_error == 3U) || (eac_status == 4U) || (eac_status == 6U))) {
+        // Physical co-op takeover: suppress ONLY Tesla's hands-on disengage representation on
+        // the AP-facing copy. Driver torque/angle remain real on the chassis side.
+        to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);  // handsOnLevel = 1
+        to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x0FU);          // EAC_ERROR_IDLE = 0
+        to_fwd->data[6] = (uint8_t)((to_fwd->data[6] & 0x1FU) | (2U << 5));  // EAC_ACTIVE = 2
+        changed = true;
+      }
+
+      if (changed) {
+        tesla_legacy_set_last_byte_checksum(to_fwd);
+      }
+    } else if (addr == 0x370) {
+      // Preserve the existing non-Hybrid Unity rewrite unchanged.
       const uint8_t b6 = to_fwd->data[6];
       const uint8_t eac_status = (b6 >> 5) & 0x07U;
       if (!tesla_legacy_op_hybrid_native_ap && controls_allowed &&

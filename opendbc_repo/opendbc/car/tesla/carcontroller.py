@@ -799,6 +799,12 @@ class CarController(CarControllerBase):
     if self.frame % 2 == 0:
       if (not lat_active) or human_control_blocks_lateral or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
         apply_angle = float(CS.out.steeringAngleDeg)
+      elif hybrid_native_ap and human_control:
+        # V183 Hybrid co-op: keep OP logically/laterally active, but yield instantaneous wheel
+        # authority to the driver.  Continue sending a type-1 template at the measured wheel angle
+        # so EPAS sees no fighting angle request.  apply_angle_last follows the driver's motion,
+        # therefore OP resumes smoothly from the actual wheel position when the override clears.
+        apply_angle = float(CS.out.steeringAngleDeg)
       else:
         desired_angle = self._lane_positioned_target_angle(
           float(actuators.steeringAngleDeg),
