@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V178_NATIVE_LKAS_DETECTOR_FIX 1
+#define XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V178_NATIVE_LKAS_DETECTOR_FIX";
+    "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -369,7 +369,7 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
       // genuinely active and OP remains allowed. V177 deliberately does not use Tesla hands-on
       // as a second overlay veto; upstream OP lateral/driver-override logic owns that decision.
       if ((addr == 0x488) && (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
-                              !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled)) {
+                              !tesla_legacy_stock_lkas)) {
         return false;
       }
 
@@ -684,9 +684,9 @@ static bool tesla_legacy_hybrid_steering_overlay_violation(const CANPacket_t *ms
   }
   // V177: hands-on is not a Hybrid overlay veto. The genuine native carrier remains in charge
   // of Tesla's AP/EPAS lifecycle; OP's upstream lateral logic handles driver override. Keep the
-  // hard gates on Hybrid mode, controls_allowed, native LKAS/AP state, and steering limits.
+  // hard gates on Hybrid mode, controls_allowed, raw native LKAS state, and steering limits.
   if (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
-      !tesla_legacy_stock_lkas || !tesla_legacy_autopilot_enabled) {
+      !tesla_legacy_stock_lkas) {
     return true;
   }
 
@@ -1244,6 +1244,17 @@ static safety_config tesla_legacy_init(uint16_t param) {
   {.msg = {
     {0x118, 0, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque2
     {0x118, 2, 6, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
+    {0},
+  }},
+  // V179: observe the native steering carrier. safety_rx_hook only calls this mode's rx hook
+  // for addresses present in RxCheck; without 0x488 here, tesla_legacy_stock_lkas never changed
+  // inside panda, so Hybrid templates were always rejected and native 0x488 was forwarded
+  // byte-for-byte. 0x488 is continuously present at ~50 Hz on main-panda bus 2 even while
+  // Autosteer is idle, so this is a reliable minimal liveness check and does not restore the
+  // older broad EPAS/brake/DI_state RX set that caused mid-drive liveness faults.
+  {.msg = {
+    {0x488, 2, 4, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // native DAS_steeringControl
+    {0},
     {0},
   }},
 };
