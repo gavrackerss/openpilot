@@ -3,9 +3,9 @@
 
 #include "opendbc/safety/declarations.h"
 
-#define XNOR_V177_HYBRID_OVERLAY_HANDSON_PASS 1
+#define XNOR_V178_NATIVE_LKAS_DETECTOR_FIX 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
-    "XNOR_V177_HYBRID_OVERLAY_HANDSON_PASS";
+    "XNOR_V178_NATIVE_LKAS_DETECTOR_FIX";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -594,7 +594,11 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   if (bus == 2) {
     if (!tesla_legacy_external_panda && (addr == 0x488)) {
       const int steer_control_type = (int)((msg->data[2] >> 6) & 0x03);
-      tesla_legacy_stock_lkas = (steer_control_type == 2) || (steer_control_type == 3);
+      // V178: this vehicle's genuine AP-side 0x488 uses controlType 1 while native Autosteer
+      // is active (0 -> 1 -> 0 in the V177 rlogs). OP's Hybrid template is TX on bus0, while
+      // this detector only consumes genuine RX on bus2, so type1 here cannot be the OP template.
+      // Treat any non-zero AP-side steering type as native LKAS active for firmware compatibility.
+      tesla_legacy_stock_lkas = steer_control_type != 0;
       // Stock LKAS is a disengager only in ordinary native mode. In explicit Autopilot-Disabled
       // mode OP owns the EPAS path, so the still-alive AP ECU may report LKAS state but must not
       // immediately erase the OP stalk latch. Hybrid likewise treats native LKAS as status/

@@ -1056,10 +1056,14 @@ class CarState(CarStateBase):
       ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
 
-    # Native AP lateral state is the engagement source in Hybrid Native AP mode. Keep this
-    # derived from the raw AP-side 0x488, before panda substitutes the IC/EPAS-facing copy.
-    native_steer_type = int(cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"])
-    native_lkas_active = native_steer_type in (2, 3)
+    # V178: derive native LKAS from the parser that actually watches raw AP-side 0x488 on bus 2.
+    # The prior code read cp_ap_party (the mirrored STW parser on bus 130), so stockLkas stayed
+    # false even while genuine Tesla Autosteer was active. On this HW2 stream genuine native
+    # 0x488 transitions controlType 0 -> 1 -> 0; OP Hybrid templates are bus-0 TX and therefore
+    # cannot contaminate this raw bus-2 detector. Treat any non-zero native type as active so the
+    # detector remains compatible with firmware variants that may use type 2/3.
+    native_steer_type = int(cp_ap_pt.vl["DAS_steeringControl"]["DAS_steeringControlType"])
+    native_lkas_active = native_steer_type != 0
 
     # Cruise state
     cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
