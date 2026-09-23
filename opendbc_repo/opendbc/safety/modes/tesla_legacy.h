@@ -4,8 +4,14 @@
 #include "opendbc/safety/declarations.h"
 
 #define XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX 1
+#define XNOR_V180_HYBRID_IDLE_NATIVE_CARRIER 1
+#define XNOR_V182_HYBRID_COOP_HANDSON_DISABLE 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
+static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
+    "XNOR_V180_HYBRID_IDLE_NATIVE_CARRIER";
+static const char xnor_v182_hybrid_coop_handson_disable_marker[] __attribute__((used)) =
+    "XNOR_V182_HYBRID_COOP_HANDSON_DISABLE";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -365,11 +371,10 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
       if ((addr == 0x2B9) && ((to_fwd->data[2] & 0x03U) != 0U)) {
         return false;
       }
-      // Hybrid steering is fail-open to native AP: substitute only while native Autosteer is
-      // genuinely active and OP remains allowed. V177 deliberately does not use Tesla hands-on
-      // as a second overlay veto; upstream OP lateral/driver-override logic owns that decision.
-      if ((addr == 0x488) && (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
-                              !tesla_legacy_stock_lkas)) {
+      // V180 Hybrid steering is fail-open to the genuine AP frame but does not require native
+      // Tesla Autosteer itself to be active. A fresh safety-validated OP template may replace the
+      // angle/type on an idle (type0) or active native 0x488. No template => stock passes untouched.
+      if ((addr == 0x488) && (!tesla_legacy_op_hybrid_native_ap || !controls_allowed)) {
         return false;
       }
 
@@ -676,17 +681,17 @@ static bool tesla_legacy_chassis_overlay_violation(const CANPacket_t *msg) {
   return false;
 }
 
-// Validate a Hybrid Native AP steering TEMPLATE. The userspace packet is never sent directly;
-// its angle/type are merged onto a genuine AP 0x488 later, preserving native cadence/counter.
+// Validate a Hybrid steering TEMPLATE. The userspace packet is never sent directly; its
+// angle/type are merged onto a genuine AP 0x488 later, preserving native cadence/counter.
+// V180 permits the AP's idle carrier too, so native Tesla Autosteer need not be active.
 static bool tesla_legacy_hybrid_steering_overlay_violation(const CANPacket_t *msg) {
   if (tesla_legacy_external_panda || ((int)msg->addr != 0x488) || ((int)msg->bus != 0)) {
     return true;
   }
-  // V177: hands-on is not a Hybrid overlay veto. The genuine native carrier remains in charge
-  // of Tesla's AP/EPAS lifecycle; OP's upstream lateral logic handles driver override. Keep the
-  // hard gates on Hybrid mode, controls_allowed, raw native LKAS state, and steering limits.
-  if (!tesla_legacy_op_hybrid_native_ap || !controls_allowed ||
-      !tesla_legacy_stock_lkas) {
+  // V180: neither Tesla hands-on nor raw native-LKAS state gates the Hybrid template.
+  // Hybrid + controls_allowed are still mandatory, and normal angle/accel/jerk safety checks
+  // below remain authoritative.
+  if (!tesla_legacy_op_hybrid_native_ap || !controls_allowed) {
     return true;
   }
 
@@ -751,11 +756,10 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return false;
   }
 
-  // Hybrid steering has two mutually-exclusive ownership paths:
-  //   native LKAS active -> cache OP 0x488 as a template and overlay it onto native cadence;
-  //   native LKAS inactive -> fall through to the normal direct 0x488 safety checks below.
+  // V180 Hybrid steering: cache OP 0x488 as an internal template whenever Hybrid is armed.
+  // It is never transmitted directly; the forward hook merges it onto the genuine AP carrier.
   if (!tesla_legacy_external_panda && (addr == 0x488) && ((int)msg->bus == 0) &&
-      tesla_legacy_op_hybrid_native_ap && tesla_legacy_stock_lkas) {
+      tesla_legacy_op_hybrid_native_ap) {
     const bool violation = tesla_legacy_hybrid_steering_overlay_violation(msg);
     (void)tesla_legacy_capture_hud_tx(msg, violation);
     return false;
@@ -1034,20 +1038,17 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 
   // Main panda steering ownership (bus2 -> car).
   //
-  // XNOR_V176_HYBRID_NATIVE_CARRIER_ONLY:
+  // XNOR_V180_HYBRID_IDLE_NATIVE_CARRIER:
   // - Autopilot Disabled: OP remains the sole direct lateral owner.
-  // - Hybrid, native LKAS inactive: ALWAYS forward genuine Tesla 0x488/0x27D unchanged so the
-  //   complete native pre-engagement/EPAS handshake remains continuous.
-  // - Hybrid, native LKAS active: overlay the safety-validated OP angle onto the genuine Tesla
-  //   0x488 while preserving native cadence/counter; genuine Tesla 0x27D remains authoritative.
+  // - Hybrid: ALWAYS forward the genuine Tesla 0x488/0x27D stream. With a fresh validated OP
+  //   template, merge angle/type onto the genuine 0x488 even when native LKAS is idle, preserving
+  //   Tesla cadence/counter and leaving 0x27D authoritative.
   if ((bus_num == 2) && (addr == 0x488)) {
     if (tesla_legacy_op_autopilot_disabled) {
       return true;  // block stock 0x488: explicit OP-only lateral ownership
     }
     if (tesla_legacy_op_hybrid_native_ap) {
-      if (tesla_legacy_stock_lkas) {
-        (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
-      }
+      (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
       return false;  // always forward the genuine native carrier in Hybrid
     }
     return !tesla_legacy_stock_lkas;
@@ -1076,13 +1077,24 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return false;
   }
 
-  // bus0 -> bus2: preserve vanilla forwarding, but keep the Unity EPAS_eacStatus rewrite
-  // that prevents stock AP from declaring steering temporarily unavailable while OP steers.
+  // bus0 -> bus2: preserve vanilla forwarding, with two tightly-scoped Hybrid/Unity edits.
   if (bus_num == 0) {
     if (tesla_legacy_is_hud_status_msg(addr)) {
       return true;
     }
 
+    // V182 Hybrid co-op hands-on supervision experiment. UI_driverAssistControl (0x3E8) is
+    // authored by the vehicle/UI side and consumed by DAS. DBC bit 14 is
+    // UI_handsOnRequirementDisable (byte1 bit6). Assert it only while Hybrid OP controls are
+    // actively allowed, so a later native-Autosteer engagement is primed not to start Tesla's
+    // continuous hands-on requirement. When OP/Hybrid is inactive the genuine vehicle bit is
+    // forwarded untouched. 0x3E8 has no rolling counter/checksum in this DBC.
+    if ((addr == 0x3E8) && tesla_legacy_op_hybrid_native_ap && controls_allowed) {
+      to_fwd->data[1] |= 0x40U;
+    }
+
+    // Keep the Unity EPAS_eacStatus rewrite that prevents stock AP from declaring steering
+    // temporarily unavailable while OP steers. Hybrid deliberately leaves this rewrite disabled.
     if (addr == 0x370) {
       const uint8_t b6 = to_fwd->data[6];
       const uint8_t eac_status = (b6 >> 5) & 0x07U;

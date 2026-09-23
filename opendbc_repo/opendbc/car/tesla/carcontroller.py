@@ -770,20 +770,20 @@ class CarController(CarControllerBase):
       self._speed_limit_sync(CC, CS, can_sends)
 
     # Normal xnor: OP owns lateral directly only in Autopilot Disabled mode.
-    # Hybrid V176 is deliberately native-carrier-only: OP may remain independently engaged, but
-    # lateral commands are emitted only once genuine Tesla LKAS is active. This preserves the
-    # native 0x488/0x27D pre-engagement handshake continuously and avoids the EPAS inhibit seen
-    # when V174/V175 switched to direct OP 0x488+0x27D about one second after the first stalk pull.
-    native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
-    hybrid_native_overlay = bool(hybrid_native_ap and native_ap_lateral_active)
-    # V177: Tesla's hands-on indication is not itself an overlay veto. In native-carrier Hybrid,
-    # the genuine Tesla 0x488/0x27D lifecycle stays authoritative and OP's upstream lateral/driver
-    # override logic remains responsible for whether CC.latActive is asserted. Preserve the old
-    # human-control suppression for normal/direct OP operation.
-    human_control_blocks_lateral = bool(human_control and not hybrid_native_overlay)
+    # V180 Hybrid uses the genuine AP 0x488 stream as a carrier whether Tesla Autosteer is idle
+    # (controlType=0) or active. OP never becomes a second physical sender: userspace emits a
+    # validated TEMPLATE and panda substitutes it onto the next genuine AP frame, preserving the
+    # AP cadence/counter. This lets Hybrid run OP lateral with native TACC after the first stalk
+    # pull without requiring native Tesla Autosteer to be engaged (and therefore avoids relying on
+    # Tesla's native hands-on supervision lifecycle).
+    hybrid_carrier_overlay = bool(hybrid_native_ap)
+    # Hybrid carrier mode does not add a second Tesla hands-on veto. openpilot's own state machine
+    # remains responsible for CC.latActive/driver override. Preserve the old human-control
+    # suppression for normal/direct OP operation.
+    human_control_blocks_lateral = bool(human_control and not hybrid_carrier_overlay)
     lat_active = (
       bool(CC.latActive) and
-      (autopilot_disabled or hybrid_native_overlay) and
+      (autopilot_disabled or hybrid_carrier_overlay) and
       (not CS.out.cruiseState.standstill) and
       (not human_control_blocks_lateral) and
       (not steer_inhibit)

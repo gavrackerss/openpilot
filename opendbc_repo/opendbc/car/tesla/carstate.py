@@ -668,9 +668,11 @@ class CarState(CarStateBase):
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
     ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
 
-    # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
+    # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
+    # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
+    # disengage path while Hybrid is selected. Normal/non-Hybrid HSO behaviour is unchanged.
     eac_error_code = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacErrorCode"].get(int(epas_status["EPAS3S_eacErrorCode"]), None)
-    if self.enableHSO:
+    if self.hybrid_native_ap or self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
     else:
@@ -1047,9 +1049,12 @@ class CarState(CarStateBase):
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
     ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
 
-    # FSD disengages using union of handsOnLevel (slow overrides) and high angle rate faults (fast overrides, high speed)
+    # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
+    # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
+    # disengage path while Hybrid is selected. This matches the co-op native firmware behaviour
+    # without hiding a genuine EAC inhibit/fault.
     eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
-    if self.enableHSO:
+    if self.hybrid_native_ap or self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
     else:
