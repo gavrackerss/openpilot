@@ -11,6 +11,7 @@
 #define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
 #define XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE 1
 #define XNOR_V193_HYBRID_OP_LONG_SINGLE_OWNER_FROM_STARTUP 1
+#define XNOR_V194_HYBRID_LONG_STATE_COHERENCE 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -27,6 +28,8 @@ static const char *const xnor_v188_marker __attribute__((unused)) =
     "XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE";
 static const char *const xnor_v193_marker __attribute__((unused)) =
     "XNOR_V193_HYBRID_OP_LONG_SINGLE_OWNER_FROM_STARTUP";
+static const char *const xnor_v194_marker __attribute__((unused)) =
+    "XNOR_V194_HYBRID_LONG_STATE_COHERENCE";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -50,15 +53,12 @@ static const char *const xnor_v193_marker __attribute__((unused)) =
 #define TESLA_LEGACY_FLAG_OP_STALK_ENABLE    0x40U
 #define TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB  0x80U
 
-// --- Sub-18 arming experiment: intercept-and-edit stock 0x2B9 in transit -----------------------
-// Rewrite the STOCK 0x2B9 DAS_control's accState CANCEL->ACC_ON as the panda forwards it toward
-// the DI, ONLY while engaged + native-ACC + below the DI's ~18mph arm floor + DI not yet armed.
-// This keeps a SINGLE 0x2B9 on the destination bus (the stock frame, modified) — no second
-// sender, no collision. Compile-time toggle (matches the carcontroller true/false pattern):
-//   1 = rewrite enabled (the experiment), 0 = leave stock 0x2B9 untouched (safe default).
-// CAVEAT: only works if the DI reads the FORWARDED copy that crosses the panda. If the DI reads
-// a native bus-2 copy the panda isn't between, this has no effect — the bench log shows which.
-#define TESLA_LEGACY_ARM_REWRITE_2B9 0
+// V194 Hybrid longitudinal state coherence. OP remains the sole powertrain-command owner on
+// 0x2BF. On the chassis side, retain the genuine AP 0x2B9 carrier and its native cadence,
+// counter, set speed, jerk, and acceleration fields; while Hybrid is engaged, only align a
+// native CANCEL_GENERIC accState with OP's ACC_ON state. This is deliberately not the V188
+// userspace payload overlay that introduced a second/incompatible chassis command source.
+#define XNOR_V194_HYBRID_2B9_STATE_COHERENCE 1
 
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
 // Sets GTW_autopilot (61|2, byte7 bits 4-5) from 0 to 2 as the panda forwards GTW_carConfig,
@@ -243,23 +243,13 @@ static bool tesla_legacy_is_das_control_msg(int addr) {
   return (addr == 0x2B9) || (addr == 0x2BF);
 }
 
-// True while at/below the DI's ~18mph cruise-arm floor (with a small margin). vehicle_speed is
-// m/s * VEHICLE_SPEED_FACTOR(1000). 18.5 mph ~= 8.27 m/s. Only rewrite the arm frame below this;
-// above it the DI arms on its own and we must not perturb the stock frame.
-static bool __attribute__((unused)) tesla_legacy_below_arm_speed(void) {
-  const float v_ms = (float)vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR;
-  return v_ms <= 8.27f;   // ~18.5 mph
-}
-
-// Sub-18 arm experiment: rewrite a STOCK 0x2B9 frame's DAS_accState (12|4 = byte1 high nibble)
-// to ACC_ON(4) in place, then fix the additive checksum. Edits the single forwarded frame — no
-// second sender. Only the accState nibble changes; setSpeed/jerk/accel/counter are left as the
-// stock frame had them (we are not commanding accel here, only asserting the ACC_ON state the DI
-// watches for arming). Returns true if it rewrote.
-static bool __attribute__((unused)) tesla_legacy_rewrite_2b9_accon(CANPacket_t *msg) {
+// Rewrite only CANCEL_GENERIC(0) -> ACC_ON(4) in a genuine forwarded 0x2B9 and repair its
+// additive checksum. Every other native ACC state passes unchanged. This does not command
+// acceleration; OP's 0x2BF remains the only Hybrid longitudinal actuation stream.
+static bool tesla_legacy_rewrite_2b9_accon(CANPacket_t *msg) {
   const int cur = (int)((msg->data[1] >> 4) & 0x0FU);   // DAS_accState
-  if (cur == 4) {
-    return false;   // already ACC_ON, nothing to do
+  if (cur != 0) {
+    return false;
   }
   msg->data[1] = (uint8_t)((msg->data[1] & 0x0FU) | (4U << 4));  // accState = ACC_ON(4)
   tesla_legacy_set_last_byte_checksum(msg);
@@ -1098,6 +1088,24 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
+  // Observe the real bus0 stalk in the forwarding path. 0x45 is intentionally not an RxCheck
+  // liveness input, so rx_hook does not receive it; waiting for userspace's later 0x659 edge left
+  // the first post-MAIN native 0x2B9 unaligned in the faulting trace. Latch MAIN/CANCEL here from
+  // the physical frame, before the next 0x2B9 is forwarded. The 0x659 edge remains a redundant
+  // confirmation and carries the rest of the Hybrid mode flags.
+  if (!tesla_legacy_external_panda && tesla_legacy_op_stalk_enable &&
+      tesla_legacy_op_hybrid_native_ap && (bus_num == 0) && (addr == 0x45)) {
+    const int ap_lever_position = (int)(to_fwd->data[0] & 0x3FU);
+    if (ap_lever_position == 2) {
+      pcm_cruise_check(true);
+    } else if (ap_lever_position == 1) {
+      pcm_cruise_check(false);
+      tesla_legacy_last_hybrid_direct_steer_us = 0U;
+      tesla_legacy_hybrid_eac_recovery = false;
+    } else {
+    }
+  }
+
   // Scrub DAS_control AEB bits on every forwarding path, because AP1/HW2 can expose both
   // 0x2B9 and 0x2BF on both main and external pandas. The latest rlogs showed bad 0x2BF
   // DAS_aebEvent values on src0/src130 while the clean OP 0x2BF was on src132, so only
@@ -1110,14 +1118,13 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     }
   }
 
-#if TESLA_LEGACY_ARM_REWRITE_2B9
-  // Sub-18 arm experiment: as the panda forwards the STOCK 0x2B9 toward the DI, rewrite its
-  // accState CANCEL->ACC_ON, but ONLY while OP is actively controlling longitudinal
-  // (controls_allowed + longitudinal_allowed) AND the vehicle is at/below the DI's ~18mph arm
-  // floor. Above ~18 the DI already arms on its own, so we leave the stock frame alone there.
-  // This keeps ONE 0x2B9 on the wire (the stock frame, edited) — no second sender.
-  if ((addr == 0x2B9) && controls_allowed && get_longitudinal_allowed() &&
-      tesla_legacy_below_arm_speed()) {
+#if XNOR_V194_HYBRID_2B9_STATE_COHERENCE
+  // The physical MAIN stalk is consumed above and sets controls_allowed before the next native
+  // 0x2B9 arrives. Do not gate this state alignment on longitudinal_allowed: the failing
+  // trace has gas override active at MAIN, yet the DI still requires 0x2B9 and OP's 0x2BF to
+  // agree. Limit the edit to main-panda bus2->bus0 Hybrid forwarding and the engaged interval.
+  if (!tesla_legacy_external_panda && tesla_legacy_op_hybrid_native_ap &&
+      (bus_num == 2) && (addr == 0x2B9) && controls_allowed) {
     (void)tesla_legacy_rewrite_2b9_accon(to_fwd);
   }
 #endif

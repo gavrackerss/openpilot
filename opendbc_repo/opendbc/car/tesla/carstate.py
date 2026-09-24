@@ -1188,7 +1188,8 @@ class CarState(CarStateBase):
 
     if self.hybrid_native_ap:
       # Hybrid OP engagement is stalk-latched, not derived from native Autosteer/TACC state.
-      # Tesla remains longitudinal authority; native_lkas_active only selects lateral transport.
+      # OP owns longitudinal actuation through 0x2BF; native_lkas_active only selects the proven
+      # native-carrier lateral transport. Panda aligns only the forwarded 0x2B9 ACC state.
       ret.cruiseState.available = True
       ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)

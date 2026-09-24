@@ -899,9 +899,10 @@ class CarController(CarControllerBase):
     # V188-V191, which introduced OP 0x2BF only after native TACC had already entered ENABLED
     # and caused an immediate cruise PRE_FAULT/FAULT even when the OP accel fields were inactive.
     #
-    # In Hybrid V193, panda blocks native non-AEB 0x2BF from startup. The DI therefore sees this
-    # single uninterrupted OP sender/counter cadence before, during, and after engagement. Hybrid
-    # changes lateral transport only; OP keeps its original full longitudinal payload/counter.
+    # In Hybrid V193+, panda blocks native non-AEB 0x2BF from startup. The DI therefore sees this
+    # single uninterrupted OP sender/counter cadence before, during, and after engagement. OP
+    # keeps its original full longitudinal payload/counter; V194 only aligns the genuine 0x2B9
+    # carrier's ACC state in panda safety when the physical MAIN latch is engaged.
     if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
@@ -925,8 +926,9 @@ class CarController(CarControllerBase):
       )
 
       # Keep the old low-speed DI-arming machinery only for non-Hybrid/native-ACC operation.
-      # V188 proved that putting the 0x2B9 chassis overlay into Hybrid faults the DI, so Hybrid
-      # must leave chassis DAS_control completely native.
+      # V188 proved that putting the userspace/full-payload 0x2B9 overlay into Hybrid faults the
+      # DI, so it remains disabled. V194's safety-only state-nibble alignment is intentionally
+      # separate and retains the genuine carrier, timing, counter, and command fields.
       if (not hybrid_native_ap) and long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
          hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
         if _ARM_ENABLE_CHASSIS:
