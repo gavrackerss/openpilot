@@ -118,13 +118,6 @@ class CarController(CarControllerBase):
     # Autosteer handshake.
     self._hybrid_native_lkas_prev = False
     self._hybrid_eac_recovery = False
-    # V191 Hybrid longitudinal ownership: native Tesla 0x2BF is used only until OP engages.
-    # On the first OP longitudinal frame seed from Tesla's last observed rolling counter, then
-    # OP owns the counter/session until disengage. This preserves a clean handoff without making
-    # Tesla the ongoing longitudinal carrier/authority.
-    self._hybrid_long_counter = 0
-    self._hybrid_long_counter_seeded = False
-
     self._speed_sync_last_frame = -100000
     # Unity-parity pacing for automated cruise stalk presses
     self._human_cruise_action_time_ms = 0
@@ -899,40 +892,25 @@ class CarController(CarControllerBase):
       ):
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # XNOR_V191_HYBRID_FULL_OP_LONGITUDINAL:
-    # Hybrid changes lateral transport/presentation only. Longitudinal returns to the pre-Hybrid
-    # OP ownership model: OP authors the full 0x2BF payload (set speed, ACC state, rolling counter,
-    # jerk and accel) and transmits it directly through the external panda. Tesla's genuine
-    # non-AEB 0x2BF is blocked once the OP stalk latch engages.
+    # XNOR_V192_HYBRID_CONTINUOUS_OP_LONGITUDINAL:
+    # Restore the proven pre-Hybrid longitudinal sender lifecycle.  OP's direct 0x2BF exists
+    # continuously from startup, including while disengaged/inactive, so the DI sees one stable
+    # OP sender/counter cadence *before* MAIN is pulled.  This is the key difference from
+    # V188-V191, which introduced OP 0x2BF only after native TACC had already entered ENABLED
+    # and caused an immediate cruise PRE_FAULT/FAULT even when the OP accel fields were inactive.
     #
-    # The one Hybrid-specific addition is a clean session handoff: the first OP frame is seeded
-    # from the latest genuine Tesla DAS_controlCounter + 1, then OP advances its own counter.
-    # This avoids the V189 live-session counter jump while keeping Tesla out of ongoing control.
-    hybrid_long_session = bool(hybrid_native_ap and op_enabled)
-    if hybrid_native_ap and not hybrid_long_session:
-      self._hybrid_long_counter_seeded = False
-
-    long_tx = (not hybrid_native_ap) or hybrid_long_session
-    if self.CP.openpilotLongitudinalControl and long_tx and (self.frame % 4 == 0):
+    # In Hybrid, native non-AEB 0x2BF is still allowed before OP engagement for Tesla AP/TACC
+    # startup/availability.  Once controls_allowed engages, panda blocks native non-AEB 0x2BF;
+    # the DI simply continues receiving the already-established OP stream.  Hybrid therefore
+    # changes lateral transport only; OP keeps its original full longitudinal payload/counter.
+    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),
         CarControllerParams.ACCEL_MIN,
         CarControllerParams.ACCEL_MAX
       ))
-
-      if hybrid_native_ap:
-        if not bool(self._hybrid_long_counter_seeded):
-          try:
-            stock_counter = int(getattr(CS, "das_control", {}).get("DAS_controlCounter", 0)) & 0x07
-          except Exception:
-            stock_counter = (self.frame // 4) & 0x07
-          self._hybrid_long_counter = (stock_counter + 1) & 0x07
-          self._hybrid_long_counter_seeded = True
-        counter = int(self._hybrid_long_counter) & 0x07
-        self._hybrid_long_counter = (counter + 1) & 0x07
-      else:
-        counter = (self.frame // 4) % 8
+      counter = (self.frame // 4) % 8
 
       native_acc = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
