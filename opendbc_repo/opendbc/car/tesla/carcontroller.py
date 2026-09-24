@@ -892,18 +892,10 @@ class CarController(CarControllerBase):
       ):
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # XNOR_V192_HYBRID_CONTINUOUS_OP_LONGITUDINAL:
-    # Restore the proven pre-Hybrid longitudinal sender lifecycle.  OP's direct 0x2BF exists
-    # continuously from startup, including while disengaged/inactive, so the DI sees one stable
-    # OP sender/counter cadence *before* MAIN is pulled.  This is the key difference from
-    # V188-V191, which introduced OP 0x2BF only after native TACC had already entered ENABLED
-    # and caused an immediate cruise PRE_FAULT/FAULT even when the OP accel fields were inactive.
-    #
-    # In Hybrid V193+, panda blocks native non-AEB 0x2BF from startup. The DI therefore sees this
-    # single uninterrupted OP sender/counter cadence before, during, and after engagement. V195
-    # also consumes physical MAIN/CANCEL before the AP-side native-TACC state machine; Hybrid is
-    # now only the lateral carrier selection and OP retains its pre-Hybrid longitudinal path.
-    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
+    # V196 restores the early Hybrid longitudinal boundary: native Tesla TACC/stop-go owns
+    # Hybrid completely, so OP must not author 0x2BF or a 0x2B9 template in that mode. The later
+    # native-carrier Autosteer, co-op, and EAC-recovery paths above remain unchanged.
+    if (not hybrid_native_ap) and self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),
@@ -912,7 +904,7 @@ class CarController(CarControllerBase):
       ))
       counter = (self.frame // 4) % 8
 
-      native_acc = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      native_acc = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
 
       can_sends.append(
@@ -925,10 +917,7 @@ class CarController(CarControllerBase):
         )
       )
 
-      # Keep the old low-speed DI-arming machinery only for non-Hybrid/native-ACC operation.
-      # V188 proved that putting the userspace/full-payload 0x2B9 overlay into Hybrid faults the
-      # DI, so it remains disabled. V195 also removes the failed V194 state-nibble rewrite; the
-      # genuine 0x2B9 stays byte-for-byte native.
+      # Keep the low-speed DI-arming machinery only for non-Hybrid/native-ACC operation.
       if (not hybrid_native_ap) and long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
          hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
         if _ARM_ENABLE_CHASSIS:
@@ -975,16 +964,14 @@ class CarController(CarControllerBase):
     # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
     # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
     if (
-      _UNITY_2B9_OVERLAY_TEMPLATE
-      and (not hybrid_native_ap)  # V189: Hybrid 0x2B9 overlay caused DI cruise FAULT in V188
+      (not hybrid_native_ap)
+      and _UNITY_2B9_OVERLAY_TEMPLATE
       and self.CP.openpilotLongitudinalControl
       and (self.CP.carFingerprint in LEGACY_CARS)
       and hasattr(self.tesla_can, "create_longitudinal_command_chassis")
       and (self.frame % 2 == 0)
     ):
-      # Hybrid uses the same proven OP stop/go overlay even if TinklaEnableACC is not separately
-      # selected; Hybrid itself now declares OP longitudinal ownership in CarParams.
-      native_acc_overlay = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      native_acc_overlay = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active_overlay = bool(CC.longActive) and ((not autopilot_disabled) or native_acc_overlay)
       if long_active_overlay and native_acc_overlay:
         overlay_state = 13 if CC.cruiseControl.cancel else 4

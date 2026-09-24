@@ -143,22 +143,23 @@ class CarInterface(CarInterfaceBase):
     params = Params()
     hybrid_native_ap = bool(params.get_bool("TinklaHybridNativeAP")) and not bool(params.get_bool("TinklaAutopilotDisabled"))
 
-    # XNOR_V195_HYBRID_CARRIER_ONLY_OP_LONGITUDINAL:
-    # Hybrid now describes lateral transport only. OP owns engagement and longitudinal exactly
-    # like the pre-Hybrid path; native Tesla TACC/PCM state is not an engagement dependency.
-    ret.openpilotLongitudinalControl = True
-    ret.pcmCruise = False
+    # XNOR_V196_RESTORE_NATIVE_TACC_HYBRID_OWNERSHIP:
+    # Restore the early Hybrid ownership boundary without touching the later Autosteer path:
+    # native Tesla TACC is the sole Hybrid longitudinal owner; OP longitudinal remains available
+    # in the established non-Hybrid/Autopilot-Disabled path.
+    ret.openpilotLongitudinalControl = not hybrid_native_ap
+    ret.pcmCruise = hybrid_native_ap
 
-    # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda (including the established
-    # non-Hybrid 0x2B9 path) and an external panda (0x2BF TX); both must authorise OP long.
-    for cfg in ret.safetyConfigs:
-      cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+    if not hybrid_native_ap:
+      # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda (including the established
+      # non-Hybrid 0x2B9 path) and an external panda (0x2BF TX); both must authorise OP long.
+      for cfg in ret.safetyConfigs:
+        cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
-    # OP longitudinal is allowed from standstill. Hybrid still engages from the independent
-    # cruiseEnabled MAIN/CANCEL latch in CarState, so this does not hand engagement back to TACC.
-    ret.minEnableSpeed = -1.
-    ret.vEgoStopping = 0.1
-    ret.vEgoStarting = 0.1
-    ret.stoppingDecelRate = 0.3
+      # OP-owned longitudinal is allowed from standstill outside Hybrid.
+      ret.minEnableSpeed = -1.
+      ret.vEgoStopping = 0.1
+      ret.vEgoStarting = 0.1
+      ret.stoppingDecelRate = 0.3
 
     return ret
