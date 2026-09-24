@@ -112,6 +112,12 @@ class CarController(CarControllerBase):
     self.apply_angle_last = 0.0
     self._lat_active_prev = False
     self._steer_warmup_until_frame = -1
+    # V186 Hybrid EPAS recovery: arm only after genuine native Autosteer was active and
+    # subsequently drops while OP remains engaged. This avoids the V174/V175 regression where
+    # OP sent APS_eacMonitor during normal Hybrid pre-engagement and disturbed Tesla's native
+    # Autosteer handshake.
+    self._hybrid_native_lkas_prev = False
+    self._hybrid_eac_recovery = False
 
     self._speed_sync_last_frame = -100000
     # Unity-parity pacing for automated cruise stalk presses
@@ -777,6 +783,27 @@ class CarController(CarControllerBase):
     # pull without requiring native Tesla Autosteer to be engaged (and therefore avoids relying on
     # Tesla's native hands-on supervision lifecycle).
     hybrid_carrier_overlay = bool(hybrid_native_ap)
+    native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
+
+    # XNOR_V186_HYBRID_EAC_RECOVERY:
+    # The V185 logs prove that after a physical co-op takeover Tesla can drop native Autosteer
+    # (raw 0x488 type 1 -> 0) while OP stays enabled and keeps overlaying type-1 steering onto the
+    # genuine idle 0x488 carrier. EPAS, however, falls EAC_ACTIVE -> EAC_AVAILABLE and therefore
+    # ignores those otherwise-valid OP steering commands. Arm OP's normal APS_eacMonitor/0x27D
+    # handshake ONLY on a genuine native-LKAS falling edge while OP remains enabled. Keep it
+    # active until native Autosteer returns or OP disengages.
+    if hybrid_native_ap:
+      if native_ap_lateral_active:
+        self._hybrid_eac_recovery = False
+      elif bool(self._hybrid_native_lkas_prev) and bool(op_enabled):
+        self._hybrid_eac_recovery = True
+      if not op_enabled:
+        self._hybrid_eac_recovery = False
+      self._hybrid_native_lkas_prev = bool(native_ap_lateral_active)
+    else:
+      self._hybrid_eac_recovery = False
+      self._hybrid_native_lkas_prev = False
+
     # Hybrid carrier mode does not add a second Tesla hands-on veto. openpilot's own state machine
     # remains responsible for CC.latActive/driver override. Preserve the old human-control
     # suppression for normal/direct OP operation.
@@ -851,11 +878,20 @@ class CarController(CarControllerBase):
         )
 
     # EPAS handshake ownership:
-    # Hybrid always leaves the genuine Tesla 0x27D stream authoritative. OP never sends a second
-    # EPAS-allow stream in Hybrid; this is the V176 native-carrier-only stabilization.
-    if (not hybrid_native_ap) and (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
+    # - Normal/direct OP keeps its existing continuous APS_eacMonitor stream.
+    # - Hybrid normally leaves Tesla's native EPAS lifecycle untouched.
+    # - V186 exception: after a *proven* native-Autosteer falling edge while OP remains engaged,
+    #   send OP's normal APS_eacAllow=1 stream until native Autosteer comes back or OP disengages.
+    #   This re-arms EPAS after the V185 co-op drop without perturbing normal Hybrid startup.
+    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
       counter = (self.frame // 2) % 16
-      can_sends.append(self.tesla_can.create_steering_allowed(counter))
+      if (not hybrid_native_ap) or (
+        hybrid_native_ap
+        and bool(self._hybrid_eac_recovery)
+        and bool(op_enabled)
+        and not native_ap_lateral_active
+      ):
+        can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
     # Longitudinal (optional). Hybrid leaves native Tesla TACC/stop-go completely untouched.
     if (not hybrid_native_ap) and self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):

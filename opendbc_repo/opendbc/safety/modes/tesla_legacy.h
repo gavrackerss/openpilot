@@ -108,6 +108,12 @@ static bool tesla_legacy_op_stalk_cancel_edge = false;   // bit0 (edge)
 // stock system detection on AP-side bus (bus2)
 static bool tesla_legacy_stock_lkas = false;  // from 0x488 steerControlType
 static bool tesla_legacy_stock_aeb = false;   // from 0x2BF AEB event
+// V186: after genuine native Autosteer drops while Hybrid OP remains engaged, OP may need to
+// take over the EPAS allow handshake (0x27D) because the V185 logs show EPAS falling from
+// EAC_ACTIVE to EAC_AVAILABLE even though OP's type-1 0x488 overlay continues. This latch is
+// armed ONLY by a real native 0x488 type nonzero -> zero transition and is cleared by native
+// Autosteer returning, OP/Hybrid disengaging, cancel, gear reset, or safety re-init.
+static bool tesla_legacy_hybrid_eac_recovery = false;
 // Timestamp of the last safety-approved direct OP 0x488 in Hybrid fallback mode. While fresh,
 // native idle 0x488/0x27D are blocked so there is exactly one EPAS steering owner.
 static uint32_t tesla_legacy_last_hybrid_direct_steer_us = 0U;
@@ -160,6 +166,7 @@ static void tesla_legacy_reset_after_gear_change(void) {
 
   tesla_legacy_stock_lkas = false;
   tesla_legacy_stock_aeb = false;
+  tesla_legacy_hybrid_eac_recovery = false;
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;
   tesla_legacy_autopark_enabled = false;
@@ -650,7 +657,20 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       // is active (0 -> 1 -> 0 in the V177 rlogs). OP's Hybrid template is TX on bus0, while
       // this detector only consumes genuine RX on bus2, so type1 here cannot be the OP template.
       // Treat any non-zero AP-side steering type as native LKAS active for firmware compatibility.
+      const bool native_lkas_prev = tesla_legacy_stock_lkas;
       tesla_legacy_stock_lkas = steer_control_type != 0;
+
+      // XNOR_V186_HYBRID_EAC_RECOVERY: arm the direct EPAS-allow handshake only after a
+      // *genuine* native Autosteer falling edge while Hybrid OP is still authorised. This avoids
+      // the old V174/V175 behaviour that sent 0x27D during ordinary Hybrid pre-engagement.
+      if (tesla_legacy_op_hybrid_native_ap && controls_allowed && native_lkas_prev &&
+          !tesla_legacy_stock_lkas) {
+        tesla_legacy_hybrid_eac_recovery = true;
+      }
+      if (tesla_legacy_stock_lkas || !controls_allowed || !tesla_legacy_op_hybrid_native_ap) {
+        tesla_legacy_hybrid_eac_recovery = false;
+      }
+
       // Stock LKAS is a disengager only in ordinary native mode. In explicit Autopilot-Disabled
       // mode OP owns the EPAS path, so the still-alive AP ECU may report LKAS state but must not
       // immediately erase the OP stalk latch. Hybrid likewise treats native LKAS as status/
@@ -775,6 +795,9 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     tesla_legacy_autosteer_247_test = (b5 & 0x10U) != 0U;
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
+    if (!tesla_legacy_op_hybrid_native_ap || tesla_legacy_op_stalk_cancel_edge) {
+      tesla_legacy_hybrid_eac_recovery = false;
+    }
     if (tesla_legacy_op_stalk_enable &&
         (tesla_legacy_op_hybrid_native_ap || !tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
       if (tesla_legacy_op_stalk_main_edge) {
@@ -818,9 +841,20 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return false;
   }
 
+  // V186 Hybrid EPAS recovery. 0x27D is normally blocked in Hybrid, but after a proven
+  // native-Autosteer active->idle transition EPAS can remain EAC_AVAILABLE and ignore the valid
+  // OP 0x488 overlay. Permit only APS_eacAllow=1, only on the main panda/bus0, only while OP is
+  // still controls_allowed, native LKAS is idle, and the recovery latch is armed.
+  if (!tesla_legacy_external_panda && (addr == 0x27D) && ((int)msg->bus == 0) &&
+      tesla_legacy_op_hybrid_native_ap) {
+    const uint8_t eac_allow = msg->data[0] & 0x03U;
+    return controls_allowed && tesla_legacy_hybrid_eac_recovery &&
+           !tesla_legacy_stock_lkas && (eac_allow == 1U);
+  }
+
   // On AP hardware cars direct OP actuation remains blocked unless stock AP is explicitly
-  // disabled. Hybrid V176 is native-carrier-only: a valid 0x488 template is consumed above only
-  // while native LKAS is active, and OP never directly transmits 0x488/0x27D in Hybrid.
+  // disabled. Hybrid steering 0x488 remains template-only; 0x27D is blocked except for the
+  // tightly-gated V186 recovery case handled immediately above.
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
     if ((addr == 0x488) || (addr == 0x27D) || tesla_legacy_is_das_control_msg(addr)) {
       return false;
@@ -1343,6 +1377,9 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_autosteer_247_test = false;
   tesla_legacy_pedal_enabled = false;
   tesla_legacy_last_hybrid_direct_steer_us = 0U;
+  tesla_legacy_stock_lkas = false;
+  tesla_legacy_stock_aeb = false;
+  tesla_legacy_hybrid_eac_recovery = false;
 
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;
