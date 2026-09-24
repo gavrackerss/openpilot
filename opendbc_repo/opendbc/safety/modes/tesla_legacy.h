@@ -443,9 +443,56 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
 
       const uint32_t stock_l = tesla_legacy_get_u32_le(&to_fwd->data[0]);
       const uint32_t stock_h = (len > 4) ? tesla_legacy_get_u32_le(&to_fwd->data[4]) : 0U;
+
+      // XNOR_V187_HYBRID_NATIVE_TRACKING_GUARD
+      //
+      // The V186 drive logs exposed a native-DAS actuator-tracking abort.  While native
+      // Autosteer remained engaged, its genuine 0x488 request reached roughly -25..-35 deg
+      // while OP's substituted request/real EPAS angle stayed near -1..-3 deg.  The mismatch
+      // climbed through 15/20/25 deg and peaked around 32 deg immediately before
+      // DAS_autopilotState changed 3 -> 8 (ABORTING).  Normal successful Hybrid operation in
+      // the same capture stayed inside roughly 0..10 deg.
+      //
+      // Keep OP fully authoritative when the native AP carrier is idle (type0), which preserves
+      // the V180 requirement that OP steering works even when Tesla Autosteer is unavailable.
+      // When *genuine* native Autosteer is active (type1), constrain the substituted OP angle to
+      // +/-10 deg around Tesla's own requested angle.  This keeps the native controller's
+      // actuator-tracking residual bounded without creating a second sender or altering cadence.
+      // If DAS has already entered its documented abort states 8/9, fail open immediately to the
+      // genuine Tesla frame so the native abort/recovery logic is not fought by another overlay.
+      const uint8_t stock_steer_type = (uint8_t)((to_fwd->data[2] >> 6) & 0x03U);
+      const bool native_autosteer_active = stock_steer_type != 0U;
+      const bool native_abort_state = (tesla_legacy_ap_status_fwd == 8U) ||
+                                      (tesla_legacy_ap_status_fwd == 9U);
+      if ((addr == 0x488) && native_abort_state) {
+        return false;
+      }
+
+      const int stock_angle_can = (addr == 0x488)
+        ? (((int)(to_fwd->data[0] & 0x7FU) << 8) | (int)to_fwd->data[1]) - 16384
+        : 0;
+
       tesla_legacy_set_u32_le(&to_fwd->data[0], fwd->data_l | (stock_l & fwd->counter_mask_l));
       if (len > 4) {
         tesla_legacy_set_u32_le(&to_fwd->data[4], fwd->data_h | (stock_h & fwd->counter_mask_h));
+      }
+
+      if ((addr == 0x488) && native_autosteer_active) {
+        const int op_angle_can = (((int)(to_fwd->data[0] & 0x7FU) << 8) |
+                                  (int)to_fwd->data[1]) - 16384;
+        const int max_tracking_delta_can = 100;  // 10.0 deg at 0.1 deg/count
+        int guarded_angle_can = op_angle_can;
+        if (guarded_angle_can > (stock_angle_can + max_tracking_delta_can)) {
+          guarded_angle_can = stock_angle_can + max_tracking_delta_can;
+        } else if (guarded_angle_can < (stock_angle_can - max_tracking_delta_can)) {
+          guarded_angle_can = stock_angle_can - max_tracking_delta_can;
+        } else {
+        }
+
+        const uint16_t guarded_raw = (uint16_t)(guarded_angle_can + 16384);
+        to_fwd->data[0] = (uint8_t)((to_fwd->data[0] & 0x80U) |
+                                    ((guarded_raw >> 8) & 0x7FU));
+        to_fwd->data[1] = (uint8_t)(guarded_raw & 0xFFU);
       }
 
       if (addr == 0x389) {
