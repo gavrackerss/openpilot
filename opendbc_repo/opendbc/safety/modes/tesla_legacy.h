@@ -1151,8 +1151,11 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
         // V188: once Hybrid OP longitudinal is active, do not forward Tesla's competing
         // non-AEB 0x2BF command back onto the powertrain bus. Before engagement, preserve the
         // genuine stock heartbeat exactly as before so AP/AEB startup remains healthy.
-        const bool op_long_owns = tesla_legacy_op_hybrid_native_ap && controls_allowed &&
-                                  get_longitudinal_allowed();
+        // V191: Hybrid affects lateral only. As soon as OP's stalk latch makes controls_allowed
+        // true, OP becomes the sole non-AEB 0x2BF owner. CarController starts its direct OP
+        // 0x2BF on the same engagement and seeds its first counter from the last genuine Tesla
+        // frame, so there is no live-session counter discontinuity.
+        const bool op_long_owns = tesla_legacy_op_hybrid_native_ap && controls_allowed;
         return op_long_owns;
       }
       if (!controls_allowed) {

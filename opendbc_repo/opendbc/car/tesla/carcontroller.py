@@ -118,6 +118,12 @@ class CarController(CarControllerBase):
     # Autosteer handshake.
     self._hybrid_native_lkas_prev = False
     self._hybrid_eac_recovery = False
+    # V191 Hybrid longitudinal ownership: native Tesla 0x2BF is used only until OP engages.
+    # On the first OP longitudinal frame seed from Tesla's last observed rolling counter, then
+    # OP owns the counter/session until disengage. This preserves a clean handoff without making
+    # Tesla the ongoing longitudinal carrier/authority.
+    self._hybrid_long_counter = 0
+    self._hybrid_long_counter_seeded = False
 
     self._speed_sync_last_frame = -100000
     # Unity-parity pacing for automated cruise stalk presses
@@ -893,25 +899,41 @@ class CarController(CarControllerBase):
       ):
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE:
-    # OP owns longitudinal in Hybrid again. Native AP remains available for its visuals/lateral
-    # carrier, but accel/decel is authored through the existing validated Tesla DAS_control path.
-    # XNOR_V189_HYBRID_OP_LONG_SINGLE_OWNER:
-    # In Hybrid, do not put an idle OP 0x2BF on the powertrain bus alongside the native AP
-    # heartbeat.  The forward hook hands longitudinal ownership to OP only once CC.longActive is
-    # true; before that, native DAS_control passes untouched.  Non-Hybrid behaviour is unchanged.
-    hybrid_long_tx = (not hybrid_native_ap) or bool(CC.longActive)
-    if self.CP.openpilotLongitudinalControl and hybrid_long_tx and (self.frame % 4 == 0):
+    # XNOR_V191_HYBRID_FULL_OP_LONGITUDINAL:
+    # Hybrid changes lateral transport/presentation only. Longitudinal returns to the pre-Hybrid
+    # OP ownership model: OP authors the full 0x2BF payload (set speed, ACC state, rolling counter,
+    # jerk and accel) and transmits it directly through the external panda. Tesla's genuine
+    # non-AEB 0x2BF is blocked once the OP stalk latch engages.
+    #
+    # The one Hybrid-specific addition is a clean session handoff: the first OP frame is seeded
+    # from the latest genuine Tesla DAS_controlCounter + 1, then OP advances its own counter.
+    # This avoids the V189 live-session counter jump while keeping Tesla out of ongoing control.
+    hybrid_long_session = bool(hybrid_native_ap and op_enabled)
+    if hybrid_native_ap and not hybrid_long_session:
+      self._hybrid_long_counter_seeded = False
+
+    long_tx = (not hybrid_native_ap) or hybrid_long_session
+    if self.CP.openpilotLongitudinalControl and long_tx and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),
         CarControllerParams.ACCEL_MIN,
         CarControllerParams.ACCEL_MAX
       ))
-      counter = (self.frame // 4) % 8
-      # Native-ACC: in autopilot_disabled mode openpilot is normally lateral-only, so
-      # longitudinal is suppressed. When TinklaEnableACC is set, openpilot owns longitudinal
-      # itself (sub-17 TACC), so keep it active in that mode too. Otherwise unchanged.
+
+      if hybrid_native_ap:
+        if not bool(self._hybrid_long_counter_seeded):
+          try:
+            stock_counter = int(getattr(CS, "das_control", {}).get("DAS_controlCounter", 0)) & 0x07
+          except Exception:
+            stock_counter = (self.frame // 4) & 0x07
+          self._hybrid_long_counter = (stock_counter + 1) & 0x07
+          self._hybrid_long_counter_seeded = True
+        counter = int(self._hybrid_long_counter) & 0x07
+        self._hybrid_long_counter = (counter + 1) & 0x07
+      else:
+        counter = (self.frame // 4) % 8
+
       native_acc = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
 
@@ -925,21 +947,11 @@ class CarController(CarControllerBase):
         )
       )
 
-      # --- Low-speed DI arming (0x2B9 chassis DAS_control + virtual stalk) ---
-      # Factory-log analysis: the DI only leaves STANDBY below ~18 mph when it sees
-      # DAS_control = ACC_ON on the CHASSIS bus as 0x2B9 AND a cruise-stalk engage pulse
-      # (STW_ACTN_RQ RWD == BTN_MAIN). openpilot's powertrain-only 0x2BF is honoured for
-      # accel once ENABLED but never arms the DI. Gated behind TinklaEnableACC and only on
-      # LEGACY_CARS (HW2), which have create_longitudinal_command_chassis.
-      # IMPORTANT: only touch the CHASSIS bus when actually engaged and commanding longitudinal
-      # (long_active). An unsolicited DAS_control = ACC_ON on the chassis bus while DISENGAGED
-      # makes the EPAS refuse to activate steering (EAC_INHIBITED -> "Steering Assist Temporarily
-      # Unavailable"), because EPAS and DAS share this bus. The powertrain 0x2BF is safe when idle
-      # because it goes out bus 4 (away from EPAS); the chassis 0x2B9 is NOT — so it must be gated
-      # on long_active, and never sent (not even idle) while disengaged.
-      if long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
+      # Keep the old low-speed DI-arming machinery only for non-Hybrid/native-ACC operation.
+      # V188 proved that putting the 0x2B9 chassis overlay into Hybrid faults the DI, so Hybrid
+      # must leave chassis DAS_control completely native.
+      if (not hybrid_native_ap) and long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
          hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
-        # Chassis 0x2B9 ACC_ON — independently toggleable for bisection (see _ARM_ENABLE_CHASSIS).
         if _ARM_ENABLE_CHASSIS:
           can_sends.append(
             self.tesla_can.create_longitudinal_command_chassis(
@@ -950,25 +962,12 @@ class CarController(CarControllerBase):
               long_active
             )
           )
-        # Virtual RWD (engage) stalk pulse to reproduce the factory arming handshake.
-        #
-        # CRITICAL: this must be a STRICTLY BOUNDED, one-shot-per-engagement burst — NOT a
-        # level-triggered retry. A repeated cruise-stalk stream while steering is engaged
-        # disrupts the EPAS (drops EAC_ACTIVE -> INHIBITED -> "Steering Temporarily Unavailable").
-        # The factory armed with just ~2 RWD pulls, then stopped. So:
-        #   - reset the attempt budget on the RISING EDGE of long_active (a fresh engagement),
-        #   - emit at most _ARM_PULSE_MAX pulses, spaced _ARM_PULSE_GAP frames apart,
-        #   - only within a short window after engage AND only at low speed AND only until the
-        #     DI actually arms, then STOP for the rest of this engagement cycle.
-        # If arming doesn't take, openpilot simply runs long from >=18 mph (proven-working) and
-        # low speed stays manual — never a stalk stream fighting the steering.
         try:
-          _ARM_PULSE_MAX = 3        # total attempts per engagement
-          _ARM_PULSE_GAP = 18       # frames between pulses (~0.18s at 100Hz control)
-          _ARM_WINDOW_FRAMES = 250  # only attempt within ~2.5s of engaging
+          _ARM_PULSE_MAX = 3
+          _ARM_PULSE_GAP = 18
+          _ARM_WINDOW_FRAMES = 250
 
           if not bool(self._arm_long_active_prev):
-            # rising edge of long_active -> new engagement cycle: reset the arming budget
             self._arm_pulse_count = 0
             self._arm_engage_frame = int(self.frame)
           self._arm_long_active_prev = True
@@ -977,21 +976,19 @@ class CarController(CarControllerBase):
           v_ego_mph = float(CS.out.vEgo) * CV.MS_TO_MPH
           within_window = (int(self.frame) - int(self._arm_engage_frame)) <= _ARM_WINDOW_FRAMES
           want_arm = (
-            _ARM_ENABLE_STALK and  # independently toggleable for bisection (see top of file)
+            _ARM_ENABLE_STALK and
             (not di_armed) and (v_ego_mph < 20.0) and within_window and
             (int(self._arm_pulse_count) < _ARM_PULSE_MAX)
           )
           if want_arm and (int(self.frame) - int(self._arm_pulse_last_frame) >= _ARM_PULSE_GAP):
             if self._send_stw(CS, can_sends, BTN_MAIN, bus=int(self._stw_bus(CS))):
-              self._stw_release_frame = int(self.frame) + 1  # IDLE release next frame
+              self._stw_release_frame = int(self.frame) + 1
               self._stw_release_bus = int(self._stw_bus(CS))
               self._arm_pulse_last_frame = int(self.frame)
               self._arm_pulse_count = int(self._arm_pulse_count) + 1
         except Exception:
           pass
       else:
-        # long_active is false (disengaged or non-native): clear the edge latch so the next
-        # engagement starts a fresh, bounded arming attempt. No stalk/chassis TX here.
         self._arm_long_active_prev = False
 
     # Unity-style chassis DAS_control ownership for stop/go. This frame is NOT put on the wire
