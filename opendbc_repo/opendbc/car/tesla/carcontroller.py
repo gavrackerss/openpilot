@@ -896,7 +896,12 @@ class CarController(CarControllerBase):
     # XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE:
     # OP owns longitudinal in Hybrid again. Native AP remains available for its visuals/lateral
     # carrier, but accel/decel is authored through the existing validated Tesla DAS_control path.
-    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
+    # XNOR_V189_HYBRID_OP_LONG_SINGLE_OWNER:
+    # In Hybrid, do not put an idle OP 0x2BF on the powertrain bus alongside the native AP
+    # heartbeat.  The forward hook hands longitudinal ownership to OP only once CC.longActive is
+    # true; before that, native DAS_control passes untouched.  Non-Hybrid behaviour is unchanged.
+    hybrid_long_tx = (not hybrid_native_ap) or bool(CC.longActive)
+    if self.CP.openpilotLongitudinalControl and hybrid_long_tx and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),
@@ -995,6 +1000,7 @@ class CarController(CarControllerBase):
     # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
     if (
       _UNITY_2B9_OVERLAY_TEMPLATE
+      and (not hybrid_native_ap)  # V189: Hybrid 0x2B9 overlay caused DI cruise FAULT in V188
       and self.CP.openpilotLongitudinalControl
       and (self.CP.carFingerprint in LEGACY_CARS)
       and hasattr(self.tesla_can, "create_longitudinal_command_chassis")
