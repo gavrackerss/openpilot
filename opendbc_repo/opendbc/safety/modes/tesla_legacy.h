@@ -10,6 +10,7 @@
 #define XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE 1
 #define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
 #define XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE 1
+#define XNOR_V193_HYBRID_OP_LONG_SINGLE_OWNER_FROM_STARTUP 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -24,6 +25,8 @@ static const char *const xnor_v185_marker __attribute__((unused)) =
     "XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL";
 static const char *const xnor_v188_marker __attribute__((unused)) =
     "XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE";
+static const char *const xnor_v193_marker __attribute__((unused)) =
+    "XNOR_V193_HYBRID_OP_LONG_SINGLE_OWNER_FROM_STARTUP";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -1129,8 +1132,6 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 #endif
 
   // Prevent OP actuation echoes back to AP side.
-  // Keep stock DAS_longControl (0x2BF) flowing before OP is actively controlling;
-  // blocking that startup heartbeat can trigger transient AEB-unavailable on the IC.
   if ((bus_num == 0) && ((addr == 0x488) || (addr == 0x27D))) {
     return true;
   }
@@ -1138,24 +1139,22 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
-  // External panda:
-  // - While OP is not actively controlling, pass stock DAS_longControl through unchanged.
-  //   The IC expects this stock heartbeat during startup/standby; blocking it can latch
-  //   transient "AEB unavailable" warnings before OP has taken ownership.
-  // - While OP is actively controlling, keep the previous Unity-style behavior: block
-  //   stock longControl except real stock AEB events.
+  // External panda longitudinal ownership:
+  // - Non-Hybrid keeps the established forwarding behaviour.
+  // - Hybrid V193 has exactly one non-AEB 0x2BF owner from relay-open: OP. CarController emits
+  //   its inactive/active 25 Hz stream continuously, so forwarding Tesla's simultaneous native
+  //   stream would create the counter sequence N+1,N,N+2,N+1... observed in the V192 log and
+  //   make cruise unavailable before MAIN. Block native non-AEB 0x2BF for the whole Hybrid
+  //   lifecycle; do not wait for controls_allowed.
+  // - Existing stock-AEB filtering/priority policy is unchanged; this ownership change applies
+  //   only after that policy has classified the frame as non-AEB.
   if (tesla_legacy_external_panda) {
     if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
-        // V188: once Hybrid OP longitudinal is active, do not forward Tesla's competing
-        // non-AEB 0x2BF command back onto the powertrain bus. Before engagement, preserve the
-        // genuine stock heartbeat exactly as before so AP/AEB startup remains healthy.
-        // V191: Hybrid affects lateral only. As soon as OP's stalk latch makes controls_allowed
-        // true, OP becomes the sole non-AEB 0x2BF owner. CarController starts its direct OP
-        // 0x2BF on the same engagement and seeds its first counter from the last genuine Tesla
-        // frame, so there is no live-session counter discontinuity.
-        const bool op_long_owns = tesla_legacy_op_hybrid_native_ap && controls_allowed;
+        // V193: the continuous OP stream is already present before engagement, so Hybrid must
+        // suppress the competing native command from startup as well as while engaged.
+        const bool op_long_owns = tesla_legacy_op_hybrid_native_ap;
         return op_long_owns;
       }
       if (!controls_allowed) {

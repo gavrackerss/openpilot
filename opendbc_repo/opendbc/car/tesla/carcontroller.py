@@ -899,9 +899,8 @@ class CarController(CarControllerBase):
     # V188-V191, which introduced OP 0x2BF only after native TACC had already entered ENABLED
     # and caused an immediate cruise PRE_FAULT/FAULT even when the OP accel fields were inactive.
     #
-    # In Hybrid, native non-AEB 0x2BF is still allowed before OP engagement for Tesla AP/TACC
-    # startup/availability.  Once controls_allowed engages, panda blocks native non-AEB 0x2BF;
-    # the DI simply continues receiving the already-established OP stream.  Hybrid therefore
+    # In Hybrid V193, panda blocks native non-AEB 0x2BF from startup. The DI therefore sees this
+    # single uninterrupted OP sender/counter cadence before, during, and after engagement. Hybrid
     # changes lateral transport only; OP keeps its original full longitudinal payload/counter.
     if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
