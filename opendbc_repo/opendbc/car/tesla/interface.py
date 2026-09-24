@@ -143,23 +143,22 @@ class CarInterface(CarInterfaceBase):
     params = Params()
     hybrid_native_ap = bool(params.get_bool("TinklaHybridNativeAP")) and not bool(params.get_bool("TinklaAutopilotDisabled"))
 
-    # XNOR_V196_RESTORE_NATIVE_TACC_HYBRID_OWNERSHIP:
-    # Restore the early Hybrid ownership boundary without touching the later Autosteer path:
-    # native Tesla TACC is the sole Hybrid longitudinal owner; OP longitudinal remains available
-    # in the established non-Hybrid/Autopilot-Disabled path.
-    ret.openpilotLongitudinalControl = not hybrid_native_ap
-    ret.pcmCruise = hybrid_native_ap
+    # XNOR_V197_HYBRID_AP_DISABLED_OP_LONGITUDINAL:
+    # Hybrid selects only the later native-carrier Autosteer architecture. Longitudinal follows
+    # the established Autopilot-Disabled OP path: OP is the non-AEB command owner and physical
+    # MAIN/CANCEL drives OP's independent engagement latch rather than native Tesla TACC.
+    ret.openpilotLongitudinalControl = True
+    ret.pcmCruise = False
 
-    if not hybrid_native_ap:
-      # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda (including the established
-      # non-Hybrid 0x2B9 path) and an external panda (0x2BF TX); both must authorise OP long.
-      for cfg in ret.safetyConfigs:
-        cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+    # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda for the native-carried
+    # 0x2B9 template and an external panda for 0x2BF; both must authorise OP longitudinal.
+    for cfg in ret.safetyConfigs:
+      cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
-      # OP-owned longitudinal is allowed from standstill outside Hybrid.
-      ret.minEnableSpeed = -1.
-      ret.vEgoStopping = 0.1
-      ret.vEgoStarting = 0.1
-      ret.stoppingDecelRate = 0.3
+    # Match the established OP-longitudinal path, including standstill operation.
+    ret.minEnableSpeed = -1.
+    ret.vEgoStopping = 0.1
+    ret.vEgoStarting = 0.1
+    ret.stoppingDecelRate = 0.3
 
     return ret

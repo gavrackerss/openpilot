@@ -9,7 +9,7 @@
 #define XNOR_V183_HYBRID_AP_SUPERVISION_COOP 1
 #define XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE 1
 #define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
-#define XNOR_V196_RESTORE_NATIVE_TACC_HYBRID_OWNERSHIP 1
+#define XNOR_V197_HYBRID_AP_DISABLED_OP_LONGITUDINAL 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -22,8 +22,8 @@ static const char *const xnor_v184_marker __attribute__((unused)) =
     "XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE";
 static const char *const xnor_v185_marker __attribute__((unused)) =
     "XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL";
-static const char *const xnor_v196_marker __attribute__((unused)) =
-    "XNOR_V196_RESTORE_NATIVE_TACC_HYBRID_OWNERSHIP";
+static const char *const xnor_v197_marker __attribute__((unused)) =
+    "XNOR_V197_HYBRID_AP_DISABLED_OP_LONGITUDINAL";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -92,7 +92,7 @@ static int tesla_legacy_das_control_addr = 0x2BF;
 
 // internal OP->safety carrier (0x659) — Unity parity bits (byte5)
 static bool tesla_legacy_op_autopilot_disabled = false;  // bit7
-static bool tesla_legacy_op_hybrid_native_ap = false;     // bit6: native AP visuals/TACC + OP steering substitution
+static bool tesla_legacy_op_hybrid_native_ap = false;     // bit6: native AP lateral carrier/visuals + OP longitudinal
 static bool tesla_legacy_autosteer_247_test = false;      // bit4: force unknown 0x247 AP-state field to native-Autosteer value
 static bool tesla_legacy_pedal_enabled = false;          // 0x659 byte5 bit5 (Unity parity)
 static bool tesla_legacy_op_stalk_main_edge = false;     // bit1 (edge)
@@ -742,8 +742,10 @@ static bool tesla_legacy_chassis_overlay_violation(const CANPacket_t *msg) {
   if (tesla_legacy_external_panda || ((int)msg->addr != 0x2B9) || ((int)msg->bus != 0)) {
     return true;
   }
-  // Hybrid never accepts an OP longitudinal template: native TACC owns both 0x2B9 and 0x2BF.
-  if (!tesla_legacy_op_autopilot_disabled || !controls_allowed || !get_longitudinal_allowed()) {
+  // The established Autopilot-Disabled template path also applies in Hybrid when OP owns long.
+  // The template is still never transmitted directly; it is merged onto a genuine AP carrier.
+  if (!(tesla_legacy_op_autopilot_disabled || tesla_legacy_op_hybrid_native_ap) ||
+      !controls_allowed || !get_longitudinal_allowed()) {
     return true;
   }
   if ((msg->data[2] & 0x03U) != 0U || tesla_legacy_stock_aeb) {
@@ -872,10 +874,13 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
 
   // On AP hardware cars direct OP actuation remains blocked unless stock AP is explicitly
   // disabled. Hybrid steering 0x488 remains template-only; 0x27D is blocked except for the
-  // tightly-gated V186 recovery case handled immediately above. All OP DAS_control is blocked
-  // here in Hybrid so native TACC is the sole longitudinal owner.
+  // tightly-gated V186 recovery case handled immediately above. Hybrid still permits validated
+  // DAS_control because V197 uses the established OP-longitudinal path in that mode.
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
-    if ((addr == 0x488) || (addr == 0x27D) || tesla_legacy_is_das_control_msg(addr)) {
+    if ((addr == 0x488) || (addr == 0x27D)) {
+      return false;
+    }
+    if (tesla_legacy_is_das_control_msg(addr) && !tesla_legacy_op_hybrid_native_ap) {
       return false;
     }
   }
@@ -1056,6 +1061,27 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
+  // V197 keeps physical MAIN/CANCEL as OP engagement inputs but does not expose them to native
+  // TACC. Observe them here (0x45 is intentionally not an RxCheck dependency), update panda's
+  // independent controls latch, and consume only those two lever positions. All other stalk
+  // traffic keeps the existing forwarding behavior.
+  if (!tesla_legacy_external_panda && tesla_legacy_op_stalk_enable &&
+      tesla_legacy_op_hybrid_native_ap && (bus_num == 0) && (addr == 0x45)) {
+    const int ap_lever_position = (int)(to_fwd->data[0] & 0x3FU);
+    if (ap_lever_position == 2) {
+      pcm_cruise_check(true);
+    } else if (ap_lever_position == 1) {
+      pcm_cruise_check(false);
+      tesla_legacy_last_hybrid_direct_steer_us = 0U;
+      tesla_legacy_hybrid_eac_recovery = false;
+    } else {
+    }
+
+    if ((ap_lever_position == 2) || (ap_lever_position == 1)) {
+      return true;
+    }
+  }
+
   // Scrub DAS_control AEB bits on every forwarding path, because AP1/HW2 can expose both
   // 0x2B9 and 0x2BF on both main and external pandas. The latest rlogs showed bad 0x2BF
   // DAS_aebEvent values on src0/src130 while the clean OP 0x2BF was on src132, so only
@@ -1085,14 +1111,14 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
-  // External panda longitudinal ownership. In Hybrid V196, native Tesla TACC is again the sole
-  // owner: CarController sends no OP 0x2BF and the genuine native non-AEB stream passes through.
-  // Non-Hybrid retains the established OP-longitudinal forwarding and AEB priority policy.
+  // External panda longitudinal ownership. Hybrid uses exactly one non-AEB 0x2BF owner from
+  // relay-open: OP's continuous stream. Suppress the competing native non-AEB command for the
+  // whole Hybrid lifecycle; retain the existing stock-AEB classification and priority behavior.
   if (tesla_legacy_external_panda) {
     if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
-        return false;
+        return tesla_legacy_op_hybrid_native_ap;
       }
       if (!controls_allowed) {
         return false;
