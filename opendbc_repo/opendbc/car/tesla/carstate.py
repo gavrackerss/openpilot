@@ -37,6 +37,16 @@ class _TinklaConfig:
 class CarState(CarStateBase):
   DOUBLE_PULL_WINDOW_MS = 750
   XNOR_CRUISE_SET_HOLD_MS = 8_000
+
+  def update_button_enable(self, button_events: list[structs.CarState.ButtonEvent]):
+    # V195: physical MAIN is represented as resumeCruise. In carrier-only Hybrid, PCM cruise is
+    # deliberately not the OP engagement source, so recognise MAIN's falling edge directly.
+    if not self.CP.pcmCruise:
+      for event in button_events:
+        if event.type == ButtonType.resumeCruise and not event.pressed:
+          return True
+    return super().update_button_enable(button_events)
+
   def __init__(self, CP):
     super().__init__(CP)
     self.msg_stw_actn_req = None
@@ -1187,9 +1197,8 @@ class CarState(CarStateBase):
     self._param_frame += 1
 
     if self.hybrid_native_ap:
-      # Hybrid OP engagement is stalk-latched, not derived from native Autosteer/TACC state.
-      # OP owns longitudinal actuation through 0x2BF; native_lkas_active only selects the proven
-      # native-carrier lateral transport. Panda aligns only the forwarded 0x2B9 ACC state.
+      # Hybrid is carrier-only: this latch is independent of native Autosteer/TACC state. OP owns
+      # longitudinal through 0x2BF; native_lkas_active only reports lateral-carrier state.
       ret.cruiseState.available = True
       ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)
@@ -1211,6 +1220,33 @@ class CarState(CarStateBase):
 
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
+
+    # Physical MAIN/CANCEL button events for the pre-Hybrid OP engagement model. MAIN is an OP
+    # enable request on release; CANCEL is published on both edges and also clears cruiseEnabled
+    # above. This is required because V195 correctly sets pcmCruise=False.
+    ret.buttonEvents = []
+    try:
+      prev_button = int(self._prev_cruise_buttons)
+      current_button = int(getattr(self, "cruise_buttons", 0))
+
+      def _button_event(event_type, pressed):
+        event = structs.CarState.ButtonEvent()
+        event.type = event_type
+        event.pressed = pressed
+        return event
+
+      if current_button == int(CruiseButtons.MAIN) and prev_button != int(CruiseButtons.MAIN):
+        ret.buttonEvents.append(_button_event(ButtonType.resumeCruise, True))
+      if prev_button == int(CruiseButtons.MAIN) and current_button != int(CruiseButtons.MAIN):
+        ret.buttonEvents.append(_button_event(ButtonType.resumeCruise, False))
+      if current_button == int(CruiseButtons.CANCEL) and prev_button != int(CruiseButtons.CANCEL):
+        ret.buttonEvents.append(_button_event(ButtonType.cancel, True))
+      if prev_button == int(CruiseButtons.CANCEL) and current_button != int(CruiseButtons.CANCEL):
+        ret.buttonEvents.append(_button_event(ButtonType.cancel, False))
+
+      self._prev_cruise_buttons = current_button
+    except Exception:
+      pass
 
     # Buttons # ToDo: add Gap adjust button
 

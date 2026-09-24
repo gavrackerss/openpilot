@@ -11,7 +11,7 @@
 #define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
 #define XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE 1
 #define XNOR_V193_HYBRID_OP_LONG_SINGLE_OWNER_FROM_STARTUP 1
-#define XNOR_V194_HYBRID_LONG_STATE_COHERENCE 1
+#define XNOR_V195_HYBRID_CARRIER_ONLY_OP_LONGITUDINAL 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -28,8 +28,8 @@ static const char *const xnor_v188_marker __attribute__((unused)) =
     "XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE";
 static const char *const xnor_v193_marker __attribute__((unused)) =
     "XNOR_V193_HYBRID_OP_LONG_SINGLE_OWNER_FROM_STARTUP";
-static const char *const xnor_v194_marker __attribute__((unused)) =
-    "XNOR_V194_HYBRID_LONG_STATE_COHERENCE";
+static const char *const xnor_v195_marker __attribute__((unused)) =
+    "XNOR_V195_HYBRID_CARRIER_ONLY_OP_LONGITUDINAL";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -52,13 +52,6 @@ static const char *const xnor_v194_marker __attribute__((unused)) =
 #define TESLA_LEGACY_FLAG_HW3                0x20U
 #define TESLA_LEGACY_FLAG_OP_STALK_ENABLE    0x40U
 #define TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB  0x80U
-
-// V194 Hybrid longitudinal state coherence. OP remains the sole powertrain-command owner on
-// 0x2BF. On the chassis side, retain the genuine AP 0x2B9 carrier and its native cadence,
-// counter, set speed, jerk, and acceleration fields; while Hybrid is engaged, only align a
-// native CANCEL_GENERIC accState with OP's ACC_ON state. This is deliberately not the V188
-// userspace payload overlay that introduced a second/incompatible chassis command source.
-#define XNOR_V194_HYBRID_2B9_STATE_COHERENCE 1
 
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
 // Sets GTW_autopilot (61|2, byte7 bits 4-5) from 0 to 2 as the panda forwards GTW_carConfig,
@@ -241,19 +234,6 @@ static void tesla_legacy_set_ap_touch_torque(CANPacket_t *msg, bool positive, ui
 
 static bool tesla_legacy_is_das_control_msg(int addr) {
   return (addr == 0x2B9) || (addr == 0x2BF);
-}
-
-// Rewrite only CANCEL_GENERIC(0) -> ACC_ON(4) in a genuine forwarded 0x2B9 and repair its
-// additive checksum. Every other native ACC state passes unchanged. This does not command
-// acceleration; OP's 0x2BF remains the only Hybrid longitudinal actuation stream.
-static bool tesla_legacy_rewrite_2b9_accon(CANPacket_t *msg) {
-  const int cur = (int)((msg->data[1] >> 4) & 0x0FU);   // DAS_accState
-  if (cur != 0) {
-    return false;
-  }
-  msg->data[1] = (uint8_t)((msg->data[1] & 0x0FU) | (4U << 4));  // accState = ACC_ON(4)
-  tesla_legacy_set_last_byte_checksum(msg);
-  return true;
 }
 
 // Config-override experiment: set GTW_autopilot (61|2 @0 big-endian = byte7 bits 4-5) to 2 in a
@@ -1088,11 +1068,11 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
-  // Observe the real bus0 stalk in the forwarding path. 0x45 is intentionally not an RxCheck
-  // liveness input, so rx_hook does not receive it; waiting for userspace's later 0x659 edge left
-  // the first post-MAIN native 0x2B9 unaligned in the faulting trace. Latch MAIN/CANCEL here from
-  // the physical frame, before the next 0x2B9 is forwarded. The 0x659 edge remains a redundant
-  // confirmation and carries the rest of the Hybrid mode flags.
+  // V195 carrier-only Hybrid. Observe the real bus0 stalk in the forwarding path because 0x45 is
+  // intentionally not an RxCheck liveness input. MAIN/CANCEL controls OP's independent latch,
+  // but must not reach the AP-side native-TACC state machine: the V194 trace proves DI FAULT
+  // follows the forwarded MAIN even when 0x2B9 and OP 0x2BF already agree on ACC_ON. The genuine
+  // idle 0x488/0x27D streams remain forwarded below and continue to provide the lateral carrier.
   if (!tesla_legacy_external_panda && tesla_legacy_op_stalk_enable &&
       tesla_legacy_op_hybrid_native_ap && (bus_num == 0) && (addr == 0x45)) {
     const int ap_lever_position = (int)(to_fwd->data[0] & 0x3FU);
@@ -1103,6 +1083,10 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       tesla_legacy_last_hybrid_direct_steer_us = 0U;
       tesla_legacy_hybrid_eac_recovery = false;
     } else {
+    }
+
+    if ((ap_lever_position == 2) || (ap_lever_position == 1)) {
+      return true;  // consume physical MAIN/CANCEL; do not engage/cancel native TACC
     }
   }
 
@@ -1117,17 +1101,6 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       tesla_legacy_scrub_das_control_aeb(to_fwd);
     }
   }
-
-#if XNOR_V194_HYBRID_2B9_STATE_COHERENCE
-  // The physical MAIN stalk is consumed above and sets controls_allowed before the next native
-  // 0x2B9 arrives. Do not gate this state alignment on longitudinal_allowed: the failing
-  // trace has gas override active at MAIN, yet the DI still requires 0x2B9 and OP's 0x2BF to
-  // agree. Limit the edit to main-panda bus2->bus0 Hybrid forwarding and the engaged interval.
-  if (!tesla_legacy_external_panda && tesla_legacy_op_hybrid_native_ap &&
-      (bus_num == 2) && (addr == 0x2B9) && controls_allowed) {
-    (void)tesla_legacy_rewrite_2b9_accon(to_fwd);
-  }
-#endif
 
 #if TESLA_LEGACY_OVERRIDE_GTW_AUTOPILOT
   // Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier 0->2 on every

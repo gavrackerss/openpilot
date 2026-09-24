@@ -143,16 +143,14 @@ class CarInterface(CarInterfaceBase):
     params = Params()
     hybrid_native_ap = bool(params.get_bool("TinklaHybridNativeAP")) and not bool(params.get_bool("TinklaAutopilotDisabled"))
 
-    # XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE:
-    # Hybrid keeps the proven MAIN/CANCEL stalk latch as its engagement source (pcmCruise=True),
-    # but OP is again the longitudinal authority.  Native Tesla TACC may remain present for
-    # presentation/availability, however its non-AEB DAS_control command is blocked while OP is
-    # engaged and OP's validated 0x2BF + carrier-overlaid 0x2B9 own accel/decel.
+    # XNOR_V195_HYBRID_CARRIER_ONLY_OP_LONGITUDINAL:
+    # Hybrid now describes lateral transport only. OP owns engagement and longitudinal exactly
+    # like the pre-Hybrid path; native Tesla TACC/PCM state is not an engagement dependency.
     ret.openpilotLongitudinalControl = True
-    ret.pcmCruise = hybrid_native_ap
+    ret.pcmCruise = False
 
-    # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda (0x2B9 overlay) and an
-    # external panda (0x2BF TX), and both must agree that OP longitudinal is authorised.
+    # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda (including the established
+    # non-Hybrid 0x2B9 path) and an external panda (0x2BF TX); both must authorise OP long.
     for cfg in ret.safetyConfigs:
       cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
