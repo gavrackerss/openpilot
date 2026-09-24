@@ -142,24 +142,25 @@ class CarInterface(CarInterfaceBase):
     ret.alphaLongitudinalAvailable = True
     params = Params()
     hybrid_native_ap = bool(params.get_bool("TinklaHybridNativeAP")) and not bool(params.get_bool("TinklaAutopilotDisabled"))
-    ret.openpilotLongitudinalControl = not hybrid_native_ap
+
+    # XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE:
+    # Hybrid keeps the proven MAIN/CANCEL stalk latch as its engagement source (pcmCruise=True),
+    # but OP is again the longitudinal authority.  Native Tesla TACC may remain present for
+    # presentation/availability, however its non-AEB DAS_control command is blocked while OP is
+    # engaged and OP's validated 0x2BF + carrier-overlaid 0x2B9 own accel/decel.
+    ret.openpilotLongitudinalControl = True
     ret.pcmCruise = hybrid_native_ap
 
-    if not hybrid_native_ap:
-      # Apply LONG_CONTROL to EVERY safety config, not just [0]. On HW2 there are two configs:
-      # [0] = main panda (lateral), [1] = external panda (FLAG_EXTERNAL_PANDA) which is the one
-      # that actually transmits DAS_control (0x2BF). The long tx path lives on the external panda,
-      # so it must carry LONG_CONTROL too or native-ACC longitudinal is silently blocked.
-      for cfg in ret.safetyConfigs:
-        cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+    # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda (0x2B9 overlay) and an
+    # external panda (0x2BF TX), and both must agree that OP longitudinal is authorised.
+    for cfg in ret.safetyConfigs:
+      cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
-      # openpilot is the longitudinal authority (not stock cruise / not pcmCruise), so there is
-      # no low-speed engage floor: allow engaging from a standstill. Set explicitly so a future
-      # base-default change can't reintroduce a 17 mph-style floor on this car.
-      ret.minEnableSpeed = -1.
-
-      ret.vEgoStopping = 0.1
-      ret.vEgoStarting = 0.1
-      ret.stoppingDecelRate = 0.3
+    # OP longitudinal is allowed from standstill. Hybrid still engages from the independent
+    # cruiseEnabled MAIN/CANCEL latch in CarState, so this does not hand engagement back to TACC.
+    ret.minEnableSpeed = -1.
+    ret.vEgoStopping = 0.1
+    ret.vEgoStarting = 0.1
+    ret.stoppingDecelRate = 0.3
 
     return ret

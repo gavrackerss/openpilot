@@ -893,8 +893,10 @@ class CarController(CarControllerBase):
       ):
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # Longitudinal (optional). Hybrid leaves native Tesla TACC/stop-go completely untouched.
-    if (not hybrid_native_ap) and self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
+    # XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE:
+    # OP owns longitudinal in Hybrid again. Native AP remains available for its visuals/lateral
+    # carrier, but accel/decel is authored through the existing validated Tesla DAS_control path.
+    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),
@@ -905,7 +907,7 @@ class CarController(CarControllerBase):
       # Native-ACC: in autopilot_disabled mode openpilot is normally lateral-only, so
       # longitudinal is suppressed. When TinklaEnableACC is set, openpilot owns longitudinal
       # itself (sub-17 TACC), so keep it active in that mode too. Otherwise unchanged.
-      native_acc = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      native_acc = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
 
       can_sends.append(
@@ -992,14 +994,15 @@ class CarController(CarControllerBase):
     # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
     # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
     if (
-      (not hybrid_native_ap)
-      and _UNITY_2B9_OVERLAY_TEMPLATE
+      _UNITY_2B9_OVERLAY_TEMPLATE
       and self.CP.openpilotLongitudinalControl
       and (self.CP.carFingerprint in LEGACY_CARS)
       and hasattr(self.tesla_can, "create_longitudinal_command_chassis")
       and (self.frame % 2 == 0)
     ):
-      native_acc_overlay = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      # Hybrid uses the same proven OP stop/go overlay even if TinklaEnableACC is not separately
+      # selected; Hybrid itself now declares OP longitudinal ownership in CarParams.
+      native_acc_overlay = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active_overlay = bool(CC.longActive) and ((not autopilot_disabled) or native_acc_overlay)
       if long_active_overlay and native_acc_overlay:
         overlay_state = 13 if CC.cruiseControl.cancel else 4

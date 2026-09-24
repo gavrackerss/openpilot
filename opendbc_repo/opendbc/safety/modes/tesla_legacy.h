@@ -9,6 +9,7 @@
 #define XNOR_V183_HYBRID_AP_SUPERVISION_COOP 1
 #define XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE 1
 #define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
+#define XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -21,6 +22,8 @@ static const char *const xnor_v184_marker __attribute__((unused)) =
     "XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE";
 static const char *const xnor_v185_marker __attribute__((unused)) =
     "XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL";
+static const char *const xnor_v188_marker __attribute__((unused)) =
+    "XNOR_V188_HYBRID_OP_LONGITUDINAL_RESTORE";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -772,7 +775,10 @@ static bool tesla_legacy_chassis_overlay_violation(const CANPacket_t *msg) {
   if (tesla_legacy_external_panda || ((int)msg->addr != 0x2B9) || ((int)msg->bus != 0)) {
     return true;
   }
-  if (!tesla_legacy_op_autopilot_disabled || !controls_allowed || !get_longitudinal_allowed()) {
+  // V188: the chassis 0x2B9 template is valid in explicit OP-only mode OR Hybrid when OP owns
+  // longitudinal. It is still never transmitted directly; only merged onto the genuine carrier.
+  if (!(tesla_legacy_op_autopilot_disabled || tesla_legacy_op_hybrid_native_ap) ||
+      !controls_allowed || !get_longitudinal_allowed()) {
     return true;
   }
   if ((msg->data[2] & 0x03U) != 0U || tesla_legacy_stock_aeb) {
@@ -903,7 +909,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   // disabled. Hybrid steering 0x488 remains template-only; 0x27D is blocked except for the
   // tightly-gated V186 recovery case handled immediately above.
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
-    if ((addr == 0x488) || (addr == 0x27D) || tesla_legacy_is_das_control_msg(addr)) {
+    if ((addr == 0x488) || (addr == 0x27D)) {
+      return false;
+    }
+    // V188: Hybrid is still native-AP for presentation/lateral transport, but OP owns
+    // longitudinal, so allow validated DAS_control to reach the per-panda long safety checks.
+    if (tesla_legacy_is_das_control_msg(addr) && !tesla_legacy_op_hybrid_native_ap) {
       return false;
     }
   }
@@ -1137,7 +1148,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
-        return false;
+        // V188: once Hybrid OP longitudinal is active, do not forward Tesla's competing
+        // non-AEB 0x2BF command back onto the powertrain bus. Before engagement, preserve the
+        // genuine stock heartbeat exactly as before so AP/AEB startup remains healthy.
+        const bool op_long_owns = tesla_legacy_op_hybrid_native_ap && controls_allowed &&
+                                  get_longitudinal_allowed();
+        return op_long_owns;
       }
       if (!controls_allowed) {
         return false;
