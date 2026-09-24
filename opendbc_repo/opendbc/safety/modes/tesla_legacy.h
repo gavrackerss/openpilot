@@ -8,6 +8,7 @@
 #define XNOR_V182_HYBRID_COOP_HANDSON_DISABLE 1
 #define XNOR_V183_HYBRID_AP_SUPERVISION_COOP 1
 #define XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE 1
+#define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -18,6 +19,8 @@ static const char *const xnor_v183_marker __attribute__((unused)) =
     "XNOR_V183_HYBRID_AP_SUPERVISION_COOP";
 static const char *const xnor_v184_marker __attribute__((unused)) =
     "XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE";
+static const char *const xnor_v185_marker __attribute__((unused)) =
+    "XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -114,13 +117,26 @@ static bool tesla_legacy_autopilot_enabled = false;  // 0x399
 static bool tesla_legacy_eac_enabled = false;        // 0x219
 static bool tesla_legacy_autopark_enabled = false;   // 0x219
 
-// V184: AP-authored supervision state observed directly in fwd_hook.
+// V184/V185: AP-authored supervision state observed directly in fwd_hook.
 static uint8_t tesla_legacy_ap_status_fwd = 0U;
 static uint8_t tesla_legacy_ap_hands_state_fwd = 0U;
 static uint32_t tesla_legacy_hands_pulse_start_us = 0U;
 static bool tesla_legacy_hands_pulse_positive = false;
-static const uint32_t TESLA_LEGACY_HANDS_PULSE_US = 300000U;
-static const uint32_t TESLA_LEGACY_HANDS_PULSE_RETRY_US = 1000000U;
+
+// V185 reproduces the native state-4 -> state-1 reset sequence seen in the stock captures:
+// first build real-looking torsion with handsOnLevel=0, then transition to handsOnLevel=1.
+// The genuine captures used roughly 1.2-1.4 Nm before the hands edge and 0.8-1.1 Nm after it.
+static const uint32_t TESLA_LEGACY_HANDS_PULSE_PRE_US = 350000U;
+static const uint32_t TESLA_LEGACY_HANDS_PULSE_TOTAL_US = 700000U;
+static const uint32_t TESLA_LEGACY_HANDS_PULSE_RETRY_US = 1500000U;
+
+// Physical co-op takeover recovery. Refresh while EPAS is actively reporting the hands-on
+// takeover, then keep the AP-facing copy benign for a bounded tail while the real EPAS returns
+// from EAC_ERROR_HANDS_ON to EAC_ACTIVE. Clear sooner after several consecutive healthy samples.
+static uint32_t tesla_legacy_coop_takeover_last_us = 0U;
+static uint8_t tesla_legacy_coop_recovery_good_frames = 0U;
+static const uint32_t TESLA_LEGACY_COOP_TAKEOVER_TAIL_US = 1500000U;
+static const uint8_t TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES = 5U;
 
 // hands on wheel (from 0x370)
 static bool tesla_legacy_hands_on = false;
@@ -151,6 +167,8 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_ap_hands_state_fwd = 0U;
   tesla_legacy_hands_pulse_start_us = 0U;
   tesla_legacy_hands_pulse_positive = false;
+  tesla_legacy_coop_takeover_last_us = 0U;
+  tesla_legacy_coop_recovery_good_frames = 0U;
 
   tesla_legacy_op_stalk_main_edge = false;
   tesla_legacy_op_stalk_cancel_edge = false;
@@ -198,10 +216,12 @@ static void tesla_legacy_set_last_byte_checksum(CANPacket_t *msg) {
 }
 
 // EPAS_torsionBarTorque is raw=((byte2 low nibble)<<8)|byte3, scale 0.01, offset -20.5.
-// V184 uses +/-0.80 Nm only on the copy delivered to DAS; the real chassis measurement remains
-// untouched for EPAS, CarState and panda safety.
-static void tesla_legacy_set_ap_touch_torque(CANPacket_t *msg, bool positive) {
-  const uint16_t raw_torque = positive ? 2130U : 1970U;
+// Raw 2050 = 0 Nm. Only the AP-facing copy is modified; chassis EPAS, CarState and panda safety
+// continue to consume the genuine measurement.
+static void tesla_legacy_set_ap_touch_torque(CANPacket_t *msg, bool positive, uint16_t magnitude_raw) {
+  const uint16_t center = 2050U;
+  const uint16_t raw_torque = positive ? (uint16_t)(center + magnitude_raw)
+                                       : (uint16_t)(center - magnitude_raw);
   msg->data[2] = (uint8_t)((msg->data[2] & 0xF0U) | ((raw_torque >> 8) & 0x0FU));
   msg->data[3] = (uint8_t)(raw_torque & 0xFFU);
 }
@@ -1110,10 +1130,18 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       return true;
     }
 
-    // V184 Hybrid AP-side supervision/co-op bridge. V183 proved a permanently asserted
-    // handsOnLevel=1 reaches DAS with a valid checksum, but DAS still escalates its nag. Native
-    // captures show the timer resets after a stock-like hands transition accompanied by real
-    // torsion-bar torque. Reproduce that pattern only on the AP-facing 0x370 copy.
+    // V185 Hybrid AP-side supervision/co-op bridge.
+    //
+    // Two independent behaviours are handled here:
+    //  1) Tesla hands-on supervision: stock captures show a state-4 -> state-1 reset after
+    //     ~300 ms of 1.2-1.4 Nm torsion while handsOnLevel is still 0, followed by a transition
+    //     to handsOnLevel=1 at ~0.8-1.1 Nm. Reproduce that two-stage pattern only on the AP-facing
+    //     copy when DAS requests hands.
+    //  2) Physical co-op steering: V184 masked the initial handsOnLevel=3/EAC_ERROR_HANDS_ON
+    //     burst, but stopped as soon as hands fell back to 1. The logs show the real EPAS then
+    //     spends a recovery tail in EAC_AVAILABLE + EAC_ERROR_HANDS_ON, which reaches DAS and
+    //     makes native Autosteer drop ~40 ms later. Latch the benign AP-facing representation
+    //     across that recovery tail. Any non-hands EPAS error immediately fails open.
     if ((addr == 0x370) && tesla_legacy_op_hybrid_native_ap && controls_allowed) {
       const uint8_t hands_on_level = (to_fwd->data[4] >> 6) & 0x03U;
       const uint8_t eac_status = (to_fwd->data[6] >> 5) & 0x07U;
@@ -1126,26 +1154,85 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       const bool ap_requests_hands = (tesla_legacy_ap_hands_state_fwd >= 2U) &&
                                      (tesla_legacy_ap_hands_state_fwd <= 5U);
       const bool physical_hands_takeover = ap_active && (hands_on_level >= 3U) &&
-                                           ((eac_error == 0U) || (eac_error == 3U)) &&
-                                           ((eac_status == 2U) || (eac_status == 4U) || (eac_status == 6U));
+                                           (eac_error == 3U) &&
+                                           ((eac_status == 2U) || (eac_status == 4U) ||
+                                            (eac_status == 6U));
       const uint32_t now = microsecond_timer_get();
+
+      if (physical_hands_takeover) {
+        // Refresh continuously while the driver is physically overriding the wheel.
+        tesla_legacy_coop_takeover_last_us = now;
+        tesla_legacy_coop_recovery_good_frames = 0U;
+      }
+
+      bool coop_tail_active = ap_active && (tesla_legacy_coop_takeover_last_us != 0U) &&
+                              (get_ts_elapsed(now, tesla_legacy_coop_takeover_last_us) <=
+                               TESLA_LEGACY_COOP_TAKEOVER_TAIL_US);
+
+      if (coop_tail_active) {
+        // Never conceal an unrelated EPAS fault. Error 3 is specifically EAC_ERROR_HANDS_ON.
+        const bool allowed_coop_error = (eac_error == 0U) || (eac_error == 3U);
+        const bool allowed_coop_status = (eac_status == 1U) || (eac_status == 2U) ||
+                                         (eac_status == 4U) || (eac_status == 6U);
+        if (!allowed_coop_error || !allowed_coop_status) {
+          tesla_legacy_coop_takeover_last_us = 0U;
+          tesla_legacy_coop_recovery_good_frames = 0U;
+          coop_tail_active = false;
+        } else {
+          const bool real_epas_healthy = (eac_error == 0U) && (eac_status == 2U) &&
+                                         (hands_on_level <= 1U);
+          if (real_epas_healthy) {
+            if (tesla_legacy_coop_recovery_good_frames < 0xFFU) {
+              tesla_legacy_coop_recovery_good_frames++;
+            }
+            if (tesla_legacy_coop_recovery_good_frames >=
+                TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
+              tesla_legacy_coop_takeover_last_us = 0U;
+              tesla_legacy_coop_recovery_good_frames = 0U;
+              coop_tail_active = false;
+            }
+          } else {
+            tesla_legacy_coop_recovery_good_frames = 0U;
+          }
+        }
+      }
+
       const uint32_t since_pulse = (tesla_legacy_hands_pulse_start_us == 0U) ?
                                    0xFFFFFFFFU : get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
 
-      if (ap_active && ap_requests_hands && (since_pulse >= TESLA_LEGACY_HANDS_PULSE_RETRY_US)) {
+      if (!coop_tail_active && ap_active && ap_requests_hands &&
+          (since_pulse >= TESLA_LEGACY_HANDS_PULSE_RETRY_US)) {
         tesla_legacy_hands_pulse_start_us = now;
         tesla_legacy_hands_pulse_positive = !tesla_legacy_hands_pulse_positive;
       }
 
-      const bool pulse_active = ap_active && (tesla_legacy_hands_pulse_start_us != 0U) &&
-                                (get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us) <= TESLA_LEGACY_HANDS_PULSE_US);
+      const uint32_t pulse_elapsed = (tesla_legacy_hands_pulse_start_us == 0U) ?
+                                     0xFFFFFFFFU : get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
+      const bool pulse_active = !coop_tail_active && ap_active &&
+                                (pulse_elapsed <= TESLA_LEGACY_HANDS_PULSE_TOTAL_US);
 
-      if (physical_hands_takeover || (pulse_active && (eac_error == 0U) && (eac_status == 2U))) {
-        // Present a short, plausible hands-detected/EAC-active sample to DAS only.
+      if (coop_tail_active) {
+        // Co-op: keep DAS seeing a benign detected-hands + EAC_ACTIVE state for the complete
+        // physical takeover and its EPAS recovery tail. Clamp only the AP-facing torque to a
+        // plausible detected-hands value in the real driver's direction.
         to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);  // handsOnLevel = 1
         to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x0FU);            // EAC_ERROR_IDLE
         to_fwd->data[6] = (uint8_t)((to_fwd->data[6] & 0x1FU) | (2U << 5));  // EAC_ACTIVE
-        tesla_legacy_set_ap_touch_torque(to_fwd, physical_hands_takeover ? real_torque_positive : tesla_legacy_hands_pulse_positive);
+        tesla_legacy_set_ap_touch_torque(to_fwd, real_torque_positive, 100U); // +/-1.00 Nm
+        tesla_legacy_set_last_byte_checksum(to_fwd);
+      } else if (pulse_active && (eac_error == 0U) && (eac_status == 2U)) {
+        // Stock-like supervision pulse:
+        //   phase A: torsion builds first while handsOnLevel remains 0 (~1.40 Nm)
+        //   phase B: then handsOnLevel becomes 1 while torsion settles (~1.00 Nm)
+        to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x0FU);            // EAC_ERROR_IDLE
+        to_fwd->data[6] = (uint8_t)((to_fwd->data[6] & 0x1FU) | (2U << 5));  // EAC_ACTIVE
+        if (pulse_elapsed < TESLA_LEGACY_HANDS_PULSE_PRE_US) {
+          to_fwd->data[4] = (uint8_t)(to_fwd->data[4] & 0x3FU);         // handsOnLevel = 0
+          tesla_legacy_set_ap_touch_torque(to_fwd, tesla_legacy_hands_pulse_positive, 140U); // +/-1.40 Nm
+        } else {
+          to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U); // handsOnLevel = 1
+          tesla_legacy_set_ap_touch_torque(to_fwd, tesla_legacy_hands_pulse_positive, 100U); // +/-1.00 Nm
+        }
         tesla_legacy_set_last_byte_checksum(to_fwd);
       }
     } else if (addr == 0x370) {
@@ -1188,6 +1275,8 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
           (tesla_legacy_ap_status_fwd == 4U) ||
           (tesla_legacy_ap_status_fwd == 5U))) {
       tesla_legacy_hands_pulse_start_us = 0U;
+      tesla_legacy_coop_takeover_last_us = 0U;
+      tesla_legacy_coop_recovery_good_frames = 0U;
     }
   }
 
@@ -1262,6 +1351,8 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_ap_hands_state_fwd = 0U;
   tesla_legacy_hands_pulse_start_us = 0U;
   tesla_legacy_hands_pulse_positive = false;
+  tesla_legacy_coop_takeover_last_us = 0U;
+  tesla_legacy_coop_recovery_good_frames = 0U;
 
   tesla_legacy_hands_on = false;
   tesla_legacy_hands_on_last_signal = 0U;
