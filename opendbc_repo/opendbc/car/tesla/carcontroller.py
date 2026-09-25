@@ -695,6 +695,23 @@ class CarController(CarControllerBase):
 
   def _speed_limit_sync(self, CC, CS, can_sends) -> None:
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    hybrid_op_long = bool(self._cached_hybrid_native_ap) and not bool(self._cached_autopilot_disabled) and bool(self.CP.openpilotLongitudinalControl)
+    # Run the original LONG arbitration in Hybrid too; it previously only ran under
+    # AutopilotDisabled. Hybrid feeds its target into card's OP vCruise, not Tesla stalk TX.
+    if hybrid_op_long:
+      base_ms = float(getattr(CS, "_xnor_op_base_set_speed_ms", 0.0) or 0.0)
+      if enabled and base_ms > 0.0:
+        self._long_module.update(CS, enabled=True, frame=int(self.frame), now_ms=int(self._now_ms()),
+                                 op_longitudinal=True, base_set_ms=base_ms)
+      else:
+        # Flush the original LONG lifecycle at its 5 Hz cadence as well as invalidating
+        # the OP target immediately. Without the former, a later engage reuses old caches.
+        self._long_module.op_target_ms = None
+        self._long_module.op_target_mono_ms = 0
+        self._long_module.op_ceiling_ms = None
+        self._long_module.update(CS, enabled=False, frame=int(self.frame), now_ms=int(self._now_ms()),
+                                 op_longitudinal=True)
+      return
     if (not enabled) or (not self._cached_autopilot_disabled):
       self._diag_log(
         f"[XNOR_CC_DIAG] gate=pre enabled={int(enabled)} "
@@ -812,6 +829,10 @@ class CarController(CarControllerBase):
       self._process_hud_status(CC, CS, can_sends, human_control)
       self._process_lane_telemetry(CC, CS, can_sends)
       self._speed_limit_sync(CC, CS, can_sends)
+    else:
+      # Hybrid doesn't transmit LONG/ACC virtual stalk actions, but their target calculation
+      # must run just as it does in AutopilotDisabled mode.
+      self._speed_limit_sync(CC, CS, can_sends)
 
     # Normal xnor: OP owns lateral directly only in Autopilot Disabled mode.
     # V180 Hybrid uses the genuine AP 0x488 stream as a carrier whether Tesla Autosteer is idle
@@ -845,7 +866,10 @@ class CarController(CarControllerBase):
     # Hybrid carrier mode does not add a second Tesla hands-on veto. openpilot's own state machine
     # remains responsible for CC.latActive/driver override. Preserve the old human-control
     # suppression for normal/direct OP operation.
-    human_control_blocks_lateral = bool(human_control and not hybrid_carrier_overlay)
+    # V202: restore original HSO's finite hands-on steering override for Hybrid, too. During
+    # the original numb window there must be no active OP steering template; genuine Tesla
+    # carrier and V199 safety-side neutral/re-arm continue unchanged.
+    human_control_blocks_lateral = bool(human_control)
     lat_active = (
       bool(CC.latActive) and
       (autopilot_disabled or hybrid_carrier_overlay) and
@@ -864,7 +888,7 @@ class CarController(CarControllerBase):
     if self.frame % 2 == 0:
       if (not lat_active) or human_control_blocks_lateral or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
         apply_angle = float(CS.out.steeringAngleDeg)
-      elif hybrid_native_ap and (human_control or self._hybrid_coop_rearm):
+      elif hybrid_native_ap and self._hybrid_coop_rearm:
         # Keep the requested angle pinned to the measured wheel through both the physical override
         # and the EPAS re-arm phase. Panda temporarily converts the car-facing carrier to type 0;
         # once real EPAS health is stable, type 1 resumes from the driver's actual wheel position.
