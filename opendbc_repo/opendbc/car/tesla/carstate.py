@@ -39,14 +39,11 @@ class CarState(CarStateBase):
   XNOR_CRUISE_SET_HOLD_MS = 8_000
 
   def update_button_enable(self, button_events: list[structs.CarState.ButtonEvent]):
-    # Hybrid keeps V198's immediate MAIN engagement even though V199 uses non-PCM cruise semantics
-    # for OP-owned set speed. Other non-PCM modes retain their established falling-edge behaviour.
+    # Non-PCM modes retain their established falling-edge behaviour. Hybrid is deliberately PCM
+    # here and engages through V198's cruiseState rising edge, not through buttonEnable.
     if not self.CP.pcmCruise:
       for event in button_events:
-        if event.type == ButtonType.resumeCruise and (
-          (bool(getattr(self, "hybrid_native_ap", False)) and event.pressed) or
-          (not bool(getattr(self, "hybrid_native_ap", False)) and not event.pressed)
-        ):
+        if event.type == ButtonType.resumeCruise and not event.pressed:
           return True
     return super().update_button_enable(button_events)
 
@@ -1206,12 +1203,12 @@ class CarState(CarStateBase):
     self._param_frame += 1
 
     if self.hybrid_native_ap:
-      # Non-PCM contract: keep the independent MAIN/CANCEL latch internally, but never publish
-      # native cruise as enabled. This prevents cruiseMismatch/continuous cancel while letting
-      # VCruiseHelper own set speed. buttonEnable below is the sole openpilot engagement event.
+      # Exact V198 engagement contract: publish the independent MAIN/CANCEL latch through
+      # cruiseState so the normal PCM rising edge enables selfdrive. V201's VCruiseHelper override
+      # owns only planner set speed; it does not alter this engagement state.
       ret.cruiseState.available = True
-      self.cruiseEnabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
-      ret.cruiseState.enabled = False
+      ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      self.cruiseEnabled = bool(ret.cruiseState.enabled)
     elif self.autopilot_disabled or self.enableACC:
       # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
       # virtual cruise stalk (set just above) with NO stock-cruise dependency and NO 17.1 mph
@@ -1231,8 +1228,8 @@ class CarState(CarStateBase):
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
 
-    # Physical stalk events drive both non-PCM engagement and OP's set-speed helper. MAIN maps to
-    # resumeCruise; the two detents in each speed direction map to accel/decel press/release edges.
+    # Physical stalk events feed OP's set-speed helper. Hybrid MAIN/CANCEL engagement itself stays
+    # on V198's cruiseState edge; the two speed detents map to accel/decel press/release events.
     # Build this as a normal Python list and assign it once complete. ret.buttonEvents is a
     # Cap'n Proto list builder after assignment and does not support append(); V199 assigned []
     # first, then silently discarded every physical stalk event in the broad exception below.

@@ -143,13 +143,13 @@ class CarInterface(CarInterfaceBase):
     params = Params()
     hybrid_native_ap = bool(params.get_bool("TinklaHybridNativeAP")) and not bool(params.get_bool("TinklaAutopilotDisabled"))
 
-    # XNOR_V200_HYBRID_OP_LONGITUDINAL_NO_CARRIER_CUTOVER:
-    # Hybrid changes only the lateral transport/presentation path. Longitudinal follows the normal
-    # openpilot-owned, non-PCM cruise path so VCruiseHelper owns the set speed and physical stalk
-    # up/down events adjust it. MAIN still engages immediately through CarState.buttonEnable and
-    # panda's independent stalk latch; native Tesla cruise state is presentation/status only.
+    # XNOR_V201_V198_ENGAGEMENT_OP_VCRUISE:
+    # Preserve V198's proven Hybrid engagement contract exactly: MAIN raises CarState's independent
+    # cruise latch and the normal PCM rising edge engages selfdrive. selfdrive/car/cruise.py splits
+    # only vCruise ownership onto OP's original non-PCM logic; this flag is not changed to achieve
+    # set-speed ownership and therefore cannot regress the engagement edge again.
     ret.openpilotLongitudinalControl = True
-    ret.pcmCruise = False
+    ret.pcmCruise = hybrid_native_ap
 
     # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda for the established
     # non-Hybrid 0x2B9 path and an external panda that transmits OP's 0x2BF. Hybrid does not
