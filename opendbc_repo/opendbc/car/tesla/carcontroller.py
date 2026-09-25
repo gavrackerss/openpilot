@@ -123,6 +123,10 @@ class CarController(CarControllerBase):
     # latch long enough for panda's state-driven neutral/allow sequence to observe real recovery.
     self._hybrid_coop_rearm = False
     self._hybrid_coop_healthy_frames = 0
+    self._hybrid_coop_last_physical_hands_frame = -1
+    self._hybrid_coop_failed = False
+    self._hybrid_drop_frame = -1
+    self._hybrid_drop_warmup_until_frame = -1
     self._speed_sync_last_frame = -100000
     # Unity-parity pacing for automated cruise stalk presses
     self._human_cruise_action_time_ms = 0
@@ -695,29 +699,22 @@ class CarController(CarControllerBase):
 
   def _speed_limit_sync(self, CC, CS, can_sends) -> None:
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    hybrid_op_long = bool(self._cached_hybrid_native_ap) and not bool(self._cached_autopilot_disabled) and bool(self.CP.openpilotLongitudinalControl)
-    # Run the original LONG arbitration in Hybrid too; it previously only ran under
-    # AutopilotDisabled. Hybrid feeds its target into card's OP vCruise, not Tesla stalk TX.
-    if hybrid_op_long:
-      base_ms = float(getattr(CS, "_xnor_op_base_set_speed_ms", 0.0) or 0.0)
-      if enabled and base_ms > 0.0:
-        self._long_module.update(CS, enabled=True, frame=int(self.frame), now_ms=int(self._now_ms()),
-                                 op_longitudinal=True, base_set_ms=base_ms)
-      else:
-        # Flush the original LONG lifecycle at its 5 Hz cadence as well as invalidating
-        # the OP target immediately. Without the former, a later engage reuses old caches.
-        self._long_module.op_target_ms = None
-        self._long_module.op_target_mono_ms = 0
-        self._long_module.op_ceiling_ms = None
-        self._long_module.update(CS, enabled=False, frame=int(self.frame), now_ms=int(self._now_ms()),
-                                 op_longitudinal=True)
-      return
-    if (not enabled) or (not self._cached_autopilot_disabled):
+    hybrid_original_long = bool(
+      self._cached_hybrid_native_ap and not self._cached_autopilot_disabled
+      and self.CP.openpilotLongitudinalControl
+    )
+    # Restore the original LONG/ACC->virtual-stalk implementation in Hybrid. In
+    # contrast to V202/V203 this is NOT a separate OP target/vCruise bridge.
+    # Keep the original direct-OP gate and all original arbitration and pacing.
+    if hybrid_original_long and not enabled:
+      self._long_module.update(CS, enabled=False, frame=int(self.frame), now_ms=int(self._now_ms()))
+    if (not enabled) or (not (self._cached_autopilot_disabled or hybrid_original_long)):
       self._diag_log(
         f"[XNOR_CC_DIAG] gate=pre enabled={int(enabled)} "
         f"latActive={int(bool(getattr(CC, 'latActive', False)))} "
         f"cc_enabled={int(bool(getattr(CC, 'enabled', False)))} "
-        f"ap_disabled={int(bool(self._cached_autopilot_disabled))}"
+        f"ap_disabled={int(bool(self._cached_autopilot_disabled))} "
+        f"hybrid_original_long={int(hybrid_original_long)}"
       )
       return
 
@@ -806,6 +803,32 @@ class CarController(CarControllerBase):
       self._hybrid_coop_rearm = False
       self._hybrid_coop_healthy_frames = 0
 
+    # V203: a physical co-op release or genuine native LKAS drop that never
+    # reacquires real EPAS authority must not leave the driver with green/blue
+    # steering indications but no actuator. The CarState fault is published on
+    # the next card cycle and triggers the normal OP fault/disengagement path.
+    if hybrid_native_ap and op_enabled:
+      if self._hybrid_coop_rearm and hands_on_level >= 2:
+        self._hybrid_coop_last_physical_hands_frame = int(self.frame)
+      real_epas_healthy = eac_status_raw == 2 and eac_error_raw == 0 and hands_on_level <= 1
+      if (self._hybrid_coop_rearm and not real_epas_healthy and
+          0 <= self._hybrid_coop_last_physical_hands_frame < int(self.frame) - 300 and hands_on_level <= 1):
+        self._hybrid_coop_failed = True
+      if (self._hybrid_drop_frame >= 0 and
+          int(self.frame) - self._hybrid_drop_frame >= 200 and
+          not real_epas_healthy and hands_on_level <= 1):
+        self._hybrid_coop_failed = True
+      if self._hybrid_coop_failed:
+        self._hybrid_coop_rearm = False
+        self._hybrid_eac_recovery = False
+    else:
+      self._hybrid_coop_failed = False
+      self._hybrid_coop_last_physical_hands_frame = -1
+      self._hybrid_drop_frame = -1
+      self._hybrid_drop_warmup_until_frame = -1
+    CS._xnor_hybrid_epas_failed = bool(self._hybrid_coop_failed)
+    steer_inhibit = bool(steer_inhibit or self._hybrid_coop_failed)
+
     if op_enabled and (not bool(self._op_enabled_prev)):
       # Avoid a first-command step when engaging with wheel turned (EPS inhibit prevention).
       try:
@@ -830,8 +853,11 @@ class CarController(CarControllerBase):
       self._process_lane_telemetry(CC, CS, can_sends)
       self._speed_limit_sync(CC, CS, can_sends)
     else:
-      # Hybrid doesn't transmit LONG/ACC virtual stalk actions, but their target calculation
-      # must run just as it does in AutopilotDisabled mode.
+      # Original LONG/ACC stalk pulses must be released on the next frame. Do not
+      # enable the non-Hybrid virtual-turn/HUD path merely to release cruise.
+      if int(self._stw_release_frame) == int(self.frame):
+        self._send_stw(CS, can_sends, BTN_IDLE, bus=int(self._stw_release_bus))
+        self._stw_release_frame = -1
       self._speed_limit_sync(CC, CS, can_sends)
 
     # Normal xnor: OP owns lateral directly only in Autopilot Disabled mode.
@@ -856,8 +882,15 @@ class CarController(CarControllerBase):
         self._hybrid_eac_recovery = False
       elif bool(self._hybrid_native_lkas_prev) and bool(op_enabled):
         self._hybrid_eac_recovery = True
-      if not op_enabled:
+        self._hybrid_drop_frame = int(self.frame)
+        # First fallback commands start at measured wheel angle, not the
+        # potentially distant planner angle. Existing angle-rate limits apply.
+        self._hybrid_drop_warmup_until_frame = int(self.frame) + 25
+        self.apply_angle_last = float(getattr(cs_out, "steeringAngleDeg", 0.0))
+      if not op_enabled or self._hybrid_coop_failed:
         self._hybrid_eac_recovery = False
+      if native_ap_lateral_active and eac_status_raw == 2 and eac_error_raw == 0:
+        self._hybrid_drop_frame = -1
       self._hybrid_native_lkas_prev = bool(native_ap_lateral_active)
     else:
       self._hybrid_eac_recovery = False
@@ -886,7 +919,9 @@ class CarController(CarControllerBase):
 
     # Steering (50Hz)
     if self.frame % 2 == 0:
-      if (not lat_active) or human_control_blocks_lateral or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
+      if ((not lat_active) or human_control_blocks_lateral or steer_inhibit or
+          (int(self.frame) < int(self._steer_warmup_until_frame)) or
+          (hybrid_native_ap and int(self.frame) < int(self._hybrid_drop_warmup_until_frame))):
         apply_angle = float(CS.out.steeringAngleDeg)
       elif hybrid_native_ap and self._hybrid_coop_rearm:
         # Keep the requested angle pinned to the measured wheel through both the physical override
@@ -947,7 +982,7 @@ class CarController(CarControllerBase):
     #   takeover rather than waiting for native 0x488 to fall.
     if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
       counter = (self.frame // 2) % 16
-      hybrid_recovery = bool(op_enabled) and (
+      hybrid_recovery = bool(op_enabled) and not self._hybrid_coop_failed and (
         bool(self._hybrid_coop_rearm) or
         (bool(self._hybrid_eac_recovery) and not native_ap_lateral_active)
       )
@@ -971,13 +1006,12 @@ class CarController(CarControllerBase):
       native_acc = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
 
+      # Original longitudinal encoding: the LONG/ACC virtual stalk adjusts
+      # Tesla's cruise SET separately from OP's acceleration frame. Preserve
+      # the V198/V201 continuous 0x2BF sender and native carrier forwarding.
       can_sends.append(
         self.tesla_can.create_longitudinal_command(
-          state,
-          accel,
-          counter,
-          float(CS.out.vEgo),
-          long_active
+          state, accel, counter, float(CS.out.vEgo), long_active,
         )
       )
 
