@@ -184,8 +184,10 @@ class _CsaCanReader:
 
 
 class LongController:
-  # Keep the original floor outside the existing native-TACC / explicit zero-floor paths.
-  MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
+  # V208: older supplied LONG/ACC were zero-floor across all modes.
+  MIN_CRUISE_SPEED_MS = 0.0
+  # Separate legacy native-TACC handoff threshold from cruise SET-speed floor.
+  _NATIVE_TACC_HANDOFF_REFERENCE_MS = 17.1 * CV.MPH_TO_MS
   _NATIVE_TACC_ENABLE_FILE = "/data/xnor_enable_native_tacc_passthrough"
   _NATIVE_TACC_DISABLE_FILE = "/data/xnor_disable_native_tacc_passthrough"
   _NATIVE_TACC_BOOTSTRAP_ENABLE_FILE = "/data/xnor_enable_native_tacc_setspeed_bootstrap"
@@ -594,6 +596,8 @@ class LongController:
     self.acc = ACCController()
     self._native_tacc_last_button_ms = 0
     self._native_standstill_resume_sent = False
+    self._unconfirmed_set_target_mph = None
+    self._unconfirmed_set_since_ms = 0
     self._native_tacc_last_button = int(CruiseButtons.IDLE)
     self._native_tacc_latched_until_ms = 0
     self._zero_floor_setspeed_active = False
@@ -3323,6 +3327,8 @@ class LongController:
     self._reset_lead_close_cancel()
     self._reset_arbitration_state()
     self._native_standstill_resume_sent = False
+    self._unconfirmed_set_target_mph = None
+    self._unconfirmed_set_since_ms = 0
     self.acc._standstill_lead_prev_drel_m = 0.0
     self.acc._standstill_lead_prev_ms = 0
     self.acc._standstill_lead_opening_rate_ms = 0.0
@@ -3584,6 +3590,19 @@ class LongController:
       and not (map_supports or vision_supports or csa_supports or roundabout_supports)
       and self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms))
     )
+    # V207: these sources can agree because planner consumes map data; two low
+    # estimates are not independent geometric confirmation. In the pre-V205
+    # trace both planner and mapd repeatedly cut SET in a straight 30 mph zone.
+    # Reject only this *cruise-set curve candidate* when fresh, far-ranging CSA
+    # positively contradicts them, measured steering is straight and there is
+    # no actual lead, vision bend, CSA bend or roundabout. Do not change OP's
+    # planner acceleration, native Tesla braking, or real EPAS fault handling.
+    if ((planner_curve_active or map_supports) and near_straight
+        and not bool(live_lead_context)
+        and not (vision_supports or csa_supports or roundabout_supports)
+        and self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms))):
+      return None, "planner_map_unconfirmed[flat_csa_v207]"
+
     if not (planner_curve_active or map_supports or vision_supports or csa_supports or roundabout_supports):
       if (bool(self._lat_limit_saturated) and not isolated_lat_sat_straight
           and float(v_ego_ms) > float(self._LAT_SAT_HARD_MIN_SPEED_MS)):
@@ -3615,12 +3634,16 @@ class LongController:
         abs(float(current_angle_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_STEER_DEG)
         and abs(float(steering_rate_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_RATE_DEG)
       )
-      generic_plan_source = str(self._lp_source or "").lower() in ("", "cruise", "e2e")
-      if (generic_plan_source and road_clear and straightish and not csa_supports
-          and not roundabout_supports and not bool(live_lead_context)):
-        # A saturation flag is not geometric corroboration by itself. This check
-        # requires an independent fresh/far-sighted flat CSA sample.
-        return None, "planner_suggested_unconfirmed[flat_csa]"
+      # V207: no planner source label is itself a road-geometry measurement.
+      # This pre-V205 recording repeatedly labelled a short-horizon slowdown a
+      # curve despite a stable posted limit. When FRESH, far-sighted CSA says
+      # straight, the wheel is straight and no independent geometry or live
+      # lead supports a curve, reject only its CRUISE-SET curve arbitration.
+      # The actual planner acceleration, native AEB and real CSA/map/roundabout
+      # caps remain untouched. Missing/stale/short-range CSA never triggers veto.
+      if (road_clear and straightish and not csa_supports and not roundabout_supports
+          and not bool(live_lead_context)):
+        return None, "planner_suggested_unconfirmed[flat_csa_v207]"
 
     map_only_low = bool(
       map_supports
@@ -4488,8 +4511,8 @@ class LongController:
       return False
 
     stock_enabled = bool(getattr(CS, "stock_cruise_enabled", False) or getattr(CS, "cruiseEnabled", False))
-    low_ego = float(v_ego_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
-    low_set = 0.1 < float(current_set_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
+    low_ego = float(v_ego_ms) < (float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
+    low_set = 0.1 < float(current_set_ms) < (float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_LOW_SPEED_MARGIN_MS))
     recently_latched = self._native_tacc_recently_latched(int(now_ms))
 
     return bool(
@@ -4534,7 +4557,7 @@ class LongController:
     if not stock_enabled and not recently_latched and state not in ("OVERRIDE", "STANDSTILL"):
       return False
 
-    near_floor_upper_ms = float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)
+    near_floor_upper_ms = float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)
     if float(v_ego_ms) < 0.1 or float(v_ego_ms) > float(near_floor_upper_ms):
       return False
 
@@ -4545,7 +4568,7 @@ class LongController:
       and abs(float(self._lead_yrel)) <= float(self._NATIVE_TACC_HANDOFF_MAX_YREL_M)
     )
     planner_lead = bool(self._lp_has_lead and str(self._lp_source or "") in ("cruise", "e2e", "lead0", "lead1"))
-    low_set = 0.1 < float(current_set_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS))
+    low_set = 0.1 < float(current_set_ms) < (float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS))
     planner_decel = bool(
       float(self._lp_a_target) <= float(self._NATIVE_TACC_HANDOFF_DECEL_ATARGET_MS2)
       or (
@@ -4591,12 +4614,12 @@ class LongController:
     if float(v_ego_ms) < 0.5 * CV.MPH_TO_MS:
       return False
 
-    if float(v_ego_ms) > (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)):
+    if float(v_ego_ms) > (float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)):
       return False
 
     # If Tesla already reports a meaningful low set speed, let passthrough/handoff
     # pick it up after the stock state changes.
-    return bool(float(current_set_ms) < (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)))
+    return bool(float(current_set_ms) < (float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS)))
 
   def _native_tacc_wait_for_latch_active(
     self,
@@ -4613,7 +4636,7 @@ class LongController:
     cs_out = getattr(CS, "out", None)
     if bool(getattr(cs_out, "brakePressed", False)) or bool(getattr(cs_out, "gasPressed", False)):
       return False
-    return float(v_ego_ms) <= (float(self.MIN_CRUISE_SPEED_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS))
+    return float(v_ego_ms) <= (float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS))
 
   def _native_tacc_lead_only_src(self, src: str) -> bool:
     src_l = str(src or "").lower()
@@ -4678,6 +4701,31 @@ class LongController:
 
     target_u = max(0.0, float(target_ms) * float(ms_to_u))
     current_u = max(0.0, float(current_set_ms) * float(ms_to_u))
+    # V208: a changing, planner-owned *curve* must be sustained before a virtual
+    # SET detent. The source prefix always contains the posted-limit/roadworks
+    # context, even when the cap is NOT binding; classify by the actual final
+    # arbitration owner instead of searching for these incidental tokens.
+    # Never delay real CSA/roundabout/lead/roadworks limiting, native braking or
+    # OP planner acceleration. This affects only discretionary cruise detents.
+    source = str(src or "").lower()
+    unconfirmed = (
+      "state[curve_" in source and "curve_owner_planner" in source
+      and "curve_owner_csa" not in source and "csa_preferred" not in source
+      and "roundabout" not in source and "planner[lead" not in source
+      and "lead_critical" not in source and "lead_follow" not in source
+      and not ("+roadworks_cap" in source.split("state[curve_", 1)[-1])
+    )
+    if unconfirmed and state != "STANDSTILL" and str(mode_tag) == "native_tacc_passthrough":
+      candidate_mph = float(target_ms) * CV.MS_TO_MPH
+      prior = self._unconfirmed_set_target_mph
+      if prior is None or abs(candidate_mph - float(prior)) > 1.0:
+        self._unconfirmed_set_target_mph = candidate_mph
+        self._unconfirmed_set_since_ms = int(now_ms)
+      if int(now_ms) - self._unconfirmed_set_since_ms < 1000:
+        return LongDecision(None, f"{mode_tag}[unconfirmed_plan_hold] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
+    else:
+      self._unconfirmed_set_target_mph = None
+      self._unconfirmed_set_since_ms = 0
     offset_u = float(target_u) - float(current_u)
 
     if str(mode_tag) == "native_tacc_setspeed_bootstrap":

@@ -60,8 +60,8 @@ class AccDecision:
 
 
 class ACCController:
-  # Retain the original default floor. Zero-speed remains a separately gated mode.
-  MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
+  # V208: retain the uploaded older ACC's zero-floor stop/go behaviour.
+  MIN_CRUISE_SPEED_MS = 0.0
   _ZERO_FLOOR_SET_SPEED_ENABLE_FILE = "/data/xnor_enable_zero_floor_setspeed"
   _ZERO_FLOOR_SET_SPEED_DISABLE_FILE = "/data/xnor_disable_zero_floor_setspeed"
 

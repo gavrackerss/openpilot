@@ -47,8 +47,12 @@ def _extract_lane_change(msg: Any) -> Tuple[Optional[Any], Optional[Any]]:
 
 
 class ALCController:
+  # CarState is 100Hz; modelV2 is ~20Hz. An absent poll isn't a lane-change reset.
+  MODEL_STALE_FRAMES = 40
+
   def __init__(self) -> None:
     self._pre_lc_start_frame = 0
+    self._last_model_frame = -100000
 
   def update(self, enabled: bool, CS: Any, frame: int, plan_msg: Any) -> None:
     if not enabled or not getattr(CS, "enableALC", False):
@@ -59,10 +63,15 @@ class ALCController:
       CS.alca_need_engagement = False
       CS.alca_direction = 0
       self._pre_lc_start_frame = 0
+      self._last_model_frame = -100000
       return
 
     lc_state, lc_dir = _extract_lane_change(plan_msg)
-    if LaneChangeState is None or LaneChangeDirection is None or lc_state is None:
+    if LaneChangeState is not None and LaneChangeDirection is not None and lc_state is not None:
+      self._last_model_frame = int(frame)
+    elif int(frame) - self._last_model_frame <= self.MODEL_STALE_FRAMES:
+      return  # retain the most recent valid OP phase for at most 400ms
+    else:
       CS.alca_pre_engage = False
       CS.alca_engaged = False
       CS.alca_done = False

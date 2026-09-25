@@ -49,6 +49,10 @@ class Controls:
     self.calibrated_pose: Pose | None = None
 
     self.LoC = LongControl(self.CP)
+    # V207: Hybrid's physical brake cancels LONG only. MAIN/RES deliberately
+    # re-arms it; neither physical brake nor its release changes lateral enable.
+    # PCM is the V198 Hybrid engagement presentation contract, not LONG ownership.
+    self._xnor_hybrid_brake_long_cancelled = False
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -95,7 +99,28 @@ class Controls:
     standstill = abs(CS.vEgo) <= max(self.CP.minSteerSpeed, 0.3) or CS.standstill
     CC.latActive = self.sm['selfdriveState'].active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
                    (not standstill or self.CP.steerAtStandstill)
-    CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl
+    # V207 independent Tesla Hybrid longitudinal latch. A physical brake press
+    # must NOT disable CC.enabled/latActive, and releasing the pedal must NOT
+    # silently restart ACC or original LONG's virtual-stalk speed adjustment.
+    hybrid_brake_latch = (self.CP.brand == 'tesla' and bool(self.CP.pcmCruise)
+                          and bool(self.CP.openpilotLongitudinalControl))
+    if hybrid_brake_latch:
+      if not CC.enabled:
+        self._xnor_hybrid_brake_long_cancelled = False
+      elif CS.brakePressed:
+        self._xnor_hybrid_brake_long_cancelled = True
+      elif self._xnor_hybrid_brake_long_cancelled and not CS.regenBraking:
+        # MAIN/RES is emitted from the physical stalk by Tesla CarState.
+        # Automated LONG/ACC speed detents are intentionally not re-arm inputs.
+        if any(be.pressed and be.type == car.CarState.ButtonEvent.Type.resumeCruise
+               for be in CS.buttonEvents):
+          self._xnor_hybrid_brake_long_cancelled = False
+    else:
+      self._xnor_hybrid_brake_long_cancelled = False
+    CC.longActive = (CC.enabled and self.CP.openpilotLongitudinalControl
+                     and not any(e.overrideLongitudinal for e in self.sm['onroadEvents'])
+                     and not CS.brakePressed and not CS.regenBraking
+                     and not self._xnor_hybrid_brake_long_cancelled)
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state

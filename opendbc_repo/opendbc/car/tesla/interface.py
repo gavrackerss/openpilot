@@ -43,12 +43,10 @@ class CarInterface(CarInterfaceBase):
     if not getattr(self.CS, 'enableALC', False):
       return
 
-    try:
-      self.CS.alca_controller.update(bool(getattr(c, 'latActive', False)), self.CS, int(self.CS._param_frame), model_msg)
-    except Exception:
-      return
-
-    if getattr(self.CS, 'alca_need_engagement', False):
+    # ALC is already updated from CarState's model subscriber. An additional
+    # call here (usually with no new model frame) reset its phase every cycle.
+    # OP auto-lane-change operates independently in Hybrid.
+    if (not bool(getattr(self.CS, 'hybrid_native_ap', False))) and getattr(self.CS, 'alca_need_engagement', False):
       ret.steeringPressed = True
       if int(getattr(self.CS, 'alca_direction', 0)) == 1:
         ret.steeringTorque = 2.0

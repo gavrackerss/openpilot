@@ -85,6 +85,7 @@ class CarState(CarStateBase):
     self.hands_on_level = 0
     self.eac_status_raw = 0
     self.eac_error_code_raw = 0
+    self._xnor_hybrid_epas_failed = False
     self.das_control = None
     # Unity parity fields
     self._tinkla = _TinklaConfig()
@@ -148,6 +149,10 @@ class CarState(CarStateBase):
     self.alca_engaged = False
     self.alca_done = False
     self.alca_need_engagement = False
+    self._native_alc_state = 31  # Tesla DBC: ALC_SNA
+    self._native_alc_last_frame = -100000
+    self._native_alc_valid = False
+    self.native_steer_angle_deg = 0.0
 
     self.HSOSteeringPressed = False
     self.human_control = False
@@ -187,20 +192,33 @@ class CarState(CarStateBase):
     self.enableACC = bool(self._tinkla.enable_acc)
 
   def _update_alc_state_from_plan(self, enabled: bool) -> None:
-    if self._alc_sm is None:
-      self.alca_controller.update(False, self, self._param_frame, None)
-      return
+    # CarState is the SOLE ALC state owner. Do not use a second modelV2 socket in
+    # CarInterface: a 100Hz empty poll can otherwise erase a valid 20Hz model phase.
+    plan_msg = None
+    if self._alc_sm is not None:
+      try:
+        self._alc_sm.update(0)
+        for service in ("modelV2", "lateralPlan"):
+          if service in self._alc_plan_services and self._alc_sm.updated[service]:
+            plan_msg = self._alc_sm[service]
+            break
+      except Exception:
+        pass
+    self.alca_controller.update(bool(enabled), self, self._param_frame, plan_msg)
 
+  def _update_native_alc_state(self, cp_ap_pt) -> None:
+    # Diagnostics only, never an OP lane-change or steering-authority gate.
+    # Keep native AP status internal: no new CarState schema fields are required.
     try:
-      self._alc_sm.update(0)
-      plan_msg = None
-      if "modelV2" in self._alc_plan_services:
-        plan_msg = self._alc_sm["modelV2"]
-      if (plan_msg is None) and ("lateralPlan" in self._alc_plan_services):
-        plan_msg = self._alc_sm["lateralPlan"]
-      self.alca_controller.update(bool(enabled), self, self._param_frame, plan_msg)
-    except Exception:
-      self.alca_controller.update(False, self, self._param_frame, None)
+      updates = cp_ap_pt.vl_all["AutopilotStatus"]["DAS_autoLaneChangeState"]
+      if updates:
+        state = int(updates[-1])
+        if 0 <= state <= 31:
+          self._native_alc_state = state
+          self._native_alc_last_frame = int(self._param_frame)
+    except (KeyError, AttributeError, IndexError, TypeError, ValueError):
+      pass
+    self._native_alc_valid = (int(self._param_frame) - self._native_alc_last_frame) <= 50
 
   def _apply_alc_blinkers(self, ret) -> None:
     self.blinker_controller.update_state(self, self._param_frame)
@@ -681,6 +699,10 @@ class CarState(CarStateBase):
     eac_status = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacStatus"].get(int(epas_status["EPAS3S_eacStatus"]), None)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
     ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
+    # V203: userspace detected a timed-out co-op/native-drop re-arm. This must
+    # surface through the existing normal OP steering-fault alert/disengage path.
+    if self.hybrid_native_ap and bool(self._xnor_hybrid_epas_failed):
+      ret.steerFaultTemporary = True
 
     # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
     # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
@@ -1064,6 +1086,10 @@ class CarState(CarStateBase):
     eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
     ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
+    # V203: userspace detected a timed-out co-op/native-drop re-arm. This must
+    # surface through the existing normal OP steering-fault alert/disengage path.
+    if self.hybrid_native_ap and bool(self._xnor_hybrid_epas_failed):
+      ret.steerFaultTemporary = True
 
     # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
     # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
@@ -1085,6 +1111,8 @@ class CarState(CarStateBase):
     # detector remains compatible with firmware variants that may use type 2/3.
     native_steer_type = int(cp_ap_pt.vl["DAS_steeringControl"]["DAS_steeringControlType"])
     native_lkas_active = native_steer_type != 0
+    self.native_steer_angle_deg = float(cp_ap_pt.vl["DAS_steeringControl"]["DAS_steeringAngleRequest"])
+    self._update_native_alc_state(cp_ap_pt)
 
     # Cruise state
     cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
@@ -1336,6 +1364,7 @@ class CarState(CarStateBase):
     steer_checks = [
       ("DAS_steeringControl", 50),
       ("DAS_status2", math.nan),
+      ("AutopilotStatus", math.nan),  # raw 0x399 from AP bus; optional: must not gate canValid
     ]
 
     # Buses are the *rx_src* values we measured.

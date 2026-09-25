@@ -127,6 +127,8 @@ class CarController(CarControllerBase):
     self._hybrid_coop_failed = False
     self._hybrid_drop_frame = -1
     self._hybrid_drop_warmup_until_frame = -1
+    self._hybrid_alc_phase = "IDLE"
+    self._hybrid_alc_last_diag_frame = -100000
     self._speed_sync_last_frame = -100000
     # Unity-parity pacing for automated cruise stalk presses
     self._human_cruise_action_time_ms = 0
@@ -703,11 +705,16 @@ class CarController(CarControllerBase):
       self._cached_hybrid_native_ap and not self._cached_autopilot_disabled
       and self.CP.openpilotLongitudinalControl
     )
-    # Restore the original LONG/ACC->virtual-stalk implementation in Hybrid. In
-    # contrast to V202/V203 this is NOT a separate OP target/vCruise bridge.
-    # Keep the original direct-OP gate and all original arbitration and pacing.
-    if hybrid_original_long and not enabled:
-      self._long_module.update(CS, enabled=False, frame=int(self.frame), now_ms=int(self._now_ms()))
+    # V207: longitudinal permission is CC.longActive, NOT CC.enabled/latActive.
+    # Physical brake cancels LONG while the existing Hybrid lateral stays latched.
+    # Clear original LONG's pending arbitration when a brake or an explicit
+    # long-cancel is in effect. The pulse release is handled in update() first.
+    if hybrid_original_long:
+      enabled = (enabled and bool(getattr(CC, "longActive", False))
+                 and not bool(getattr(CS.out, "brakePressed", False))
+                 and not bool(getattr(CS.out, "regenBraking", False)))
+      if not enabled:
+        self._long_module.update(CS, enabled=False, frame=int(self.frame), now_ms=int(self._now_ms()))
     if (not enabled) or (not (self._cached_autopilot_disabled or hybrid_original_long)):
       self._diag_log(
         f"[XNOR_CC_DIAG] gate=pre enabled={int(enabled)} "
@@ -819,10 +826,18 @@ class CarController(CarControllerBase):
           not real_epas_healthy and hands_on_level <= 1):
         self._hybrid_coop_failed = True
       if self._hybrid_coop_failed:
+        if not getattr(self, '_hybrid_coop_failure_reported', False):
+          cloudlog.error(
+            f'[XNOR_COOP_FAULT] real EPAS did not acknowledge rearm: '
+            f'status={eac_status_raw} error={eac_error_raw} hands={hands_on_level}; '
+            'steering inhibited; driver must take over, safely re-engage after fault clears'
+          )
+          self._hybrid_coop_failure_reported = True
         self._hybrid_coop_rearm = False
         self._hybrid_eac_recovery = False
     else:
       self._hybrid_coop_failed = False
+      self._hybrid_coop_failure_reported = False
       self._hybrid_coop_last_physical_hands_frame = -1
       self._hybrid_drop_frame = -1
       self._hybrid_drop_warmup_until_frame = -1
@@ -870,6 +885,39 @@ class CarController(CarControllerBase):
     hybrid_carrier_overlay = bool(hybrid_native_ap)
     native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
 
+    # V208: native ALC is diagnostic only: OP initiates and finishes its own
+    # lane-change trajectory with the existing 0x488 carrier. Never mistake
+    # a model lane-change phase for accepted EPAS authority; the 10-degree guard
+    # remains unchanged and may constrain a mismatched native path.
+    if hybrid_native_ap:
+      direction = int(getattr(CS, "alca_direction", 0) or 0)
+      native_state = int(getattr(CS, "_native_alc_state", 31))
+      native_valid = bool(getattr(CS, "_native_alc_valid", False))
+      native_match = (native_valid and native_ap_lateral_active and
+                      eac_status_raw == 2 and eac_error_raw == 0 and
+                      native_state == (9 if direction == 1 else 10 if direction == 2 else -1))
+      if bool(getattr(CS, "alca_engaged", False)):
+        alc_phase = "NATIVE_MATCH" if native_match else "OP_INDEPENDENT"
+      elif bool(getattr(CS, "alca_pre_engage", False)):
+        alc_phase = "PREPARE_OP"
+      else:
+        alc_phase = "IDLE"
+      if alc_phase != self._hybrid_alc_phase or (
+          alc_phase != "IDLE" and int(self.frame) - self._hybrid_alc_last_diag_frame >= 100):
+        native_angle = float(getattr(CS, "native_steer_angle_deg", 0.0))
+        op_angle = float(actuators.steeringAngleDeg)
+        cloudlog.info(
+          f"[XNOR_HYBRID_ALC] phase={alc_phase} op_dir={direction} "
+          f"native_state={native_state} valid={int(native_valid)} "
+          f"native_lkas={int(native_ap_lateral_active)} "
+          f"native_angle={native_angle:.1f} op_angle={op_angle:.1f} "
+          f"tracking_delta={abs(op_angle-native_angle):.1f} "
+          f"guard_risk={int(native_ap_lateral_active and abs(op_angle-native_angle)>10.0)} "
+          f"eac={int(eac_status_raw)} error={int(eac_error_raw)}"
+        )
+        self._hybrid_alc_last_diag_frame = int(self.frame)
+      self._hybrid_alc_phase = alc_phase
+
     # XNOR_V186_HYBRID_EAC_RECOVERY:
     # The V185 logs prove that after a physical co-op takeover Tesla can drop native Autosteer
     # (raw 0x488 type 1 -> 0) while OP stays enabled and keeps overlaying type-1 steering onto the
@@ -887,6 +935,11 @@ class CarController(CarControllerBase):
         # potentially distant planner angle. Existing angle-rate limits apply.
         self._hybrid_drop_warmup_until_frame = int(self.frame) + 25
         self.apply_angle_last = float(getattr(cs_out, "steeringAngleDeg", 0.0))
+        cloudlog.warning(
+          f"[XNOR_HYBRID_FALLBACK] native_drop op={int(op_enabled)} "
+          f"real_eac={eac_status_raw} error={eac_error_raw} hands={hands_on_level} "
+          f"path={'OP_CARRIER_ACTIVE' if (eac_status_raw == 2 and eac_error_raw == 0 and hands_on_level <= 1) else 'EPAS_REARM_PENDING'}"
+        )
       if not op_enabled or self._hybrid_coop_failed:
         self._hybrid_eac_recovery = False
       if native_ap_lateral_active and eac_status_raw == 2 and eac_error_raw == 0:
