@@ -11,6 +11,7 @@
 #define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
 #define XNOR_V198_HYBRID_PRE_ROLLBACK_OP_LONGITUDINAL 1
 #define XNOR_V199_HYBRID_OP_LONG_SINGLE_OWNER_COOP_REARM 1
+#define XNOR_V200_HYBRID_OP_LONG_NO_CARRIER_CUTOVER 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -27,6 +28,8 @@ static const char *const xnor_v198_marker __attribute__((unused)) =
     "XNOR_V198_HYBRID_PRE_ROLLBACK_OP_LONGITUDINAL";
 static const char *const xnor_v199_marker __attribute__((unused)) =
     "XNOR_V199_HYBRID_OP_LONG_SINGLE_OWNER_COOP_REARM";
+static const char *const xnor_v200_marker __attribute__((unused)) =
+    "XNOR_V200_HYBRID_OP_LONG_NO_CARRIER_CUTOVER";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -1106,18 +1109,17 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
-  // V199 Hybrid longitudinal ownership cutover:
-  // - Before MAIN, preserve V198's proven relay-open/native forwarding lifecycle so Tesla cruise
-  //   remains available and no startup fault is introduced.
-  // - After controls_allowed, block only native non-AEB 0x2BF. OP's 25 Hz state-4 stream has
-  //   already been present continuously since startup, so engagement changes ownership without
-  //   introducing a new sender/counter or a 0x2B9 prime.
-  // - Native AEB retains the existing priority policy below. Non-Hybrid forwarding is unchanged.
+  // V200 restores V198's proven relay-open/native forwarding lifecycle without an engagement
+  // cutover. V199 keyed native non-AEB 0x2BF suppression to panda controlsAllowed; the drive log
+  // proves that latch rises from the physical MAIN stalk before selfdrive/longActive, removing the
+  // genuine carrier while there is no active OP controller and immediately disabling cruise.
+  // Keep native non-AEB traffic forwarded continuously. The continuous OP 25 Hz stream and the
+  // native carrier coexist exactly as they did in the fault-free V198 engagement.
   if (tesla_legacy_external_panda) {
     if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
-        return tesla_legacy_op_hybrid_native_ap && controls_allowed;
+        return false;
       }
       if (!controls_allowed) {
         return false;

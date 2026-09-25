@@ -930,10 +930,11 @@ class CarController(CarControllerBase):
       if (not hybrid_native_ap) or hybrid_recovery:
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # V199 retains V198's fault-free continuous sender lifecycle. OP authors powertrain 0x2BF at
-    # 25 Hz from startup with ACC_ON(4) while inactive; only requested accel/set-speed activity
-    # changes at engagement. Panda leaves native traffic untouched before MAIN, then suppresses
-    # native non-AEB 0x2BF so this already-established OP stream becomes the single owner.
+    # V200 retains V198's fault-free continuous sender and forwarding lifecycle exactly. OP
+    # authors powertrain 0x2BF at 25 Hz from startup with ACC_ON(4) while inactive; only requested
+    # accel/set-speed activity changes at engagement. The genuine native carrier is never cut at
+    # MAIN: V199 proved that a controlsAllowed-keyed forwarding cutover immediately disables
+    # cruise before selfdrive has even engaged.
     if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(

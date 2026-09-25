@@ -143,7 +143,7 @@ class CarInterface(CarInterfaceBase):
     params = Params()
     hybrid_native_ap = bool(params.get_bool("TinklaHybridNativeAP")) and not bool(params.get_bool("TinklaAutopilotDisabled"))
 
-    # XNOR_V199_HYBRID_OP_LONGITUDINAL_SINGLE_OWNER:
+    # XNOR_V200_HYBRID_OP_LONGITUDINAL_NO_CARRIER_CUTOVER:
     # Hybrid changes only the lateral transport/presentation path. Longitudinal follows the normal
     # openpilot-owned, non-PCM cruise path so VCruiseHelper owns the set speed and physical stalk
     # up/down events adjust it. MAIN still engages immediately through CarState.buttonEnable and

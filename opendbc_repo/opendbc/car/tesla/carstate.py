@@ -1233,7 +1233,10 @@ class CarState(CarStateBase):
 
     # Physical stalk events drive both non-PCM engagement and OP's set-speed helper. MAIN maps to
     # resumeCruise; the two detents in each speed direction map to accel/decel press/release edges.
-    ret.buttonEvents = []
+    # Build this as a normal Python list and assign it once complete. ret.buttonEvents is a
+    # Cap'n Proto list builder after assignment and does not support append(); V199 assigned []
+    # first, then silently discarded every physical stalk event in the broad exception below.
+    button_events = []
     try:
       prev_button = int(self._prev_cruise_buttons)
       current_button = int(getattr(self, "cruise_buttons", 0))
@@ -1245,25 +1248,26 @@ class CarState(CarStateBase):
         return event
 
       if current_button == int(CruiseButtons.MAIN) and prev_button != int(CruiseButtons.MAIN):
-        ret.buttonEvents.append(_button_event(ButtonType.resumeCruise, True))
+        button_events.append(_button_event(ButtonType.resumeCruise, True))
       if prev_button == int(CruiseButtons.MAIN) and current_button != int(CruiseButtons.MAIN):
-        ret.buttonEvents.append(_button_event(ButtonType.resumeCruise, False))
+        button_events.append(_button_event(ButtonType.resumeCruise, False))
       if current_button == int(CruiseButtons.CANCEL) and prev_button != int(CruiseButtons.CANCEL):
-        ret.buttonEvents.append(_button_event(ButtonType.cancel, True))
+        button_events.append(_button_event(ButtonType.cancel, True))
       if prev_button == int(CruiseButtons.CANCEL) and current_button != int(CruiseButtons.CANCEL):
-        ret.buttonEvents.append(_button_event(ButtonType.cancel, False))
+        button_events.append(_button_event(ButtonType.cancel, False))
       if CruiseButtons.is_accel(current_button) and not CruiseButtons.is_accel(prev_button):
-        ret.buttonEvents.append(_button_event(ButtonType.accelCruise, True))
+        button_events.append(_button_event(ButtonType.accelCruise, True))
       if CruiseButtons.is_accel(prev_button) and not CruiseButtons.is_accel(current_button):
-        ret.buttonEvents.append(_button_event(ButtonType.accelCruise, False))
+        button_events.append(_button_event(ButtonType.accelCruise, False))
       if CruiseButtons.is_decel(current_button) and not CruiseButtons.is_decel(prev_button):
-        ret.buttonEvents.append(_button_event(ButtonType.decelCruise, True))
+        button_events.append(_button_event(ButtonType.decelCruise, True))
       if CruiseButtons.is_decel(prev_button) and not CruiseButtons.is_decel(current_button):
-        ret.buttonEvents.append(_button_event(ButtonType.decelCruise, False))
+        button_events.append(_button_event(ButtonType.decelCruise, False))
 
       self._prev_cruise_buttons = current_button
     except Exception:
       pass
+    ret.buttonEvents = button_events
 
     # Buttons # ToDo: add Gap adjust button
 
