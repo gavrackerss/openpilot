@@ -118,6 +118,11 @@ class CarController(CarControllerBase):
     # Autosteer handshake.
     self._hybrid_native_lkas_prev = False
     self._hybrid_eac_recovery = False
+    # V199 co-op re-arm is independent of native-LKAS state. A physical hands-on takeover can
+    # leave the real EPAS in EAC_AVAILABLE/HANDS_ON before native 0x488 falls. Hold a controller
+    # latch long enough for panda's state-driven neutral/allow sequence to observe real recovery.
+    self._hybrid_coop_rearm = False
+    self._hybrid_coop_healthy_frames = 0
     self._speed_sync_last_frame = -100000
     # Unity-parity pacing for automated cruise stalk presses
     self._human_cruise_action_time_ms = 0
@@ -750,6 +755,40 @@ class CarController(CarControllerBase):
     )
 
     op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+
+    # XNOR_V199_HYBRID_COOP_STATE_DRIVEN_REARM:
+    # Arm from the real EPAS hands/error/status tuple, not HSO's 1.5 s presentation timer. Panda
+    # owns the actual neutral-carrier gate and clears it after five real 0x370 frames; userspace
+    # waits 25 control frames (~250 ms) before stopping 0x27D so it cannot clear first.
+    eac_status_raw = int(getattr(CS, "eac_status_raw", -1))
+    eac_error_raw = int(getattr(CS, "eac_error_code_raw", -1))
+    hands_on_level = int(getattr(CS, "hands_on_level", 0))
+    physical_coop_takeover = (
+      hands_on_level >= 3 and eac_error_raw == 3 and eac_status_raw in (2, 4, 6)
+    )
+    if hybrid_native_ap and op_enabled:
+      if physical_coop_takeover:
+        self._hybrid_coop_rearm = True
+        self._hybrid_coop_healthy_frames = 0
+
+      if self._hybrid_coop_rearm:
+        allowed_coop_state = eac_error_raw in (0, 3) and eac_status_raw in (1, 2, 4, 6)
+        real_epas_healthy = eac_error_raw == 0 and eac_status_raw == 2 and hands_on_level <= 1
+        if not allowed_coop_state:
+          # Never conceal or work around a non-hands EPAS error.
+          self._hybrid_coop_rearm = False
+          self._hybrid_coop_healthy_frames = 0
+        elif real_epas_healthy:
+          self._hybrid_coop_healthy_frames += 1
+          if self._hybrid_coop_healthy_frames >= 25:
+            self._hybrid_coop_rearm = False
+            self._hybrid_coop_healthy_frames = 0
+        else:
+          self._hybrid_coop_healthy_frames = 0
+    else:
+      self._hybrid_coop_rearm = False
+      self._hybrid_coop_healthy_frames = 0
+
     if op_enabled and (not bool(self._op_enabled_prev)):
       # Avoid a first-command step when engaging with wheel turned (EPS inhibit prevention).
       try:
@@ -825,11 +864,10 @@ class CarController(CarControllerBase):
     if self.frame % 2 == 0:
       if (not lat_active) or human_control_blocks_lateral or steer_inhibit or (int(self.frame) < int(self._steer_warmup_until_frame)):
         apply_angle = float(CS.out.steeringAngleDeg)
-      elif hybrid_native_ap and human_control:
-        # V183 Hybrid co-op: keep OP logically/laterally active, but yield instantaneous wheel
-        # authority to the driver.  Continue sending a type-1 template at the measured wheel angle
-        # so EPAS sees no fighting angle request.  apply_angle_last follows the driver's motion,
-        # therefore OP resumes smoothly from the actual wheel position when the override clears.
+      elif hybrid_native_ap and (human_control or self._hybrid_coop_rearm):
+        # Keep the requested angle pinned to the measured wheel through both the physical override
+        # and the EPAS re-arm phase. Panda temporarily converts the car-facing carrier to type 0;
+        # once real EPAS health is stable, type 1 resumes from the driver's actual wheel position.
         apply_angle = float(CS.out.steeringAngleDeg)
       else:
         desired_angle = self._lane_positioned_target_angle(
@@ -881,22 +919,21 @@ class CarController(CarControllerBase):
     # - Hybrid normally leaves Tesla's native EPAS lifecycle untouched.
     # - V186 exception: after a *proven* native-Autosteer falling edge while OP remains engaged,
     #   send OP's normal APS_eacAllow=1 stream until native Autosteer comes back or OP disengages.
-    #   This re-arms EPAS after the V185 co-op drop without perturbing normal Hybrid startup.
+    # - V199 also sends allow=1 during the state-driven co-op re-arm, beginning at the physical
+    #   takeover rather than waiting for native 0x488 to fall.
     if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
       counter = (self.frame // 2) % 16
-      if (not hybrid_native_ap) or (
-        hybrid_native_ap
-        and bool(self._hybrid_eac_recovery)
-        and bool(op_enabled)
-        and not native_ap_lateral_active
-      ):
+      hybrid_recovery = bool(op_enabled) and (
+        bool(self._hybrid_coop_rearm) or
+        (bool(self._hybrid_eac_recovery) and not native_ap_lateral_active)
+      )
+      if (not hybrid_native_ap) or hybrid_recovery:
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # V198 restores the actual pre-native-TACC-rollback longitudinal lifecycle in Hybrid while
-    # leaving every Hybrid Autosteer path above untouched. OP authors powertrain 0x2BF at 25 Hz
-    # continuously from startup. DAS_accState stays ACC_ON(4) while inactive, just as it did in
-    # the attached implementation; the active flag changes only the requested accel/set speed.
-    # There is deliberately no Hybrid 0x2B9 prime, state-0 precondition, or engagement delay.
+    # V199 retains V198's fault-free continuous sender lifecycle. OP authors powertrain 0x2BF at
+    # 25 Hz from startup with ACC_ON(4) while inactive; only requested accel/set-speed activity
+    # changes at engagement. Panda leaves native traffic untouched before MAIN, then suppresses
+    # native non-AEB 0x2BF so this already-established OP stream becomes the single owner.
     if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(

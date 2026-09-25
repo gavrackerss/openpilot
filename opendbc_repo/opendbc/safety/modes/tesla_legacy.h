@@ -10,6 +10,7 @@
 #define XNOR_V184_HYBRID_STOCKLIKE_HANDS_PULSE 1
 #define XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL 1
 #define XNOR_V198_HYBRID_PRE_ROLLBACK_OP_LONGITUDINAL 1
+#define XNOR_V199_HYBRID_OP_LONG_SINGLE_OWNER_COOP_REARM 1
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -24,6 +25,8 @@ static const char *const xnor_v185_marker __attribute__((unused)) =
     "XNOR_V185_HYBRID_TWO_STAGE_HANDS_AND_COOP_TAIL";
 static const char *const xnor_v198_marker __attribute__((unused)) =
     "XNOR_V198_HYBRID_PRE_ROLLBACK_OP_LONGITUDINAL";
+static const char *const xnor_v199_marker __attribute__((unused)) =
+    "XNOR_V199_HYBRID_OP_LONG_SINGLE_OWNER_COOP_REARM";
 
 // Tesla Legacy (HW1/HW2/HW3) Unity-parity safety for XNOR harnessing.
 //
@@ -129,12 +132,11 @@ static const uint32_t TESLA_LEGACY_HANDS_PULSE_PRE_US = 350000U;
 static const uint32_t TESLA_LEGACY_HANDS_PULSE_TOTAL_US = 700000U;
 static const uint32_t TESLA_LEGACY_HANDS_PULSE_RETRY_US = 1500000U;
 
-// Physical co-op takeover recovery. Refresh while EPAS is actively reporting the hands-on
-// takeover, then keep the AP-facing copy benign for a bounded tail while the real EPAS returns
-// from EAC_ERROR_HANDS_ON to EAC_ACTIVE. Clear sooner after several consecutive healthy samples.
-static uint32_t tesla_legacy_coop_takeover_last_us = 0U;
+// Physical co-op takeover recovery. This is state-driven rather than a fixed presentation tail:
+// neutralise the car-facing steering carrier and authorise OP's EPAS allow frame until the real
+// EPAS reports several consecutive EAC_ACTIVE/IDLE/hands-low samples. Unrelated errors fail open.
+static bool tesla_legacy_coop_rearm_active = false;
 static uint8_t tesla_legacy_coop_recovery_good_frames = 0U;
-static const uint32_t TESLA_LEGACY_COOP_TAKEOVER_TAIL_US = 1500000U;
 static const uint8_t TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES = 5U;
 
 // hands on wheel (from 0x370)
@@ -167,7 +169,7 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_ap_hands_state_fwd = 0U;
   tesla_legacy_hands_pulse_start_us = 0U;
   tesla_legacy_hands_pulse_positive = false;
-  tesla_legacy_coop_takeover_last_us = 0U;
+  tesla_legacy_coop_rearm_active = false;
   tesla_legacy_coop_recovery_good_frames = 0U;
 
   tesla_legacy_op_stalk_main_edge = false;
@@ -187,6 +189,9 @@ static void tesla_legacy_track_controls_allowed_edge(void) {
   if (tesla_legacy_controls_allowed_prev && !controls_allowed) {
     tesla_legacy_time_op_disengaged = microsecond_timer_get();
     tesla_legacy_hide_errors_armed = true;
+    tesla_legacy_hybrid_eac_recovery = false;
+    tesla_legacy_coop_rearm_active = false;
+    tesla_legacy_coop_recovery_good_frames = 0U;
     tesla_legacy_controls_allowed_prev = false;
   } else if (controls_allowed) {
     tesla_legacy_hide_errors_armed = false;
@@ -402,6 +407,22 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
         return false;
       }
 
+      // Preserve V187's native abort-state fail-open priority even if a co-op re-arm was active.
+      if ((addr == 0x488) && ((tesla_legacy_ap_status_fwd == 8U) ||
+                             (tesla_legacy_ap_status_fwd == 9U))) {
+        return false;
+      }
+
+      // V199 co-op re-arm phase. The V198 log showed EPAS stuck EAC_AVAILABLE/HANDS_ON while
+      // active type-1 overlays continued, so it never saw a neutral interval in which to reset.
+      // Preserve Tesla's genuine cadence, angle, counter and all other bits, but force controlType
+      // 0 until real EPAS feedback is healthy. This applies even without a fresh OP template.
+      if ((addr == 0x488) && tesla_legacy_coop_rearm_active) {
+        to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x3FU);
+        tesla_legacy_set_last_byte_checksum(to_fwd);
+        return true;
+      }
+
       const uint32_t now = microsecond_timer_get();
       const bool fresh = fwd->valid &&
                          (fwd->last_capture_ts != 0U) &&
@@ -432,11 +453,6 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
       // genuine Tesla frame so the native abort/recovery logic is not fought by another overlay.
       const uint8_t stock_steer_type = (uint8_t)((to_fwd->data[2] >> 6) & 0x03U);
       const bool native_autosteer_active = stock_steer_type != 0U;
-      const bool native_abort_state = (tesla_legacy_ap_status_fwd == 8U) ||
-                                      (tesla_legacy_ap_status_fwd == 9U);
-      if ((addr == 0x488) && native_abort_state) {
-        return false;
-      }
 
       const int stock_angle_can = (addr == 0x488)
         ? (((int)(to_fwd->data[0] & 0x7FU) << 8) | (int)to_fwd->data[1]) - 16384
@@ -742,7 +758,8 @@ static bool tesla_legacy_chassis_overlay_violation(const CANPacket_t *msg) {
   if (tesla_legacy_external_panda || ((int)msg->addr != 0x2B9) || ((int)msg->bus != 0)) {
     return true;
   }
-  // Hybrid never accepts an OP longitudinal template: native TACC owns both 0x2B9 and 0x2BF.
+  // Hybrid never accepts an OP chassis template: 0x2B9 remains completely native while OP owns
+  // only the powertrain 0x2BF path.
   if (!tesla_legacy_op_autopilot_disabled || !controls_allowed || !get_longitudinal_allowed()) {
     return true;
   }
@@ -815,6 +832,8 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
     if (!tesla_legacy_op_hybrid_native_ap || tesla_legacy_op_stalk_cancel_edge) {
       tesla_legacy_hybrid_eac_recovery = false;
+      tesla_legacy_coop_rearm_active = false;
+      tesla_legacy_coop_recovery_good_frames = 0U;
     }
     if (tesla_legacy_op_stalk_enable &&
         (tesla_legacy_op_hybrid_native_ap || !tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
@@ -859,22 +878,22 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     return false;
   }
 
-  // V186 Hybrid EPAS recovery. 0x27D is normally blocked in Hybrid, but after a proven
-  // native-Autosteer active->idle transition EPAS can remain EAC_AVAILABLE and ignore the valid
-  // OP 0x488 overlay. Permit only APS_eacAllow=1, only on the main panda/bus0, only while OP is
-  // still controls_allowed, native LKAS is idle, and the recovery latch is armed.
+  // Hybrid EPAS recovery. Permit only APS_eacAllow=1 on the main panda/bus0 while OP remains
+  // authorised. V186 covers native-LKAS active->idle; V199 starts the same allow handshake at
+  // physical co-op takeover while panda holds the car-facing steering carrier neutral.
   if (!tesla_legacy_external_panda && (addr == 0x27D) && ((int)msg->bus == 0) &&
       tesla_legacy_op_hybrid_native_ap) {
     const uint8_t eac_allow = msg->data[0] & 0x03U;
-    return controls_allowed && tesla_legacy_hybrid_eac_recovery &&
-           !tesla_legacy_stock_lkas && (eac_allow == 1U);
+    const bool recovery_allowed = tesla_legacy_coop_rearm_active ||
+                                  (tesla_legacy_hybrid_eac_recovery &&
+                                   !tesla_legacy_stock_lkas);
+    return controls_allowed && recovery_allowed && (eac_allow == 1U);
   }
 
   // On AP hardware cars direct OP actuation remains blocked unless stock AP is explicitly
   // disabled. Hybrid steering 0x488 remains template-only; 0x27D is blocked except for the
-  // tightly-gated V186 recovery case handled immediately above. V198 deliberately exempts only
-  // Hybrid DAS_control here, restoring the earlier direct OP 0x2BF longitudinal path. Main-panda
-  // 0x2B9 remains template-only and is rejected for Hybrid by the dedicated branch above.
+  // tightly-gated V186/V199 recovery cases handled immediately above. Hybrid exempts only
+  // DAS_control here for the direct OP 0x2BF path; main-panda 0x2B9 remains native-only.
   if (tesla_legacy_has_ap_hw && !tesla_legacy_op_autopilot_disabled) {
     if ((addr == 0x488) || (addr == 0x27D) ||
         (tesla_legacy_is_das_control_msg(addr) && !tesla_legacy_op_hybrid_native_ap)) {
@@ -1087,15 +1106,18 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
-  // Preserve the pre-rollback forwarding lifecycle in Hybrid: genuine native non-AEB 0x2BF is
-  // not suppressed from relay-open while OP also maintains its continuous state-4 0x2BF stream.
-  // This intentionally removes V197's startup ownership cutover. Existing stock-AEB priority and
-  // all non-Hybrid forwarding behavior remain unchanged.
+  // V199 Hybrid longitudinal ownership cutover:
+  // - Before MAIN, preserve V198's proven relay-open/native forwarding lifecycle so Tesla cruise
+  //   remains available and no startup fault is introduced.
+  // - After controls_allowed, block only native non-AEB 0x2BF. OP's 25 Hz state-4 stream has
+  //   already been present continuously since startup, so engagement changes ownership without
+  //   introducing a new sender/counter or a 0x2B9 prime.
+  // - Native AEB retains the existing priority policy below. Non-Hybrid forwarding is unchanged.
   if (tesla_legacy_external_panda) {
     if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
-        return false;
+        return tesla_legacy_op_hybrid_native_ap && controls_allowed;
       }
       if (!controls_allowed) {
         return false;
@@ -1144,7 +1166,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       return true;  // block stock 0x27D: OP sends the single EPAS-allow stream
     }
     if (tesla_legacy_op_hybrid_native_ap) {
-      return false;  // native EPAS handshake is always authoritative in Hybrid
+      // Native owns the handshake normally. During either tightly-gated recovery latch, OP sends
+      // the single allow=1 stream; suppress the competing native counter/cadence until recovery.
+      return tesla_legacy_coop_rearm_active || tesla_legacy_hybrid_eac_recovery;
     }
     return !tesla_legacy_stock_lkas;
   }
@@ -1192,31 +1216,27 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
                              (tesla_legacy_ap_status_fwd == 5U);
       const bool ap_requests_hands = (tesla_legacy_ap_hands_state_fwd >= 2U) &&
                                      (tesla_legacy_ap_hands_state_fwd <= 5U);
+      const uint32_t now = microsecond_timer_get();
+
+      // 0x370 deliberately is not an RxCheck liveness input on this harness. Drive the V199 latch
+      // from the raw car-side frame here, before rewriting only the AP-facing copy. This preserves
+      // the minimal RX set while making recovery depend on real EPAS state rather than 1.5 seconds.
       const bool physical_hands_takeover = ap_active && (hands_on_level >= 3U) &&
                                            (eac_error == 3U) &&
                                            ((eac_status == 2U) || (eac_status == 4U) ||
                                             (eac_status == 6U));
-      const uint32_t now = microsecond_timer_get();
-
       if (physical_hands_takeover) {
-        // Refresh continuously while the driver is physically overriding the wheel.
-        tesla_legacy_coop_takeover_last_us = now;
+        tesla_legacy_coop_rearm_active = true;
         tesla_legacy_coop_recovery_good_frames = 0U;
       }
 
-      bool coop_tail_active = ap_active && (tesla_legacy_coop_takeover_last_us != 0U) &&
-                              (get_ts_elapsed(now, tesla_legacy_coop_takeover_last_us) <=
-                               TESLA_LEGACY_COOP_TAKEOVER_TAIL_US);
-
-      if (coop_tail_active) {
-        // Never conceal an unrelated EPAS fault. Error 3 is specifically EAC_ERROR_HANDS_ON.
+      if (tesla_legacy_coop_rearm_active) {
         const bool allowed_coop_error = (eac_error == 0U) || (eac_error == 3U);
         const bool allowed_coop_status = (eac_status == 1U) || (eac_status == 2U) ||
                                          (eac_status == 4U) || (eac_status == 6U);
         if (!allowed_coop_error || !allowed_coop_status) {
-          tesla_legacy_coop_takeover_last_us = 0U;
+          tesla_legacy_coop_rearm_active = false;
           tesla_legacy_coop_recovery_good_frames = 0U;
-          coop_tail_active = false;
         } else {
           const bool real_epas_healthy = (eac_error == 0U) && (eac_status == 2U) &&
                                          (hands_on_level <= 1U);
@@ -1226,9 +1246,8 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
             }
             if (tesla_legacy_coop_recovery_good_frames >=
                 TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
-              tesla_legacy_coop_takeover_last_us = 0U;
+              tesla_legacy_coop_rearm_active = false;
               tesla_legacy_coop_recovery_good_frames = 0U;
-              coop_tail_active = false;
             }
           } else {
             tesla_legacy_coop_recovery_good_frames = 0U;
@@ -1236,10 +1255,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
         }
       }
 
+      const bool coop_rearm_active = tesla_legacy_coop_rearm_active;
+
       const uint32_t since_pulse = (tesla_legacy_hands_pulse_start_us == 0U) ?
                                    0xFFFFFFFFU : get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
 
-      if (!coop_tail_active && ap_active && ap_requests_hands &&
+      if (!coop_rearm_active && ap_active && ap_requests_hands &&
           (since_pulse >= TESLA_LEGACY_HANDS_PULSE_RETRY_US)) {
         tesla_legacy_hands_pulse_start_us = now;
         tesla_legacy_hands_pulse_positive = !tesla_legacy_hands_pulse_positive;
@@ -1247,13 +1268,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 
       const uint32_t pulse_elapsed = (tesla_legacy_hands_pulse_start_us == 0U) ?
                                      0xFFFFFFFFU : get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
-      const bool pulse_active = !coop_tail_active && ap_active &&
+      const bool pulse_active = !coop_rearm_active && ap_active &&
                                 (pulse_elapsed <= TESLA_LEGACY_HANDS_PULSE_TOTAL_US);
 
-      if (coop_tail_active) {
-        // Co-op: keep DAS seeing a benign detected-hands + EAC_ACTIVE state for the complete
-        // physical takeover and its EPAS recovery tail. Clamp only the AP-facing torque to a
-        // plausible detected-hands value in the real driver's direction.
+      if (coop_rearm_active) {
+        // Co-op: keep DAS seeing benign hands/EAC state for the complete physical takeover and
+        // state-driven EPAS re-arm. The real feedback remains untouched for safety/controller.
         to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);  // handsOnLevel = 1
         to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x0FU);            // EAC_ERROR_IDLE
         to_fwd->data[6] = (uint8_t)((to_fwd->data[6] & 0x1FU) | (2U << 5));  // EAC_ACTIVE
@@ -1314,8 +1334,6 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
           (tesla_legacy_ap_status_fwd == 4U) ||
           (tesla_legacy_ap_status_fwd == 5U))) {
       tesla_legacy_hands_pulse_start_us = 0U;
-      tesla_legacy_coop_takeover_last_us = 0U;
-      tesla_legacy_coop_recovery_good_frames = 0U;
     }
   }
 
@@ -1393,7 +1411,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_ap_hands_state_fwd = 0U;
   tesla_legacy_hands_pulse_start_us = 0U;
   tesla_legacy_hands_pulse_positive = false;
-  tesla_legacy_coop_takeover_last_us = 0U;
+  tesla_legacy_coop_rearm_active = false;
   tesla_legacy_coop_recovery_good_frames = 0U;
 
   tesla_legacy_hands_on = false;

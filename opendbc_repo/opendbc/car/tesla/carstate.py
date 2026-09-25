@@ -39,11 +39,14 @@ class CarState(CarStateBase):
   XNOR_CRUISE_SET_HOLD_MS = 8_000
 
   def update_button_enable(self, button_events: list[structs.CarState.ButtonEvent]):
-    # Physical MAIN is represented as resumeCruise. In non-PCM/OP-longitudinal modes, recognise
-    # MAIN's falling edge directly as the enable request.
+    # Hybrid keeps V198's immediate MAIN engagement even though V199 uses non-PCM cruise semantics
+    # for OP-owned set speed. Other non-PCM modes retain their established falling-edge behaviour.
     if not self.CP.pcmCruise:
       for event in button_events:
-        if event.type == ButtonType.resumeCruise and not event.pressed:
+        if event.type == ButtonType.resumeCruise and (
+          (bool(getattr(self, "hybrid_native_ap", False)) and event.pressed) or
+          (not bool(getattr(self, "hybrid_native_ap", False)) and not event.pressed)
+        ):
           return True
     return super().update_button_enable(button_events)
 
@@ -83,6 +86,8 @@ class CarState(CarStateBase):
     self.cruise_enabled_prev = False
 
     self.hands_on_level = 0
+    self.eac_status_raw = 0
+    self.eac_error_code_raw = 0
     self.das_control = None
     # Unity parity fields
     self._tinkla = _TinklaConfig()
@@ -666,6 +671,8 @@ class CarState(CarStateBase):
     # Steering wheel
     epas_status = cp_party.vl["EPAS3S_sysStatus"]
     self.hands_on_level = epas_status["EPAS3S_handsOnLevel"]
+    self.eac_status_raw = int(epas_status["EPAS3S_eacStatus"])
+    self.eac_error_code_raw = int(epas_status["EPAS3S_eacErrorCode"])
     self.human_control = bool(self.hands_on_level >= 1)
     ret.steeringAngleDeg = -epas_status["EPAS3S_internalSAS"]
     ret.steeringRateDeg = -cp_ap_party.vl["SCCM_steeringAngleSensor"]["SCCM_steeringAngleSpeed"]
@@ -1047,6 +1054,8 @@ class CarState(CarStateBase):
     else:
       epas_status = cp_chassis.vl["EPAS_sysStatus"]
     self.hands_on_level = epas_status["EPAS_handsOnLevel"]
+    self.eac_status_raw = int(epas_status["EPAS_eacStatus"])
+    self.eac_error_code_raw = int(epas_status["EPAS_eacErrorCode"])
     self.human_control = bool(self.hands_on_level >= 1)
     ret.steeringAngleDeg = -epas_status["EPAS_internalSAS"]
     ret.steeringRateDeg = -cp_chassis.vl["STW_ANGLHP_STAT"]["StW_AnglHP_Spd"]
@@ -1197,12 +1206,12 @@ class CarState(CarStateBase):
     self._param_frame += 1
 
     if self.hybrid_native_ap:
-      # Preserve the later independent Hybrid Autosteer engagement latch and reuse it as the
-      # pre-rollback OP-longitudinal PCM source. MAIN raises cruiseState on the press, so the
-      # normal pcmEnable rising edge occurs without waiting for a button-release event.
+      # Non-PCM contract: keep the independent MAIN/CANCEL latch internally, but never publish
+      # native cruise as enabled. This prevents cruiseMismatch/continuous cancel while letting
+      # VCruiseHelper own set speed. buttonEnable below is the sole openpilot engagement event.
       ret.cruiseState.available = True
-      ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
-      self.cruiseEnabled = bool(ret.cruiseState.enabled)
+      self.cruiseEnabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      ret.cruiseState.enabled = False
     elif self.autopilot_disabled or self.enableACC:
       # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
       # virtual cruise stalk (set just above) with NO stock-cruise dependency and NO 17.1 mph
@@ -1222,8 +1231,8 @@ class CarState(CarStateBase):
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
 
-    # Physical MAIN/CANCEL button events remain for the non-PCM modes. They are deliberately inert
-    # for Hybrid's pcmCruise=True path; Hybrid engages from cruiseState's rising edge above.
+    # Physical stalk events drive both non-PCM engagement and OP's set-speed helper. MAIN maps to
+    # resumeCruise; the two detents in each speed direction map to accel/decel press/release edges.
     ret.buttonEvents = []
     try:
       prev_button = int(self._prev_cruise_buttons)
@@ -1243,6 +1252,14 @@ class CarState(CarStateBase):
         ret.buttonEvents.append(_button_event(ButtonType.cancel, True))
       if prev_button == int(CruiseButtons.CANCEL) and current_button != int(CruiseButtons.CANCEL):
         ret.buttonEvents.append(_button_event(ButtonType.cancel, False))
+      if CruiseButtons.is_accel(current_button) and not CruiseButtons.is_accel(prev_button):
+        ret.buttonEvents.append(_button_event(ButtonType.accelCruise, True))
+      if CruiseButtons.is_accel(prev_button) and not CruiseButtons.is_accel(current_button):
+        ret.buttonEvents.append(_button_event(ButtonType.accelCruise, False))
+      if CruiseButtons.is_decel(current_button) and not CruiseButtons.is_decel(prev_button):
+        ret.buttonEvents.append(_button_event(ButtonType.decelCruise, True))
+      if CruiseButtons.is_decel(prev_button) and not CruiseButtons.is_decel(current_button):
+        ret.buttonEvents.append(_button_event(ButtonType.decelCruise, False))
 
       self._prev_cruise_buttons = current_button
     except Exception:
