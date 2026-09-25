@@ -55,7 +55,7 @@ from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.tesla.values import CruiseButtons
 
-from openpilot.selfdrive.car.modules.ACC_module import ACCController, AccDecision
+from openpilot.selfdrive.car.modules.ACC_module import ACCController, AccDecision, LeadInfo
 
 
 def _mono_ms() -> int:
@@ -184,6 +184,7 @@ class _CsaCanReader:
 
 
 class LongController:
+  # Keep the original floor outside the existing native-TACC / explicit zero-floor paths.
   MIN_CRUISE_SPEED_MS = 17.1 * CV.MPH_TO_MS
   _NATIVE_TACC_ENABLE_FILE = "/data/xnor_enable_native_tacc_passthrough"
   _NATIVE_TACC_DISABLE_FILE = "/data/xnor_disable_native_tacc_passthrough"
@@ -563,7 +564,7 @@ class LongController:
   # momentary near-zero CSA curvature reading at an apex transition cannot let speed creep up
   # mid-circulation. Fail-safe: no mapd / stale mapd / no roundabout name => no cap.
   _ROUNDABOUT_ENABLE = True
-  _ROUNDABOUT_CAP_MS = 23.0 * CV.MPH_TO_MS   # circulation cap (floored at MIN_CRUISE_SPEED_MS ~17.1 mph). Raised from 20.0 for more leeway on larger roundabouts; tight ones are still pulled lower by CSA/mapd curvature via min() (revert to 20.0 to restore)
+  _ROUNDABOUT_CAP_MS = 23.0 * CV.MPH_TO_MS   # circulation cap. Tight roundabouts can still be pulled lower by CSA/mapd curvature via min().
   _ROUNDABOUT_NAME_TOKEN = "roundabout"      # case-insensitive substring matched in mapd wayName / roadName
 
   # --- mapd vision curve source disable -------------------------------------
@@ -592,6 +593,7 @@ class LongController:
   def __init__(self) -> None:
     self.acc = ACCController()
     self._native_tacc_last_button_ms = 0
+    self._native_standstill_resume_sent = False
     self._native_tacc_last_button = int(CruiseButtons.IDLE)
     self._native_tacc_latched_until_ms = 0
     self._zero_floor_setspeed_active = False
@@ -970,7 +972,8 @@ class LongController:
 
     planner_confirms_low = bool(
       planner_near_ms is not None
-      and float(planner_near_ms) > 0.1
+      and math.isfinite(float(planner_near_ms))
+      and float(planner_near_ms) >= 0.0
       and float(planner_near_ms) <= (low_ms + float(self._MAPD_DISAGREE_PLANNER_CONFIRM_MS))
     )
     steering_confirms_low = abs(float(current_angle_deg)) >= float(self._MAPD_DISAGREE_STEER_CONFIRM_DEG)
@@ -1061,7 +1064,7 @@ class LongController:
       return False
     if raw_vision_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_VISION_CLEAR_MS)):
       return False
-    if planner_near_ms > 0.1 and planner_near_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_PLANNER_CLEAR_MS)):
+    if math.isfinite(planner_near_ms) and planner_near_ms >= 0.0 and planner_near_ms < (reference_ms - float(self._MAPD_STRAIGHT_STALE_PLANNER_CLEAR_MS)):
       return False
     if current_angle_deg > float(self._MAPD_STRAIGHT_STALE_STEER_DEG):
       return False
@@ -1594,7 +1597,7 @@ class LongController:
     if int(self._lead_hold_until_ms) <= 0 or int(now_ms) > int(self._lead_hold_until_ms):
       self._lead_hold_until_ms = 0
       return False
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return False
     if self._lead_is_opening_clear(base_target_ms=float(base_target_ms), v_ego_ms=float(v_ego_ms)):
       self._lead_hold_until_ms = 0
@@ -2722,7 +2725,7 @@ class LongController:
       return False
     if float(v_ego_ms) > float(self._LP_QUEUE_FALLBACK_MAX_SPEED_MS):
       return False
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return False
 
     materially_below_base = float(planner_ms) < (float(base_target_ms) - float(self._LP_QUEUE_FALLBACK_DROP_MS))
@@ -2739,7 +2742,7 @@ class LongController:
   def _lead_planner_guard_active(self, *, base_target_ms: float, planner_ms: float, current_set_ms: float, v_ego_ms: float) -> bool:
     if (not self._lead_present) or float(self._lead_drel) <= 0.0:
       return False
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return False
     if abs(float(self._lead_yrel)) >= float(self._LEAD_OFFLANE_YREL_M):
       return False
@@ -2901,7 +2904,7 @@ class LongController:
     if float(v_ego_ms) > float(self._LEAD_APPROACH_CANCEL_MAX_SPEED_MS):
       self._lead_approach_force_candidate_since_ms = 0
       return False
-    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
+    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
       self._lead_approach_force_candidate_since_ms = 0
       return False
 
@@ -2912,7 +2915,8 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      planner_floor_ms > 0.1
+      math.isfinite(planner_floor_ms)
+      and planner_floor_ms >= 0.0
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_APPROACH_CANCEL_PLANNER_MARGIN_MS))
       and (
         planner_floor_ms < (float(v_ego_ms) - (0.25 * CV.MPH_TO_MS))
@@ -2995,7 +2999,7 @@ class LongController:
       self._reset_lead_approach_cancel()
       self._reset_lead_close_cancel()
       return False
-    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
+    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
       self._reset_lead_approach_cancel()
       self._reset_lead_close_cancel()
       return False
@@ -3007,7 +3011,8 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      planner_floor_ms > 0.1
+      math.isfinite(planner_floor_ms)
+      and planner_floor_ms >= 0.0
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_APPROACH_CANCEL_PLANNER_MARGIN_MS))
       and (
         planner_floor_ms < (float(v_ego_ms) - (0.4 * CV.MPH_TO_MS))
@@ -3084,7 +3089,7 @@ class LongController:
       self._reset_lead_stuck_cancel()
       self._reset_lead_approach_cancel()
       return False
-    if float(current_set_ms) <= 0.1 or float(desired_ms) <= 0.1:
+    if float(current_set_ms) <= 0.1 or (not math.isfinite(float(desired_ms))) or float(desired_ms) < 0.0:
       self._reset_lead_stuck_cancel()
       self._reset_lead_approach_cancel()
       return False
@@ -3097,7 +3102,8 @@ class LongController:
 
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_supported = bool(
-      planner_floor_ms > 0.1
+      math.isfinite(planner_floor_ms)
+      and planner_floor_ms >= 0.0
       and planner_floor_ms < (float(current_set_ms) - float(self._LEAD_STUCK_CANCEL_PLANNER_MARGIN_MS))
     )
     if not planner_supported:
@@ -3316,6 +3322,10 @@ class LongController:
     self._reset_lead_approach_cancel()
     self._reset_lead_close_cancel()
     self._reset_arbitration_state()
+    self._native_standstill_resume_sent = False
+    self.acc._standstill_lead_prev_drel_m = 0.0
+    self.acc._standstill_lead_prev_ms = 0
+    self.acc._standstill_lead_opening_rate_ms = 0.0
 
 
   def _csa_curve_target_ms(self, *, reference_ms: float, v_ego_ms: float) -> tuple[Optional[float], str]:
@@ -3490,7 +3500,10 @@ class LongController:
   ) -> tuple[Optional[float], str]:
     planner_curve_active = bool(
       bool(lp_fresh)
-      and float(planner_near_ms) > 0.1
+      and math.isfinite(float(planner_near_ms))
+      # A zero-speed plan can be valid in a queue, but isn't a curve measurement at 40 mph.
+      and (float(planner_near_ms) > 0.1 or float(v_ego_ms) <= (2.0 * CV.MPH_TO_MS))
+      and float(planner_near_ms) >= 0.0
       and float(planner_near_ms) < (float(reference_ms) - float(self._ARBITRATION_CURVE_MIN_DROP_MS))
     )
 
@@ -3562,8 +3575,18 @@ class LongController:
     )
     roundabout_supports = roundabout_target_ms is not None
 
+    # This is only a cruise-SET corroboration check. Never modify actual EPAS/control
+    # saturation or the vehicle's lateral fault-handling path.
+    isolated_lat_sat_straight = bool(
+      self._lat_limit_saturated
+      and near_straight
+      and not bool(live_lead_context)
+      and not (map_supports or vision_supports or csa_supports or roundabout_supports)
+      and self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms))
+    )
     if not (planner_curve_active or map_supports or vision_supports or csa_supports or roundabout_supports):
-      if bool(self._lat_limit_saturated) and float(v_ego_ms) > float(self._LAT_SAT_HARD_MIN_SPEED_MS):
+      if (bool(self._lat_limit_saturated) and not isolated_lat_sat_straight
+          and float(v_ego_ms) > float(self._LAT_SAT_HARD_MIN_SPEED_MS)):
         lat_target_ms = max(
           float(self._effective_set_speed_floor_ms()),
           min(
@@ -3593,8 +3616,11 @@ class LongController:
         and abs(float(steering_rate_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_RATE_DEG)
       )
       generic_plan_source = str(self._lp_source or "").lower() in ("", "cruise", "e2e")
-      if generic_plan_source and road_clear and straightish and not bool(self._lat_limit_saturated) and not csa_supports and not roundabout_supports:
-        return None, "planner_suggested_unconfirmed"
+      if (generic_plan_source and road_clear and straightish and not csa_supports
+          and not roundabout_supports and not bool(live_lead_context)):
+        # A saturation flag is not geometric corroboration by itself. This check
+        # requires an independent fresh/far-sighted flat CSA sample.
+        return None, "planner_suggested_unconfirmed[flat_csa]"
 
     map_only_low = bool(
       map_supports
@@ -3626,28 +3652,32 @@ class LongController:
     curve_candidates: list[float] = []
     owner_parts: list[str] = []
 
-    # Option A: CSA is the primary curve authority. When CSA confirms a bend it leads the
-    # candidate set; planner / mapd-map / mapd-vision can only LOWER the target via min().
-    # CSA is route-independent and arrives ~8s/~110m ahead, so it must not be out-voted or
-    # vetoed by the v_ego-relative urgency gate that suppressed pre-emptive caps.
+    # CSA-preferred curve weighting. A fresh, advancing CSA bend is the authoritative
+    # *curve* target; planner/mapD remain fallbacks rather than being allowed to out-vote
+    # CSA simply because they ask for a lower speed. This preference is confined to curve
+    # arbitration: lead following, posted limits and roadworks still constrain elsewhere.
+    # Explicit roundabout geometry remains a lower safety/backstop cap.
     csa_primary = bool(csa_supports)
     if csa_primary:
       curve_candidates.append(float(csa_target_ms))
-      owner_parts.append("csa")
+      owner_parts.append("csa_preferred")
 
-    # Roundabout cap rides alongside CSA as a geometric authority: it only LOWERS via min(),
-    # is never softened upward, and is exempt from the v_ego urgency veto (slowing for a
-    # roundabout must be pre-emptive, before circulation).
-    if roundabout_supports:
-      curve_candidates.append(float(roundabout_target_ms))
-      owner_parts.append("roundabout")
-
-    if planner_curve_active:
-      planner_cand_ms = float(planner_near_ms)
       if roundabout_supports:
-        planner_cand_ms = max(planner_cand_ms, float(roundabout_target_ms))
-      curve_candidates.append(planner_cand_ms)
-      owner_parts.append("planner")
+        curve_candidates.append(float(roundabout_target_ms))
+        owner_parts.append("roundabout")
+    else:
+      # When CSA is unavailable/stale/too gentle, preserve the existing planner/mapD/
+      # roundabout fallback behavior exactly.
+      if roundabout_supports:
+        curve_candidates.append(float(roundabout_target_ms))
+        owner_parts.append("roundabout")
+
+      if planner_curve_active:
+        planner_cand_ms = float(planner_near_ms)
+        if roundabout_supports:
+          planner_cand_ms = max(planner_cand_ms, float(roundabout_target_ms))
+        curve_candidates.append(planner_cand_ms)
+        owner_parts.append("planner")
 
     curve_specific_ms = self._curve_specific_mapd_target_ms(
       now_ns=int(now_ns),
@@ -3656,12 +3686,11 @@ class LongController:
       current_angle_deg=float(current_angle_deg),
       planner_curve_active=bool(planner_curve_active),
     )
-    if curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
+    if (not csa_primary) and curve_specific_ms is not None and float(curve_specific_ms) > 0.1:
       mapd_cand_ms = float(curve_specific_ms)
       # Fix #2: mapd under-reads big named roundabouts (Delme: mapCurveSpeed 15 -> floored to 18,
       # too slow; ~23 is fine). On a named roundabout don't let the mapd/planner candidate pull the
-      # target below the roundabout circulation cap. CSA (real geometry, added unfloored above) may
-      # still lower it for a genuinely tight roundabout. (Revert: drop these two roundabout floors.)
+      # target below the roundabout circulation cap.
       if roundabout_supports:
         mapd_cand_ms = max(mapd_cand_ms, float(roundabout_target_ms))
       curve_candidates.append(mapd_cand_ms)
@@ -3953,16 +3982,25 @@ class LongController:
         cs_out=cs_out,
       )
     )
+    # Radar gap / TTC must corroborate a planner-only strong decel before LONG
+    # changes Tesla SET. The underlying OP planner and native TACC still brake normally.
+    closing_ms = max(0.0, -float(self._lead_vrel)) if live_lead else 0.0
+    lead_ttc_s = float(self._lead_drel) / closing_ms if closing_ms > 0.05 else 1e6
+    lead_setspeed_relevant = bool(
+      live_lead and (
+        lead_time_gap_s <= max(float(lead_follow_gap_s) + 0.65, 2.5)
+        or float(self._lead_drel) <= 42.0
+        or (closing_ms >= 0.75 and lead_ttc_s <= 10.0)
+      )
+    )
     lead_closing = bool(
-      live_lead
-      and (
+      lead_setspeed_relevant and (
         float(self._lead_vrel) <= float(self._ARBITRATION_LEAD_CLOSING_MS)
         or float(self._lp_a_target) <= float(self._LEAD_OPENING_RELAX_ATARGET_MS2)
       )
     )
     strong_lead_closing = bool(
-      live_lead
-      and (
+      lead_setspeed_relevant and (
         float(self._lead_vrel) <= -0.75
         or float(self._lp_a_target) <= -0.75
       )
@@ -3998,7 +4036,8 @@ class LongController:
     )
     planner_floor_ms = min(float(planner_last_ms), float(planner_near_ms))
     planner_below_reference = bool(
-      float(planner_floor_ms) > 0.1
+      math.isfinite(float(planner_floor_ms))
+      and float(planner_floor_ms) >= 0.0
       and float(planner_floor_ms) < (float(reference_ms) - float(self._ARBITRATION_LEAD_PLANNER_DROP_MS))
     )
 
@@ -4026,10 +4065,14 @@ class LongController:
         lead_time_gap_s <= float(lead_critical_gap_s)
         or (
           lead_closing
+          and lead_setspeed_relevant
           and planner_below_reference
           and float(planner_floor_ms) < (float(current_set_ms) - float(self._ARBITRATION_LEAD_PLANNER_DROP_MS))
         )
-        or float(self._lp_a_target) <= float(self._LEAD_APPROACH_CANCEL_STRONG_ATARGET_MS2)
+        or (
+          lead_setspeed_relevant
+          and float(self._lp_a_target) <= float(self._LEAD_APPROACH_CANCEL_STRONG_ATARGET_MS2)
+        )
       )
     )
     lead_follow = bool(
@@ -4042,6 +4085,7 @@ class LongController:
         or lead_time_gap_s <= float(lead_follow_gap_s)
         or (
           planner_lead_valid
+          and lead_setspeed_relevant
           and (
             planner_below_reference
             or lead_time_gap_s <= float(lead_release_gap_s)
@@ -4076,21 +4120,20 @@ class LongController:
       self._set_arbitration_state(state="LEAD_CRITICAL", now_ms=int(now_ms))
       self._reset_curve_hold()
       self._reset_lead_curve_hold()
-      if float(planner_floor_ms) > 0.1:
+      if math.isfinite(float(planner_floor_ms)) and float(planner_floor_ms) >= 0.0:
         out_ms = min(float(out_ms), float(planner_floor_ms))
       if float(current_set_ms) > 0.1:
         out_ms = min(float(out_ms), float(current_set_ms))
       if lead_closing:
         lead_speed_cap_ms = max(0.0, float(v_ego_ms) + float(self._lead_vrel) + (0.5 * CV.MPH_TO_MS))
-        if float(lead_speed_cap_ms) > 0.1:
-          out_ms = min(float(out_ms), float(lead_speed_cap_ms))
+        out_ms = min(float(out_ms), float(lead_speed_cap_ms))
       out_src = f"{out_src}+state[LEAD_CRITICAL]"
       return float(out_ms), out_src
 
     if lead_follow:
       self._set_arbitration_state(state="LEAD_FOLLOW", now_ms=int(now_ms))
       self._reset_curve_hold()
-      if planner_below_reference and float(planner_floor_ms) > 0.1:
+      if planner_below_reference and math.isfinite(float(planner_floor_ms)) and float(planner_floor_ms) >= 0.0:
         out_ms = min(float(out_ms), float(planner_floor_ms))
       if lead_closing and float(current_set_ms) > 0.1:
         out_ms = min(float(out_ms), max(0.0, float(current_set_ms)))
@@ -4113,6 +4156,16 @@ class LongController:
         or stale_planner_lead
       )
     )
+    distant_planner_lead_cap = bool(
+      live_lead and not lead_setspeed_relevant and not curve_confirmed
+      and float(lead_ttc_s) > 10.0
+      and any(token in out_src for token in ("planner[lead", "lead_hold", "lead_guard"))
+      and not any(token in out_src for token in ("roadworks_cap", "roundabout", "mapd_cap", "csa"))
+    )
+    if distant_planner_lead_cap:
+      out_ms = min(float(reference_ms), max(float(out_ms), float(current_set_ms), float(v_ego_ms)))
+      out_src = f"{out_src}+distant_lead_setspeed_unconfirmed"
+
     if stale_low_target:
       self._reset_lead_hold()
       self._reset_lead_curve_hold()
@@ -4201,7 +4254,14 @@ class LongController:
         or "curve_steer_limit_hold" in out_src
         or "lat_sat" in str(curve_source)
       )
-      if bool(lat_sat_context) and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS):
+      isolated_lat_sat_straight = bool(
+        lat_sat_context and no_live_lead
+        and abs(float(current_angle_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_STEER_DEG)
+        and abs(float(steering_rate_deg)) <= float(self._PLANNER_ONLY_CURVE_RELEASE_RATE_DEG)
+        and not any(token in str(curve_source) for token in ("csa", "roundabout", "mapd", "vision"))
+        and self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms))
+      )
+      if bool(lat_sat_context) and not isolated_lat_sat_straight and float(v_ego_ms) >= float(self._LAT_SAT_HARD_MIN_SPEED_MS):
         capped_target_ms = max(
           float(self._effective_set_speed_floor_ms()),
           min(
@@ -4223,7 +4283,20 @@ class LongController:
         target_ms = min(float(target_ms), previous_curve_ms + float(self._ARBITRATION_CURVE_EXIT_STEP_MS) * dt_s)
 
       self._arbitration_curve_target_ms = float(target_ms)
-      out_ms = min(float(out_ms), float(target_ms))
+      if "csa_preferred" in str(curve_source):
+        # Earlier compatibility paths may already have applied a planner/mapD curve cap.
+        # Once fresh CSA owns the curve, discard those lower *curve-only* reductions and
+        # rebuild from the non-curve reference ceiling. reference_ms already incorporates
+        # posted-limit/roadworks constraints; lead-critical/follow returned above.
+        # Rebuild only planner/mapd-only curve reductions. Never lift an explicit
+        # independent cap that was already applied before final arbitration.
+        independent_cap = any(token in str(out_src) for token in (
+          "roadworks_cap", "lead_constrain", "lead_low_speed",
+          "lead_guard", "lead_hold", "state[LEAD", "manual_hold",
+        ))
+        out_ms = min(float(out_ms) if independent_cap else float(reference_ms), float(target_ms))
+      else:
+        out_ms = min(float(out_ms), float(target_ms))
       out_src = f"{out_src}+state[{state}:{curve_source}]"
       return float(out_ms), out_src
 
@@ -4295,7 +4368,7 @@ class LongController:
 
 
   def _planner_drag_reasons(self, *, now_ms: int, base_target_ms: float, planner_ms: float, current_set_ms: float, v_ego_ms: float) -> list[str]:
-    if float(planner_ms) <= 0.1:
+    if (not math.isfinite(float(planner_ms))) or float(planner_ms) < 0.0:
       return []
     if self._stale_planner_lead_without_live_lead(
       now_ms=int(now_ms),
@@ -4576,6 +4649,7 @@ class LongController:
     v_ego_ms: float,
     src: str,
     mode_tag: str = "native_tacc_passthrough",
+    CS=None,
   ) -> LongDecision:
     state = str(stock_state or "").upper()
     uom = str(speed_units or "MPH")
@@ -4583,6 +4657,9 @@ class LongController:
     full_step_u = 5.0
     half_step_u = 1.0
     tolerance_u = float(self._NATIVE_TACC_SET_TOLERANCE_MPH if uom == "MPH" else self._NATIVE_TACC_SET_TOLERANCE_KPH)
+
+    if state != "STANDSTILL":
+      self._native_standstill_resume_sent = False
 
     target_ms = float(desired_ms)
     if self._native_tacc_lead_only_src(src):
@@ -4609,6 +4686,45 @@ class LongController:
       cooldown_ms = int(self._NATIVE_TACC_STANDBY_COOLDOWN_MS if state == "STANDBY" else self._NATIVE_TACC_COOLDOWN_MS)
     if (int(now_ms) - int(self._native_tacc_last_button_ms)) < int(cooldown_ms):
       return LongDecision(None, f"{mode_tag}[cooldown] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
+
+    # Tesla may report SET=0 during an actual stop. In this state do NOT drive the
+    # normal 5-step speed-difference loop. Ask ACC's existing lead-opening checker
+    # for at most one bounded RES pulse per standstill, and let Tesla accept/reject it.
+    if state == "STANDSTILL" and float(v_ego_ms) <= float(self.acc._STANDSTILL_RESUME_MAX_VEGO_MS):
+      brake = bool(getattr(getattr(CS, "out", None), "brakePressed", False))
+      raw_radar_fresh = bool(
+        int(self._lead_raw_seen_ms) > 0
+        and 0 <= int(now_ms) - int(self._lead_raw_seen_ms) <= 400
+      )
+      lead = LeadInfo(
+        status=bool(raw_radar_fresh and self._lead_present and abs(float(self._lead_yrel)) < float(self._LEAD_OFFLANE_YREL_M)
+                    and float(self._lead_drel) <= 15.0),
+        d_rel=float(self._lead_drel),
+        v_rel=float(self._lead_vrel),
+      )
+      previous_lead_ms = int(self.acc._standstill_lead_prev_ms)
+      eligible = bool(
+        not self._native_standstill_resume_sent
+        and int(getattr(CS, "cruise_buttons", int(CruiseButtons.IDLE)) or 0) == int(CruiseButtons.IDLE)
+        and float(current_set_ms) <= 0.1  # only unstick the genuine zero-SET case
+        and float(desired_ms) >= float(self.acc._STANDSTILL_RESUME_MIN_TARGET_MS)
+        and self.acc._no_human_action_for(now_ms=int(now_ms), milliseconds=int(self.acc._HUMAN_COOLDOWN_MS))
+        and self.acc._standstill_resume_needed(
+          now_ms=int(now_ms), stock_state=state, desired_speed_ms=float(desired_ms),
+          v_ego_ms=float(v_ego_ms), brake_pressed=brake, lead=lead,
+        )
+        and previous_lead_ms > 0 and 0 < (int(now_ms) - previous_lead_ms) <= 500
+      )
+      if not eligible:
+        return LongDecision(None, f"{mode_tag}[standstill_hold] src={src} tgt={target_u:.1f} cur={current_u:.1f}")
+      button = int(CruiseButtons.RES_ACCEL)
+      self._native_standstill_resume_sent = True
+      self._native_tacc_last_button_ms = int(now_ms)
+      self._native_tacc_last_button = int(button)
+      self.acc._record_button(now_ms=int(now_ms), button=button, speed_units=uom)
+      msg = f"[XNOR_CRUISE_SYNC] src={src}+{mode_tag} uom={uom} tgt={target_u:.1f} cur={current_u:.1f} btn={button} reason=standstill_resume_once[radar_opening]"
+      self._rate_log(msg)
+      return LongDecision(button, msg)
 
     button: Optional[int] = None
     if state == "STANDBY":
@@ -4669,6 +4785,8 @@ class LongController:
       return LongDecision(None, "gated: not enabled/adaptive")
 
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "")
+    if stock_state != "STANDSTILL":
+      self._native_standstill_resume_sent = False
     if stock_state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
       if self._last_active:
         self._reset_all_cached_state()   # Q3: hard flush when leaving the active stock cruise state
@@ -4801,7 +4919,7 @@ class LongController:
       and (
         (not lp_fresh)
         or (int(self._stable_plan_samples) < 2)
-        or (float(planner_last_ms) <= 0.1)
+        or ((not math.isfinite(float(planner_last_ms))) or float(planner_last_ms) < 0.0)
         or (
           float(set_speed_floor_ms) > 0.1
           and float(v_ego_ms) > float(set_speed_floor_ms)
@@ -5424,6 +5542,7 @@ class LongController:
         v_ego_ms=float(v_ego_ms),
         src=str(src),
         mode_tag=str(mode_tag),
+        CS=CS,
       )
 
     lead_offpath = self._lead_offpath_for_cancel()
