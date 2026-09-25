@@ -143,19 +143,20 @@ class CarInterface(CarInterfaceBase):
     params = Params()
     hybrid_native_ap = bool(params.get_bool("TinklaHybridNativeAP")) and not bool(params.get_bool("TinklaAutopilotDisabled"))
 
-    # XNOR_V197_HYBRID_AP_DISABLED_OP_LONGITUDINAL:
-    # Hybrid selects only the later native-carrier Autosteer architecture. Longitudinal follows
-    # the established Autopilot-Disabled OP path: OP is the non-AEB command owner and physical
-    # MAIN/CANCEL drives OP's independent engagement latch rather than native Tesla TACC.
+    # XNOR_V198_HYBRID_PRE_ROLLBACK_OP_LONGITUDINAL:
+    # Hybrid changes only the lateral transport/presentation path. Longitudinal uses the earlier
+    # OP-owned lifecycle: the physical MAIN level raises CarState.cruiseState immediately and the
+    # normal PCM rising edge engages openpilot without waiting for a button-release event.
     ret.openpilotLongitudinalControl = True
-    ret.pcmCruise = False
+    ret.pcmCruise = hybrid_native_ap
 
-    # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda for the native-carried
-    # 0x2B9 template and an external panda for 0x2BF; both must authorise OP longitudinal.
+    # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda for the established
+    # non-Hybrid 0x2B9 path and an external panda that transmits OP's 0x2BF. Hybrid does not
+    # author 0x2B9, but its external panda still requires LONG_CONTROL for the direct 0x2BF path.
     for cfg in ret.safetyConfigs:
       cfg.safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
 
-    # Match the established OP-longitudinal path, including standstill operation.
+    # OP-owned longitudinal is allowed from standstill in every xnor longitudinal mode.
     ret.minEnableSpeed = -1.
     ret.vEgoStopping = 0.1
     ret.vEgoStarting = 0.1

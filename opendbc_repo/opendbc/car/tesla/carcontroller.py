@@ -69,11 +69,6 @@ _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
 # cadence/counter. This is intentionally different from _ARM_ENABLE_CHASSIS (unsolicited direct TX).
 _UNITY_2B9_OVERLAY_TEMPLATE = True
 
-# Hybrid engagement ordering: keep the continuous OP 0x2BF carrier inactive/CANCEL_GENERIC long
-# enough for at least one genuine ~25 Hz 0x2B9 to consume the freshly cached ACC_ON template.
-# This avoids repeating V195's state-4 0x2BF versus state-0 0x2B9 mismatch at physical MAIN.
-_HYBRID_LONG_CARRIER_PRIME_FRAMES = 8  # ~80 ms at the 100 Hz CarController update rate
-
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
 # Transmit a full GTW_carConfig (0x398) frame with GTW_autopilot=2 NATIVELY on the AP module's
 # own segment (bus 2 = CANBUS.autopilot_party), at ~1Hz (matching the real GTW cadence). Prior
@@ -140,8 +135,6 @@ class CarController(CarControllerBase):
     self._arm_pulse_count = 0            # pulses emitted in the current engagement cycle
     self._arm_engage_frame = -1000       # frame long_active last went true (window start)
     self._arm_long_active_prev = False   # edge detector for long_active
-    self._hybrid_long_request_prev = False
-    self._hybrid_long_prime_start_frame = -1000
     self._stw_sequence = []  # list[(frame:int, btn:int)]
     self._op_enabled_prev = False
     self._xnor_diag_last_log_ms = 0
@@ -899,35 +892,13 @@ class CarController(CarControllerBase):
       ):
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # XNOR_V197_HYBRID_AP_DISABLED_OP_LONGITUDINAL:
-    # Use the established Autopilot-Disabled longitudinal lifecycle in Hybrid too. OP's 0x2BF
-    # exists continuously from startup, including while inactive, so there is one stable sender
-    # and counter cadence before, during, and after MAIN. Hybrid remains only a lateral transport
-    # selection; panda suppresses the competing native non-AEB 0x2BF for the full lifecycle.
-    #
-    # V197 adds one Hybrid-only ordering guard around that same path. Before engagement, keep the
-    # inactive 0x2BF at CANCEL_GENERIC(0), matching the genuine idle 0x2B9. On the longActive edge,
-    # publish the native-carried 0x2B9 ACC_ON template first and hold 0x2BF inactive for ~80 ms.
-    # That gives the main panda time to apply the desired state to a real 0x2B9 carrier before the
-    # external panda makes 0x2BF active. Non-Hybrid Autopilot-Disabled behavior is unchanged.
-    hybrid_long_requested = bool(hybrid_native_ap and self.CP.openpilotLongitudinalControl and CC.longActive)
-    if hybrid_long_requested and not self._hybrid_long_request_prev:
-      self._hybrid_long_prime_start_frame = int(self.frame)
-    elif not hybrid_long_requested:
-      self._hybrid_long_prime_start_frame = -1000
-    self._hybrid_long_request_prev = hybrid_long_requested
-    hybrid_long_ready = bool(
-      hybrid_long_requested
-      and (int(self.frame) - int(self._hybrid_long_prime_start_frame) >= _HYBRID_LONG_CARRIER_PRIME_FRAMES)
-    )
-
+    # V198 restores the actual pre-native-TACC-rollback longitudinal lifecycle in Hybrid while
+    # leaving every Hybrid Autosteer path above untouched. OP authors powertrain 0x2BF at 25 Hz
+    # continuously from startup. DAS_accState stays ACC_ON(4) while inactive, just as it did in
+    # the attached implementation; the active flag changes only the requested accel/set speed.
+    # There is deliberately no Hybrid 0x2B9 prime, state-0 precondition, or engagement delay.
     if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
-      if CC.cruiseControl.cancel:
-        state = 13
-      elif hybrid_native_ap and not hybrid_long_ready:
-        state = 0
-      else:
-        state = 4
+      state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
         float(actuators.accel),
         CarControllerParams.ACCEL_MIN,
@@ -937,8 +908,6 @@ class CarController(CarControllerBase):
 
       native_acc = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
-      if hybrid_native_ap:
-        long_active = bool(hybrid_long_ready)
 
       can_sends.append(
         self.tesla_can.create_longitudinal_command(
@@ -950,8 +919,8 @@ class CarController(CarControllerBase):
         )
       )
 
-      # Keep the old direct chassis/stalk arming experiment restricted to non-Hybrid. Hybrid uses
-      # only the native-carried 0x2B9 template below; it never creates a second direct sender.
+      # Keep the old direct chassis/stalk low-speed experiment restricted to non-Hybrid. Hybrid
+      # reproduces the pre-rollback powertrain 0x2BF path and does not introduce a second 0x2B9.
       if (not hybrid_native_ap) and long_active and native_acc and (self.CP.carFingerprint in LEGACY_CARS) and \
          hasattr(self.tesla_can, "create_longitudinal_command_chassis"):
         if _ARM_ENABLE_CHASSIS:
@@ -998,13 +967,14 @@ class CarController(CarControllerBase):
     # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
     # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
     if (
-      _UNITY_2B9_OVERLAY_TEMPLATE
+      (not hybrid_native_ap)
+      and _UNITY_2B9_OVERLAY_TEMPLATE
       and self.CP.openpilotLongitudinalControl
       and (self.CP.carFingerprint in LEGACY_CARS)
       and hasattr(self.tesla_can, "create_longitudinal_command_chassis")
       and (self.frame % 2 == 0)
     ):
-      native_acc_overlay = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
+      native_acc_overlay = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active_overlay = bool(CC.longActive) and ((not autopilot_disabled) or native_acc_overlay)
       if long_active_overlay and native_acc_overlay:
         overlay_state = 13 if CC.cruiseControl.cancel else 4
@@ -1015,15 +985,12 @@ class CarController(CarControllerBase):
         ))
         # Counter=1 is deliberate: this packet is only a cache template. Panda strips this
         # template counter and preserves the genuine AP 0x2B9 counter before recomputing checksum.
-        # During the Hybrid prime window this publishes state=ACC_ON with inactive accel. Once a
-        # genuine 0x2B9 has had time to carry that state, 0x2B9 and 0x2BF become active together.
-        overlay_command_active = bool(hybrid_long_ready) if hybrid_native_ap else True
         can_sends.append(self.tesla_can.create_longitudinal_command_chassis(
           overlay_state,
           overlay_accel,
           1,
           float(CS.out.vEgo),
-          overlay_command_active,
+          True,
         ))
 
     new_actuators = actuators.as_builder()

@@ -39,8 +39,8 @@ class CarState(CarStateBase):
   XNOR_CRUISE_SET_HOLD_MS = 8_000
 
   def update_button_enable(self, button_events: list[structs.CarState.ButtonEvent]):
-    # Physical MAIN is represented as resumeCruise. Hybrid uses the same non-PCM OP-longitudinal
-    # engagement path as Autopilot Disabled, so recognise MAIN's falling edge directly.
+    # Physical MAIN is represented as resumeCruise. In non-PCM/OP-longitudinal modes, recognise
+    # MAIN's falling edge directly as the enable request.
     if not self.CP.pcmCruise:
       for event in button_events:
         if event.type == ButtonType.resumeCruise and not event.pressed:
@@ -1151,8 +1151,8 @@ class CarState(CarStateBase):
 
 
     if self.autopilot_disabled or self.enableACC or self.hybrid_native_ap:
-      # OP engagement source. In Hybrid this is deliberately independent of Tesla cruise/AP state:
-      # MAIN latches OP on and CANCEL latches it off. Native AP status only selects the proven
+      # OP lateral engagement source. In Hybrid, MAIN/CANCEL retains the later independent stalk
+      # latch while native Tesla TACC owns longitudinal. Native AP status only selects the proven
       # steering carrier/recovery lifecycle.
       if self.cruise_buttons == 2:  # MAIN
         self.cruiseEnabled = True
@@ -1197,8 +1197,9 @@ class CarState(CarStateBase):
     self._param_frame += 1
 
     if self.hybrid_native_ap:
-      # Preserve the later independent Hybrid engagement latch. OP owns longitudinal through the
-      # Autopilot-Disabled path; native_lkas_active only reports lateral-carrier state.
+      # Preserve the later independent Hybrid Autosteer engagement latch and reuse it as the
+      # pre-rollback OP-longitudinal PCM source. MAIN raises cruiseState on the press, so the
+      # normal pcmEnable rising edge occurs without waiting for a button-release event.
       ret.cruiseState.available = True
       ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
       self.cruiseEnabled = bool(ret.cruiseState.enabled)
@@ -1221,8 +1222,8 @@ class CarState(CarStateBase):
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
 
-    # Physical MAIN/CANCEL button events for all non-PCM OP-longitudinal modes, including Hybrid.
-    # MAIN release is the enable request; CANCEL also clears cruiseEnabled above.
+    # Physical MAIN/CANCEL button events remain for the non-PCM modes. They are deliberately inert
+    # for Hybrid's pcmCruise=True path; Hybrid engages from cruiseState's rising edge above.
     ret.buttonEvents = []
     try:
       prev_button = int(self._prev_cruise_buttons)
