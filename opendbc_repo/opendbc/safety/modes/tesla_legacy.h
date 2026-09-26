@@ -1335,8 +1335,6 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       const uint8_t hands_on_level = (to_fwd->data[4] >> 6) & 0x03U;
       const uint8_t eac_status = (to_fwd->data[6] >> 5) & 0x07U;
       const uint8_t eac_error = (to_fwd->data[2] >> 4) & 0x0FU;
-      const uint16_t real_torque_raw = (uint16_t)((((uint16_t)to_fwd->data[2] & 0x0FU) << 8) | to_fwd->data[3]);
-      const bool real_torque_positive = real_torque_raw >= 2050U;
       const bool ap_active = (tesla_legacy_ap_status_fwd == 3U) ||
                              (tesla_legacy_ap_status_fwd == 4U) ||
                              (tesla_legacy_ap_status_fwd == 5U);
