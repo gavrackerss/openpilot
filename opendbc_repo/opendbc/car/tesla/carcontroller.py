@@ -142,6 +142,10 @@ class CarController(CarControllerBase):
     self._v212_handover_since_frame = -1
     self._v212_pending_direction = 0
     self._v212_prev_physical_turn = 0
+    # V213: separate opt-in off-highway ALC *configuration*, latched for the drive.
+    # This modifies only the AP-facing genuine 0x3E8 configuration copy; no road-class spoof.
+    self._v213_offhighway_alc_enable = bool(self._cached_hybrid_native_ap and
+                                             os.path.exists("/data/xnor_enable_offhighway_alc_bench"))
     # V209 experimental AP-facing indicator hold. OFF unless enabled on the bench.
     # The DBC gives direction but not half/full detent; only native AP can accept ALC.
     self._native_alc_hold_direction = 0
@@ -402,7 +406,8 @@ class CarController(CarControllerBase):
 
     native_alc_mode = bool(self._cached_hybrid_native_ap and not self._cached_autopilot_disabled and
                            os.path.exists('/data/xnor_enable_native_alc_bridge'))
-    alc_signal = (4 if native_alc_mode else 0) | int(native_alc_turn)
+    offhighway_alc = bool(self._v213_offhighway_alc_enable)
+    alc_signal = (4 if native_alc_mode else 0) | (8 if offhighway_alc else 0) | int(native_alc_turn)
     if (self.frame % 10 == 0) or main_edge or cancel_edge or alc_signal != int(getattr(self, '_native_alc_last_sent', 0)):
       self._native_alc_last_sent = int(alc_signal)
       buses = {int(CANBUS.party)}
@@ -419,6 +424,7 @@ class CarController(CarControllerBase):
           autosteer_247_test=self._cached_autosteer_247_test,
           native_alc_turn=int(native_alc_turn) if int(bus) == int(CANBUS.party) else 0,
           native_alc_mode=bool(native_alc_mode and int(bus) == int(CANBUS.party)),
+          offhighway_alc_enable=bool(offhighway_alc and int(bus) == int(CANBUS.party)),
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -1284,10 +1290,11 @@ class CarController(CarControllerBase):
     #   takeover rather than waiting for native 0x488 to fall.
     if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
       counter = (self.frame // 2) % 16
-      hybrid_recovery = bool(op_enabled) and not self._hybrid_coop_failed and (
-        bool(self._hybrid_coop_rearm) or
-        (bool(self._hybrid_eac_recovery) and not native_ap_lateral_active)
-      )
+      # V213: Tesla retains the sole 0x27D handshake while its native 0x488 is active.
+      # OP may take it only after real native release, avoiding competing allow streams.
+      hybrid_recovery = (bool(op_enabled) and not self._hybrid_coop_failed and
+                         not native_ap_lateral_active and
+                         (bool(self._hybrid_coop_rearm) or bool(self._hybrid_eac_recovery)))
       if (not hybrid_native_ap) or hybrid_recovery:
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 

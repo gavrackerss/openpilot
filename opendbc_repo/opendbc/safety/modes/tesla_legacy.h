@@ -104,6 +104,9 @@ static bool tesla_legacy_op_hybrid_native_ap = false;
 // blindspot or steering authority. Opt-in userspace keeps the bridge OFF by default.
 static uint8_t tesla_legacy_native_alc_turn = 0U;
 static bool tesla_legacy_native_alc_mode = false;
+// V213: distinct internal 0x659 byte4 bit3 requests genuine UI_alcOffHighwayEnable=1
+// on the AP-facing 0x3E8 copy only. No road-class, ALC-state or hands-on falsification.
+static bool tesla_legacy_offhighway_alc_enable = false;
 static uint8_t tesla_legacy_native_alc_state = 31U;
 static uint32_t tesla_legacy_native_alc_last_status_us = 0U;
 static uint32_t tesla_legacy_native_alc_last_command_us = 0U;
@@ -904,6 +907,8 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
                                     !tesla_legacy_external_panda && controls_allowed &&
                                     (req_turn == 1U || req_turn == 2U)) ? req_turn : 0U;
     tesla_legacy_native_alc_last_command_us = microsecond_timer_get();
+    tesla_legacy_offhighway_alc_enable = (!tesla_legacy_external_panda &&
+      tesla_legacy_op_hybrid_native_ap && ((msg->data[4] & 0x08U) != 0U));
     tesla_legacy_autosteer_247_test = (b5 & 0x10U) != 0U;
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
@@ -966,9 +971,9 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   if (!tesla_legacy_external_panda && (addr == 0x27D) && ((int)msg->bus == 0) &&
       tesla_legacy_op_hybrid_native_ap) {
     const uint8_t eac_allow = msg->data[0] & 0x03U;
-    const bool recovery_allowed = !tesla_legacy_coop_failed &&
+    const bool recovery_allowed = !tesla_legacy_coop_failed && !tesla_legacy_stock_lkas &&
                                   (tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active ||
-                                   (tesla_legacy_hybrid_eac_recovery && !tesla_legacy_stock_lkas));
+                                   tesla_legacy_hybrid_eac_recovery);
     return controls_allowed && recovery_allowed && (eac_allow == 1U);
   }
 
@@ -1180,6 +1185,19 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   }
 #endif
 
+  // V213 opt-in bench configuration: UI_driverAssistControl (0x3E8),
+  // UI_alcOffHighwayEnable = bit54 little-endian => data[6] bit6. Preserve
+  // the factory configuration's other 63 bits, original cadence and routing.
+  // 0x659 must be fresh, so stale userspace state cannot indefinitely hold this
+  // experimental permission. This does NOT rewrite UI_roadClass, 0x399 ALC
+  // availability, lane rejection, EPAS feedback or driver supervision.
+  if (bus_num == 0 && addr == 0x3E8 && !tesla_legacy_external_panda &&
+      GET_LEN(to_fwd) == 8 && tesla_legacy_offhighway_alc_enable &&
+      tesla_legacy_op_hybrid_native_ap &&
+      safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_command_us) <= 300000U) {
+    to_fwd->data[6] |= 0x40U;
+  }
+
   // V209: Only the AP-FACING copy of a genuine, freshly received stalk frame
   // may be held after a real tap. Preserve ALL other fields/counter. Do not
   // rewrite physical full/other direction requests, nor create independent
@@ -1274,7 +1292,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (tesla_legacy_op_hybrid_native_ap) {
       // Native owns the handshake normally. During either tightly-gated recovery latch, OP sends
       // the single allow=1 stream; suppress the competing native counter/cadence until recovery.
-      return !tesla_legacy_coop_failed &&
+      return !tesla_legacy_coop_failed && !tesla_legacy_stock_lkas &&
              (tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active ||
               tesla_legacy_hybrid_eac_recovery);
     }
@@ -1424,7 +1442,8 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       const uint32_t since_pulse = (tesla_legacy_hands_pulse_start_us == 0U) ?
                                    0xFFFFFFFFU : safety_get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
 
-      if (!coop_rearm_active && ap_active && ap_requests_hands &&
+      if (!coop_rearm_active && !tesla_legacy_coop_probe_active && !tesla_legacy_coop_failed &&
+          ap_active && ap_requests_hands &&
           (since_pulse >= TESLA_LEGACY_HANDS_PULSE_RETRY_US)) {
         tesla_legacy_hands_pulse_start_us = now;
         tesla_legacy_hands_pulse_positive = !tesla_legacy_hands_pulse_positive;
@@ -1432,17 +1451,16 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 
       const uint32_t pulse_elapsed = (tesla_legacy_hands_pulse_start_us == 0U) ?
                                      0xFFFFFFFFU : safety_get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
-      const bool pulse_active = !coop_rearm_active && ap_active &&
+      const bool pulse_active = !coop_rearm_active && !tesla_legacy_coop_probe_active &&
+                                !tesla_legacy_coop_failed && ap_active &&
                                 (pulse_elapsed <= TESLA_LEGACY_HANDS_PULSE_TOTAL_US);
 
-      if (coop_rearm_active) {
-        // Co-op: keep DAS seeing benign hands/EAC state for the complete physical takeover and
-        // state-driven EPAS re-arm. The real feedback remains untouched for safety/controller.
-        to_fwd->data[4] = (uint8_t)((to_fwd->data[4] & 0x3FU) | 0x40U);  // handsOnLevel = 1
-        to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x0FU);            // EAC_ERROR_IDLE
-        to_fwd->data[6] = (uint8_t)((to_fwd->data[6] & 0x1FU) | (2U << 5));  // EAC_ACTIVE
-        tesla_legacy_set_ap_touch_torque(to_fwd, real_torque_positive, 100U); // +/-1.00 Nm
-        tesla_legacy_set_last_byte_checksum(to_fwd);
+      if (coop_rearm_active || tesla_legacy_coop_probe_active || tesla_legacy_coop_failed) {
+        // V213: forward the REAL EPAS status during physical driver takeover and
+        // re-arm. Do not tell Tesla AP the actuator is ACTIVE/IDLE while real
+        // EPAS is AVAILABLE/HANDS_ON; that mismatch prolonged native type-1
+        // requests and caused competing 0x27D ownership. No checksum edit needed.
+        // Driver intervention and genuine actuator faults must remain visible.
       } else if (pulse_active && (eac_error == 0U) && (eac_status == 2U)) {
         // Stock-like supervision pulse:
         //   phase A: torsion builds first while handsOnLevel remains 0 (~1.40 Nm)
@@ -1559,6 +1577,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_external_panda = GET_FLAG(param, TESLA_LEGACY_FLAG_EXTERNAL_PANDA);
   tesla_legacy_native_alc_turn = 0U;
   tesla_legacy_native_alc_mode = false;
+  tesla_legacy_offhighway_alc_enable = false;
   tesla_legacy_native_alc_state = 31U;
   tesla_legacy_native_alc_last_status_us = 0U;
   tesla_legacy_native_alc_last_command_us = 0U;
