@@ -4688,6 +4688,41 @@ class LongController:
     if self._native_tacc_lead_only_src(src):
       target_ms = max(float(target_ms), float(reference_ms))
 
+    # V209: the native TACC set speed is a road/cruise ceiling, NOT the planner's
+    # short-horizon speed. Earlier V208 exempted planner[lead...] from the curve
+    # stability gate even for radar returns >90 m with weak closing speed, and
+    # those same planner values then acquired a self-confirming curve owner.
+    # This guard changes ONLY virtual SET detents; planner/TACC braking is intact.
+    # Fresh far-sighted CSA must independently say STRAIGHT. Missing/stale CSA
+    # never counts as evidence to reject a real bend.
+    if str(mode_tag) == "native_tacc_passthrough" and state != "STANDSTILL":
+      source = str(src or "").lower()
+      cs_out = getattr(CS, "out", None)
+      physical_angle = abs(float(getattr(cs_out, "steeringAngleDeg", 0.0) or 0.0))
+      physical_rate = abs(float(getattr(cs_out, "steeringRateDeg", 0.0) or 0.0))
+      radar_fresh = 0 <= int(now_ms) - int(self._lead_raw_seen_ms) <= 600 and int(self._lead_raw_seen_ms) > 0
+      live_lead = radar_fresh and bool(self._lead_present) and float(self._lead_drel) > 0.0
+      gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1) if live_lead else 999.0
+      closing_ms = max(0.0, -float(self._lead_vrel)) if live_lead else 0.0
+      ttc_s = float(self._lead_drel) / closing_ms if closing_ms > 0.05 else 999.0
+      weak_lead = (not live_lead or (float(self._lead_drel) >= 65.0 and gap_s >= 3.2
+                                     and float(self._lead_vrel) >= -1.5 and ttc_s >= 18.0))
+      csa_cap, _ = self._csa_curve_target_ms(reference_ms=float(reference_ms), v_ego_ms=float(v_ego_ms))
+      works_cap, _ = self._roadworks_cap_ms(now_ms=int(now_ms))
+      works_binding = works_cap is not None and float(works_cap) < float(reference_ms) - (0.5 * CV.MPH_TO_MS)
+      planner_owned = ("planner[" in source or "curve_owner_planner" in source or
+                       "state[lead_" in source or "state[curve_" in source)
+      unsupported = (
+        target_ms < float(reference_ms) - (1.0 * CV.MPH_TO_MS)
+        and planner_owned and weak_lead
+        and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms))
+        and csa_cap is None and not bool(self._roundabout_active) and not works_binding
+        and physical_angle <= 2.5 and physical_rate <= 9.0
+      )
+      if unsupported:
+        target_ms = max(float(target_ms), float(reference_ms))
+        src = f"{src}+v209_flat_csa_weak_lead_set_veto[d={float(self._lead_drel):.1f},v={float(self._lead_vrel):.2f},gap={gap_s:.1f}]"
+
     if str(mode_tag) == "native_tacc_setspeed_bootstrap":
       # Bootstrap should latch TACC gently at low speed, not immediately jump a
       # 1 mph crawl to a 70 mph road target. Once Tesla reports ENABLED/OVERRIDE,
@@ -4711,8 +4746,11 @@ class LongController:
     unconfirmed = (
       "state[curve_" in source and "curve_owner_planner" in source
       and "curve_owner_csa" not in source and "csa_preferred" not in source
-      and "roundabout" not in source and "planner[lead" not in source
+      and "roundabout" not in source
       and "lead_critical" not in source and "lead_follow" not in source
+      # This candidate was already rejected by fresh straight CSA plus weak/far
+      # radar; do not hold its safe recovery behind the one-second curve dwell.
+      and "v209_flat_csa_weak_lead_set_veto" not in source
       and not ("+roadworks_cap" in source.split("state[curve_", 1)[-1])
     )
     if unconfirmed and state != "STANDSTILL" and str(mode_tag) == "native_tacc_passthrough":

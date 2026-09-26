@@ -20,11 +20,14 @@ def _crc8_j1850(data: bytes) -> int:
 
 def create_fake_das_msg(pedal_enabled: bool, autopilot_disabled: bool, bus: int,
                         stalk_main: bool = False, stalk_cancel: bool = False,
-                        hybrid_native_ap: bool = False, autosteer_247_test: bool = False):
+                        hybrid_native_ap: bool = False, autosteer_247_test: bool = False,
+                        native_alc_turn: int = 0, native_alc_mode: bool = False):
   dat = bytearray(8)
+  # Byte4 is internal to panda, never reaches the car. Only one direction at a time.
+  dat[4] = (0x04 if native_alc_mode else 0) | (int(native_alc_turn) if int(native_alc_turn) in (1, 2) else 0)
   dat[5] = ((0x20 if pedal_enabled else 0) |
             (0x80 if autopilot_disabled else 0) |
-            (0x40 if hybrid_native_ap and not autopilot_disabled else 0) |
+            (0x40 if hybrid_native_ap else 0) |
             (0x10 if autosteer_247_test else 0) |
             (0x02 if stalk_main else 0) |
             (0x01 if stalk_cancel else 0))
@@ -34,11 +37,12 @@ def create_fake_das_msg(pedal_enabled: bool, autopilot_disabled: bool, bus: int,
 def create_fake_das_message(pedal_enabled: bool, autopilot_disabled: bool, *,
                             stalk_main: bool = False, stalk_cancel: bool = False,
                             hybrid_native_ap: bool = False, autosteer_247_test: bool = False,
-                            bus: int = 0):
+                            native_alc_turn: int = 0, native_alc_mode: bool = False, bus: int = 0):
   return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
                              stalk_main=stalk_main, stalk_cancel=stalk_cancel,
                              hybrid_native_ap=hybrid_native_ap,
-                             autosteer_247_test=autosteer_247_test)
+                             autosteer_247_test=autosteer_247_test,
+                             native_alc_turn=native_alc_turn, native_alc_mode=native_alc_mode)
 
 
 class TeslaCAN:
@@ -54,12 +58,9 @@ class TeslaCAN:
     self.jerk_lower = self.CCP.JERK_LIMIT_MIN
 
   def _create_fake_das(self, pedal_enabled: bool, autopilot_disabled: bool, bus: int,
-                       stalk_main: bool = False, stalk_cancel: bool = False,
-                       hybrid_native_ap: bool = False, autosteer_247_test: bool = False):
+                       stalk_main: bool = False, stalk_cancel: bool = False):
     return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
-                               stalk_main=stalk_main, stalk_cancel=stalk_cancel,
-                               hybrid_native_ap=hybrid_native_ap,
-                               autosteer_247_test=autosteer_247_test)
+                               stalk_main=stalk_main, stalk_cancel=stalk_cancel)
 
   def create_steering_control(self, angle, enabled):
     values = {
@@ -133,6 +134,8 @@ class TeslaCAN:
     }
     return self.packer.make_can_msg("DAS_bodyControls", int(bus), values)
 
+
+
   def create_lane_message(self, lane_width_m: float, left_lane_visible: bool, right_lane_visible: bool,
                           lane_range_m: float, c0: float, c1: float, c2: float, c3: float,
                           left_fork: int, right_fork: int, bus: int, counter: int):
@@ -154,32 +157,16 @@ class TeslaCAN:
     return self.packer.make_can_msg("DAS_lanes", int(bus), values)
 
   def create_telemetry_road_info(self, left_lane_visible: bool, right_lane_visible: bool,
-                                 left_lane_quality: int, right_lane_quality: int,
+                                 left_lane_color: int, right_lane_color: int,
                                  alca_state: int, bus: int):
-    # Unity semantics: marker color here describes the physical road marking; the IC's
-    # blue Autopilot path/lane rendering comes from the coherent DAS_status + DAS_lanes state.
-    left_lane_type = 1 if bool(left_lane_visible) else 7
-    left_lane_color = 2 if bool(left_lane_visible) else 0
-    left_marker_quality = 3 if bool(left_lane_visible) else 0
-    if int(left_lane_quality) == 1:
-      left_lane_type = 3
-      left_lane_color = 1
-
-    right_lane_type = 1 if bool(right_lane_visible) else 7
-    right_lane_color = 2 if bool(right_lane_visible) else 0
-    right_marker_quality = 3 if bool(right_lane_visible) else 0
-    if int(right_lane_quality) == 1:
-      right_lane_type = 3
-      right_lane_color = 1
-
     values = {
       "DAS_telemetryMultiplexer": 0,
-      "DAS_telLeftLaneType": left_lane_type,
-      "DAS_telRightLaneType": right_lane_type,
-      "DAS_telLeftMarkerQuality": left_marker_quality,
-      "DAS_telRightMarkerQuality": right_marker_quality,
-      "DAS_telLeftMarkerColor": left_lane_color,
-      "DAS_telRightMarkerColor": right_lane_color,
+      "DAS_telLeftLaneType": 3 if bool(left_lane_visible) else 7,   # dashed / unknown
+      "DAS_telRightLaneType": 3 if bool(right_lane_visible) else 7,  # dashed / unknown
+      "DAS_telLeftMarkerQuality": 3 if bool(left_lane_visible) else 0,
+      "DAS_telRightMarkerQuality": 3 if bool(right_lane_visible) else 0,
+      "DAS_telLeftMarkerColor": int(left_lane_color) if bool(left_lane_visible) else 0,
+      "DAS_telRightMarkerColor": int(right_lane_color) if bool(right_lane_visible) else 0,
       "DAS_telLeftLaneCrossing": 1 if int(alca_state) == 1 else 0,
       "DAS_telRightLaneCrossing": 1 if int(alca_state) == 2 else 0,
     }

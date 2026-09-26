@@ -98,7 +98,15 @@ static int tesla_legacy_das_control_addr = 0x2BF;
 
 // internal OP->safety carrier (0x659) — Unity parity bits (byte5)
 static bool tesla_legacy_op_autopilot_disabled = false;  // bit7
-static bool tesla_legacy_op_hybrid_native_ap = false;     // bit6: native AP visuals/TACC + OP steering substitution
+static bool tesla_legacy_op_hybrid_native_ap = false;
+// V209: AP-facing held turn request, exclusively from internal 0x659 byte4.
+// The DBC encodes direction only; this does not spoof ALC availability, hands-on,
+// blindspot or steering authority. Opt-in userspace keeps the bridge OFF by default.
+static uint8_t tesla_legacy_native_alc_turn = 0U;
+static bool tesla_legacy_native_alc_mode = false;
+static uint8_t tesla_legacy_native_alc_state = 31U;
+static uint32_t tesla_legacy_native_alc_last_command_us = 0U;
+     // bit6: native AP visuals/TACC + OP steering substitution
 static bool tesla_legacy_autosteer_247_test = false;      // bit4: force unknown 0x247 AP-state field to native-Autosteer value
 static bool tesla_legacy_pedal_enabled = false;          // 0x659 byte5 bit5 (Unity parity)
 static bool tesla_legacy_op_stalk_main_edge = false;     // bit1 (edge)
@@ -138,9 +146,19 @@ static const uint32_t TESLA_LEGACY_HANDS_PULSE_RETRY_US = 1500000U;
 // Physical co-op takeover recovery. This is state-driven rather than a fixed presentation tail:
 // neutralise the car-facing steering carrier and authorise OP's EPAS allow frame until the real
 // EPAS reports several consecutive EAC_ACTIVE/IDLE/hands-low samples. Unrelated errors fail open.
-static bool tesla_legacy_coop_rearm_active = false;
+// V203: NEUTRAL -> measured-angle PROBE -> ACKNOWLEDGED, or terminal FAIL.
+// Never await ACTIVE while continuously sending only type-0 steering.
+static bool tesla_legacy_coop_rearm_active = false;  // neutral phase
+static bool tesla_legacy_coop_probe_active = false;
+static bool tesla_legacy_coop_failed = false;       // no silent infinite recovery
+static uint32_t tesla_legacy_coop_last_hands_us = 0U;
+static uint32_t tesla_legacy_coop_probe_start_us = 0U;
+static uint8_t tesla_legacy_coop_release_good_frames = 0U;
 static uint8_t tesla_legacy_coop_recovery_good_frames = 0U;
 static const uint8_t TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES = 5U;
+static const uint32_t TESLA_LEGACY_COOP_HSO_GRACE_US = 1500000U;
+static const uint32_t TESLA_LEGACY_COOP_PROBE_TIMEOUT_US = 1250000U;
+static const uint32_t TESLA_LEGACY_COOP_RELEASE_TIMEOUT_US = 3000000U;
 
 // hands on wheel (from 0x370)
 static bool tesla_legacy_hands_on = false;
@@ -173,6 +191,11 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_hands_pulse_start_us = 0U;
   tesla_legacy_hands_pulse_positive = false;
   tesla_legacy_coop_rearm_active = false;
+  tesla_legacy_coop_probe_active = false;
+  tesla_legacy_coop_failed = false;
+  tesla_legacy_coop_last_hands_us = 0U;
+  tesla_legacy_coop_probe_start_us = 0U;
+  tesla_legacy_coop_release_good_frames = 0U;
   tesla_legacy_coop_recovery_good_frames = 0U;
 
   tesla_legacy_op_stalk_main_edge = false;
@@ -194,6 +217,11 @@ static void tesla_legacy_track_controls_allowed_edge(void) {
     tesla_legacy_hide_errors_armed = true;
     tesla_legacy_hybrid_eac_recovery = false;
     tesla_legacy_coop_rearm_active = false;
+    tesla_legacy_coop_probe_active = false;
+    tesla_legacy_coop_failed = false;
+    tesla_legacy_coop_last_hands_us = 0U;
+    tesla_legacy_coop_probe_start_us = 0U;
+    tesla_legacy_coop_release_good_frames = 0U;
     tesla_legacy_coop_recovery_good_frames = 0U;
     tesla_legacy_controls_allowed_prev = false;
   } else if (controls_allowed) {
@@ -221,6 +249,18 @@ static void tesla_legacy_set_last_byte_checksum(CANPacket_t *msg) {
   if (len > 0) {
     msg->data[len - 1] = tesla_legacy_calc_checksum8(msg, len);
   }
+}
+
+// 0x045 uses CRC-8 SAE J1850 over bytes 0..6, not the additive HUD checksum.
+static uint8_t tesla_legacy_stw_crc8(const CANPacket_t *msg) {
+  uint8_t crc = 0xFFU;
+  for (int i = 0; i < 7; i++) {
+    crc ^= msg->data[i];
+    for (int bit = 0; bit < 8; bit++) {
+      crc = ((crc & 0x80U) != 0U) ? (uint8_t)((crc << 1) ^ 0x1DU) : (uint8_t)(crc << 1);
+    }
+  }
+  return (uint8_t)(crc ^ 0xFFU);
 }
 
 // EPAS_torsionBarTorque is raw=((byte2 low nibble)<<8)|byte3, scale 0.01, offset -20.5.
@@ -275,7 +315,7 @@ static void tesla_legacy_note_aeb_hud_warning(int aeb_event) {
 
 static bool tesla_legacy_aeb_hud_scrub_active(void) {
   return (tesla_legacy_last_aeb_hud_warning_us != 0U) &&
-         (get_ts_elapsed(microsecond_timer_get(), tesla_legacy_last_aeb_hud_warning_us) <= TESLA_LEGACY_AEB_HUD_SCRUB_US);
+         (safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_last_aeb_hud_warning_us) <= TESLA_LEGACY_AEB_HUD_SCRUB_US);
 }
 
 static bool tesla_legacy_hud_takeover_owner(void) {
@@ -410,6 +450,12 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
         return false;
       }
 
+      // If a recovery attempt times out, do not show an active OP overlay as if
+      // the real actuator had accepted it. Pass the genuine AP request instead.
+      if ((addr == 0x488) && tesla_legacy_coop_failed) {
+        return false;
+      }
+
       // Preserve V187's native abort-state fail-open priority even if a co-op re-arm was active.
       if ((addr == 0x488) && ((tesla_legacy_ap_status_fwd == 8U) ||
                              (tesla_legacy_ap_status_fwd == 9U))) {
@@ -430,8 +476,15 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
       const bool fresh = fwd->valid &&
                          (fwd->last_capture_ts != 0U) &&
                          (fwd->last_capture_ts != fwd->last_apply_ts) &&
-                         (get_ts_elapsed(now, fwd->last_capture_ts) <= fwd->expected_timestep_us);
+                         (safety_get_ts_elapsed(now, fwd->last_capture_ts) <= fwd->expected_timestep_us);
       if (!fresh) {
+        // PROBE must never use an arbitrary stale steering template. Without a
+        // fresh, safety-validated measured-angle OP request keep type 0.
+        if ((addr == 0x488) && tesla_legacy_coop_probe_active) {
+          to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0x3FU);
+          tesla_legacy_set_last_byte_checksum(to_fwd);
+          return true;
+        }
         return false;
       }
 
@@ -466,7 +519,17 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
         tesla_legacy_set_u32_le(&to_fwd->data[4], fwd->data_h | (stock_h & fwd->counter_mask_h));
       }
 
-      if ((addr == 0x488) && native_autosteer_active) {
+      if ((addr == 0x488) && tesla_legacy_coop_probe_active) {
+        // A type-1 request is needed to let real EPAS move AVAILABLE -> ACTIVE;
+        // limit this handshake to the measured wheel angle. Do not apply an
+        // arbitrary planner angle before real actuator acknowledgement.
+        const int measured_angle_can = angle_meas.values[0];
+        const uint16_t measured_raw = (uint16_t)(measured_angle_can + 16384);
+        to_fwd->data[0] = (uint8_t)((to_fwd->data[0] & 0x80U) | ((measured_raw >> 8) & 0x7FU));
+        to_fwd->data[1] = (uint8_t)(measured_raw & 0xFFU);
+      }
+
+      if ((addr == 0x488) && native_autosteer_active && !tesla_legacy_coop_probe_active) {
         const int op_angle_can = (((int)(to_fwd->data[0] & 0x7FU) << 8) |
                                   (int)to_fwd->data[1]) - 16384;
         const int max_tracking_delta_can = 100;  // 10.0 deg at 0.1 deg/count
@@ -655,7 +718,7 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (tesla_legacy_hands_on) {
       tesla_legacy_hands_on_last_signal = microsecond_timer_get();
     } else {
-      const uint32_t dt = get_ts_elapsed(microsecond_timer_get(), tesla_legacy_hands_on_last_signal);
+      const uint32_t dt = safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_hands_on_last_signal);
       tesla_legacy_hands_on = dt <= TESLA_LEGACY_TIME_FOR_HANDS_ON_US;
     }
 
@@ -830,12 +893,27 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     tesla_legacy_pedal_enabled = (b5 & 0x20U) != 0U;
     tesla_legacy_op_autopilot_disabled = (b5 & 0x80U) != 0U;
     tesla_legacy_op_hybrid_native_ap = (b5 & 0x40U) != 0U;
+    // Repeated 0x659 must keep this live. If userspace dies the AP-facing hold
+    // expires (no persistent indicator request). Neither side may invent a direction.
+    const uint8_t req_turn = (uint8_t)(msg->data[4] & 0x03U);
+    tesla_legacy_native_alc_mode = !tesla_legacy_external_panda &&
+                                   tesla_legacy_op_hybrid_native_ap &&
+                                   ((msg->data[4] & 0x04U) != 0U);
+    tesla_legacy_native_alc_turn = (tesla_legacy_native_alc_mode &&
+                                    !tesla_legacy_external_panda && controls_allowed &&
+                                    (req_turn == 1U || req_turn == 2U)) ? req_turn : 0U;
+    tesla_legacy_native_alc_last_command_us = microsecond_timer_get();
     tesla_legacy_autosteer_247_test = (b5 & 0x10U) != 0U;
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
     if (!tesla_legacy_op_hybrid_native_ap || tesla_legacy_op_stalk_cancel_edge) {
       tesla_legacy_hybrid_eac_recovery = false;
       tesla_legacy_coop_rearm_active = false;
+      tesla_legacy_coop_probe_active = false;
+      tesla_legacy_coop_failed = false;
+      tesla_legacy_coop_last_hands_us = 0U;
+      tesla_legacy_coop_probe_start_us = 0U;
+      tesla_legacy_coop_release_good_frames = 0U;
       tesla_legacy_coop_recovery_good_frames = 0U;
     }
     if (tesla_legacy_op_stalk_enable &&
@@ -887,9 +965,9 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   if (!tesla_legacy_external_panda && (addr == 0x27D) && ((int)msg->bus == 0) &&
       tesla_legacy_op_hybrid_native_ap) {
     const uint8_t eac_allow = msg->data[0] & 0x03U;
-    const bool recovery_allowed = tesla_legacy_coop_rearm_active ||
-                                  (tesla_legacy_hybrid_eac_recovery &&
-                                   !tesla_legacy_stock_lkas);
+    const bool recovery_allowed = !tesla_legacy_coop_failed &&
+                                  (tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active ||
+                                   (tesla_legacy_hybrid_eac_recovery && !tesla_legacy_stock_lkas));
     return controls_allowed && recovery_allowed && (eac_allow == 1U);
   }
 
@@ -1101,6 +1179,22 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   }
 #endif
 
+  // V209: Only the AP-FACING copy of a genuine, freshly received stalk frame
+  // may be held after a real tap. Preserve ALL other fields/counter. Do not
+  // rewrite physical full/other direction requests, nor create independent
+  // STW traffic. 0x659 is internal and never forwarded.
+  if (bus_num == 0 && addr == 0x45 && !tesla_legacy_external_panda &&
+      GET_LEN(to_fwd) == 8 && tesla_legacy_op_hybrid_native_ap &&
+      controls_allowed && tesla_legacy_stock_lkas &&
+      (tesla_legacy_native_alc_turn == 1U || tesla_legacy_native_alc_turn == 2U) &&
+      safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_command_us) <= 300000U) {
+    const uint8_t real_turn = (uint8_t)(to_fwd->data[2] & 0x03U);
+    if (real_turn == 0U) {
+      to_fwd->data[2] = (uint8_t)((to_fwd->data[2] & 0xFCU) | tesla_legacy_native_alc_turn);
+      to_fwd->data[7] = tesla_legacy_stw_crc8(to_fwd);
+    }
+  }
+
   // Prevent OP actuation echoes back to AP side.
   if ((bus_num == 0) && ((addr == 0x488) || (addr == 0x27D))) {
     return true;
@@ -1158,7 +1252,16 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       return true;  // block stock 0x488: explicit OP-only lateral ownership
     }
     if (tesla_legacy_op_hybrid_native_ap) {
-      (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
+      // The early 0x488 branch returns before the generic HUD path below.
+      // Native ALC-in-progress must therefore bypass OP steering HERE; merely
+      // gating the later HUD branch has no effect. Keep native cadence/counter.
+      const bool native_alc_owns_steer = tesla_legacy_native_alc_mode && controls_allowed &&
+        tesla_legacy_stock_lkas &&
+        (tesla_legacy_native_alc_state == 9U || tesla_legacy_native_alc_state == 10U) &&
+        safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_command_us) <= 300000U;
+      if (!native_alc_owns_steer) {
+        (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
+      }
       return false;  // always forward the genuine native carrier in Hybrid
     }
     return !tesla_legacy_stock_lkas;
@@ -1170,7 +1273,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (tesla_legacy_op_hybrid_native_ap) {
       // Native owns the handshake normally. During either tightly-gated recovery latch, OP sends
       // the single allow=1 stream; suppress the competing native counter/cadence until recovery.
-      return tesla_legacy_coop_rearm_active || tesla_legacy_hybrid_eac_recovery;
+      return !tesla_legacy_coop_failed &&
+             (tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active ||
+              tesla_legacy_hybrid_eac_recovery);
     }
     return !tesla_legacy_stock_lkas;
   }
@@ -1227,32 +1332,88 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
                                            (eac_error == 3U) &&
                                            ((eac_status == 2U) || (eac_status == 4U) ||
                                             (eac_status == 6U));
-      if (physical_hands_takeover) {
+      // V203: raw EPAS, not the AP-facing rewritten 0x370, drives recovery.
+      // Hands-on may last arbitrarily long without a fault; the timeout starts
+      // only after the physical takeover ends.
+      if (physical_hands_takeover && !tesla_legacy_coop_failed &&
+          !tesla_legacy_coop_rearm_active && !tesla_legacy_coop_probe_active) {
         tesla_legacy_coop_rearm_active = true;
+        tesla_legacy_coop_last_hands_us = now;
+        tesla_legacy_coop_release_good_frames = 0U;
         tesla_legacy_coop_recovery_good_frames = 0U;
       }
+      if ((tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active) &&
+          hands_on_level >= 2U) {
+        tesla_legacy_coop_last_hands_us = now;
+        tesla_legacy_coop_release_good_frames = 0U;
+        // A fresh driver override aborts the probe and returns to neutral.
+        if (tesla_legacy_coop_probe_active) {
+          tesla_legacy_coop_probe_active = false;
+          tesla_legacy_coop_rearm_active = true;
+          tesla_legacy_coop_probe_start_us = 0U;
+        }
+      }
 
-      if (tesla_legacy_coop_rearm_active) {
-        const bool allowed_coop_error = (eac_error == 0U) || (eac_error == 3U);
-        const bool allowed_coop_status = (eac_status == 1U) || (eac_status == 2U) ||
-                                         (eac_status == 4U) || (eac_status == 6U);
-        if (!allowed_coop_error || !allowed_coop_status) {
+      const bool allowed_coop_error = (eac_error == 0U) || (eac_error == 3U);
+      const bool allowed_coop_status = (eac_status == 1U) || (eac_status == 2U) ||
+                                       (eac_status == 4U) || (eac_status == 6U);
+      if ((tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active) &&
+          (!allowed_coop_error || !allowed_coop_status)) {
+        // Do not mask or retry an unrelated physical EPS fault.
+        tesla_legacy_coop_rearm_active = false;
+        tesla_legacy_coop_probe_active = false;
+        tesla_legacy_coop_failed = true;
+      }
+
+      const bool real_epas_healthy = (eac_error == 0U) && (eac_status == 2U) &&
+                                     (hands_on_level <= 1U);
+      if (tesla_legacy_coop_rearm_active && real_epas_healthy) {
+        if (++tesla_legacy_coop_recovery_good_frames >= TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
           tesla_legacy_coop_rearm_active = false;
           tesla_legacy_coop_recovery_good_frames = 0U;
+        }
+      } else if (tesla_legacy_coop_rearm_active && !tesla_legacy_coop_failed) {
+        tesla_legacy_coop_recovery_good_frames = 0U;
+        // HANDS_ON error 3 can lag the physical hands release. It is the
+        // only error eligible for the bounded measured-angle probe.
+        const bool released = ((eac_error == 0U) || (eac_error == 3U)) &&
+                              (eac_status == 1U) && (hands_on_level <= 1U);
+        if (released) {
+          if (tesla_legacy_coop_release_good_frames < 0xFFU) {
+            tesla_legacy_coop_release_good_frames++;
+          }
         } else {
-          const bool real_epas_healthy = (eac_error == 0U) && (eac_status == 2U) &&
-                                         (hands_on_level <= 1U);
-          if (real_epas_healthy) {
-            if (tesla_legacy_coop_recovery_good_frames < 0xFFU) {
-              tesla_legacy_coop_recovery_good_frames++;
-            }
-            if (tesla_legacy_coop_recovery_good_frames >=
-                TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
-              tesla_legacy_coop_rearm_active = false;
-              tesla_legacy_coop_recovery_good_frames = 0U;
-            }
-          } else {
+          tesla_legacy_coop_release_good_frames = 0U;
+        }
+        if (tesla_legacy_coop_last_hands_us != 0U &&
+            safety_get_ts_elapsed(now, tesla_legacy_coop_last_hands_us) >= TESLA_LEGACY_COOP_HSO_GRACE_US &&
+            tesla_legacy_coop_release_good_frames >= TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
+          // Release neutral to permit a fresh, measured-angle type-1 request;
+          // only a subsequent real EPAS ACTIVE acknowledgement completes this.
+          tesla_legacy_coop_rearm_active = false;
+          tesla_legacy_coop_probe_active = true;
+          tesla_legacy_coop_probe_start_us = now;
+          tesla_legacy_coop_recovery_good_frames = 0U;
+        } else if (tesla_legacy_coop_last_hands_us != 0U &&
+                   hands_on_level <= 1U &&
+                   safety_get_ts_elapsed(now, tesla_legacy_coop_last_hands_us) >= TESLA_LEGACY_COOP_RELEASE_TIMEOUT_US) {
+          tesla_legacy_coop_rearm_active = false;
+          tesla_legacy_coop_failed = true;
+        }
+      }
+
+      if (tesla_legacy_coop_probe_active) {
+        if (real_epas_healthy) {
+          if (++tesla_legacy_coop_recovery_good_frames >= TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
+            tesla_legacy_coop_probe_active = false;
             tesla_legacy_coop_recovery_good_frames = 0U;
+          }
+        } else {
+          tesla_legacy_coop_recovery_good_frames = 0U;
+          if (tesla_legacy_coop_probe_start_us != 0U &&
+              safety_get_ts_elapsed(now, tesla_legacy_coop_probe_start_us) >= TESLA_LEGACY_COOP_PROBE_TIMEOUT_US) {
+            tesla_legacy_coop_probe_active = false;
+            tesla_legacy_coop_failed = true;
           }
         }
       }
@@ -1260,7 +1421,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       const bool coop_rearm_active = tesla_legacy_coop_rearm_active;
 
       const uint32_t since_pulse = (tesla_legacy_hands_pulse_start_us == 0U) ?
-                                   0xFFFFFFFFU : get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
+                                   0xFFFFFFFFU : safety_get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
 
       if (!coop_rearm_active && ap_active && ap_requests_hands &&
           (since_pulse >= TESLA_LEGACY_HANDS_PULSE_RETRY_US)) {
@@ -1269,7 +1430,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       }
 
       const uint32_t pulse_elapsed = (tesla_legacy_hands_pulse_start_us == 0U) ?
-                                     0xFFFFFFFFU : get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
+                                     0xFFFFFFFFU : safety_get_ts_elapsed(now, tesla_legacy_hands_pulse_start_us);
       const bool pulse_active = !coop_rearm_active && ap_active &&
                                 (pulse_elapsed <= TESLA_LEGACY_HANDS_PULSE_TOTAL_US);
 
@@ -1330,6 +1491,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // V184: observe genuine DAS supervision state in the forward path without adding 0x399 to
   // RxCheck (so there is no new liveness dependency). Capture before any optional HUD overlay.
   if ((bus_num == 2) && (addr == 0x399)) {
+    tesla_legacy_native_alc_state = (uint8_t)(((to_fwd->data[5] >> 6) & 0x03U) | ((to_fwd->data[6] & 0x07U) << 2));
     tesla_legacy_ap_status_fwd = (uint8_t)(to_fwd->data[0] & 0x0FU);
     tesla_legacy_ap_hands_state_fwd = (uint8_t)((to_fwd->data[5] >> 2) & 0x0FU);
     if (!((tesla_legacy_ap_status_fwd == 3U) ||
@@ -1344,7 +1506,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // matching stock AP frame arrives here, selected OP-owned payload bits are overlaid while
   // preserving stock timing/counters. Additive checksum is recomputed only for 0x399/0x389.
   if (bus_num == 2) {
-    if (tesla_legacy_is_hud_status_msg(addr) &&
+    const bool native_alc_owns_steer =
+      (addr == 0x488) && tesla_legacy_op_hybrid_native_ap &&
+      tesla_legacy_native_alc_mode && controls_allowed && tesla_legacy_stock_lkas &&
+      (tesla_legacy_native_alc_state == 9U || tesla_legacy_native_alc_state == 10U) &&
+      safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_command_us) <= 300000U;
+    if (tesla_legacy_is_hud_status_msg(addr) && !native_alc_owns_steer &&
         ((addr != 0x2B9) || (original_das_control_aeb_event == 0))) {
       (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
     }
@@ -1387,6 +1554,10 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 // --- init ---
 static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_external_panda = GET_FLAG(param, TESLA_LEGACY_FLAG_EXTERNAL_PANDA);
+  tesla_legacy_native_alc_turn = 0U;
+  tesla_legacy_native_alc_mode = false;
+  tesla_legacy_native_alc_state = 31U;
+  tesla_legacy_native_alc_last_command_us = 0U;
   tesla_legacy_op_stalk_enable = GET_FLAG(param, TESLA_LEGACY_FLAG_OP_STALK_ENABLE);
   tesla_legacy_ignore_stock_aeb = GET_FLAG(param, TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB);
   tesla_legacy_has_ap_hw = GET_FLAG(param, TESLA_LEGACY_FLAG_HW2) || GET_FLAG(param, TESLA_LEGACY_FLAG_HW3);
@@ -1414,6 +1585,11 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_hands_pulse_start_us = 0U;
   tesla_legacy_hands_pulse_positive = false;
   tesla_legacy_coop_rearm_active = false;
+  tesla_legacy_coop_probe_active = false;
+  tesla_legacy_coop_failed = false;
+  tesla_legacy_coop_last_hands_us = 0U;
+  tesla_legacy_coop_probe_start_us = 0U;
+  tesla_legacy_coop_release_good_frames = 0U;
   tesla_legacy_coop_recovery_good_frames = 0U;
 
   tesla_legacy_hands_on = false;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 
 from cereal import log
@@ -56,6 +57,7 @@ class DesireHelper:
     self._tinkla_alc_delay_s = 2.0
     self._last_param_poll_t = 0.0
     self._pre_lane_change_start_t: float | None = None
+    self._v209_native_alc_owns_lane_changes = False
 
   def _poll_tinkla_params(self) -> None:
     now = time.monotonic()
@@ -81,11 +83,26 @@ class DesireHelper:
     # clamp for safety
     self._tinkla_alc_delay_s = max(0.0, min(self._tinkla_alc_delay_s, 10.0))
 
+    # Opt-in native ALC uses the genuine Tesla trajectory; don't simultaneously
+    # ask the OP model for an independent lane change. Default OFF and no impact
+    # on standalone OP or on V208's existing lane-change path.
+    try:
+      self._v209_native_alc_owns_lane_changes = (
+        self._params.get_bool('TinklaHybridNativeAP') and
+        not self._params.get_bool('TinklaAutopilotDisabled') and
+        os.path.exists('/data/xnor_enable_native_alc_bridge'))
+    except (UnknownKeyName, OSError):
+      self._v209_native_alc_owns_lane_changes = False
+
   def update(self, carstate, lateral_active: bool, lane_change_prob: float) -> None:
     self._poll_tinkla_params()
 
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
+    if self._v209_native_alc_owns_lane_changes:
+      # Native AP receives the bounded held physical indicator and decides ALC.
+      # Do not run conflicting OP trajectory even if native ALC reports unavailable.
+      one_blinker = False
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:

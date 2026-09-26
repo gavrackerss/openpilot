@@ -129,6 +129,12 @@ class CarController(CarControllerBase):
     self._hybrid_drop_warmup_until_frame = -1
     self._hybrid_alc_phase = "IDLE"
     self._hybrid_alc_last_diag_frame = -100000
+    # V209 experimental AP-facing indicator hold. OFF unless enabled on the bench.
+    # The DBC gives direction but not half/full detent; only native AP can accept ALC.
+    self._native_alc_hold_direction = 0
+    self._native_alc_hold_since_frame = -1
+    self._native_alc_tap_previous = 0
+    self._native_alc_progress_seen = False
     self._speed_sync_last_frame = -100000
     # Unity-parity pacing for automated cruise stalk presses
     self._human_cruise_action_time_ms = 0
@@ -286,7 +292,62 @@ class CarController(CarControllerBase):
       self._human_cruise_action_time_ms = self._now_ms()
     self._prev_cruise_buttons = btn
 
-  def _emit_internal_0x659(self, CS, can_sends) -> None:
+  def _native_alc_virtual_hold(self, CC, CS) -> int:
+    """Request only a bounded AP-facing indicator HOLD; never authorize ALC/EPAS.
+
+    Native state 4 (exiting-highway unavailable) is intentionally NOT overridden.
+    The input is the genuine tap detected by BLNK, not our own virtual stalk.
+    The feature is OFF unless the bench-only enable file exists. Firmware's
+    fwd_msg overlays the genuine 0x45 AP-facing frame; synthetic TX alone cannot
+    be assumed to reach the AP ECU. Always obey direct physical stalk changes.
+    """
+    enabled = (self._cached_hybrid_native_ap and not self._cached_autopilot_disabled
+               and os.path.exists('/data/xnor_enable_native_alc_bridge'))
+    tap = int(getattr(CS, 'tap_direction', 0) or 0)
+    physical = int(getattr(CS, 'turnSignalStalkState', 0) or 0)
+    state = int(getattr(CS, '_native_alc_state', 31))
+    valid = bool(getattr(CS, '_native_alc_valid', False))
+    out = getattr(CS, 'out', None)
+    left_blind = bool(getattr(out, 'leftBlindspot', False))
+    right_blind = bool(getattr(out, 'rightBlindspot', False))
+    healthy = (bool(getattr(out, 'cruiseState', None) and out.cruiseState.enabled)
+               and bool(getattr(out, 'stockLkas', False))
+               and bool(getattr(CC, 'latActive', False))
+               and int(getattr(CS, 'eac_status_raw', -1)) == 2
+               and int(getattr(CS, 'eac_error_code_raw', -1)) == 0
+               and not bool(getattr(out, 'brakePressed', False))
+               and not bool(getattr(out, 'steerFaultTemporary', False))
+               and not bool(getattr(out, 'steerFaultPermanent', False)))
+    prior = self._native_alc_hold_direction
+    direction_available = (valid and ((state in (6, 8) and tap == 1) or
+                                      (state in (7, 8) and tap == 2)))
+    fresh_tap_edge = tap in (1, 2) and tap != self._native_alc_tap_previous
+    self._native_alc_tap_previous = tap
+    if not enabled or not healthy or physical not in (0, prior) or (prior == 1 and left_blind) or (prior == 2 and right_blind):
+      self._native_alc_hold_direction = 0
+    elif not prior and fresh_tap_edge and physical == 0 and direction_available and not (left_blind if tap == 1 else right_blind):
+      self._native_alc_hold_direction = tap
+      self._native_alc_hold_since_frame = int(self.frame)
+      self._native_alc_progress_seen = False
+      cloudlog.info(f'[XNOR_V209_ALC] tap={tap} native={state} AP_fwd_request=ARMED')
+    elif prior:
+      if state == (9 if prior == 1 else 10):
+        self._native_alc_progress_seen = True
+      # Keep the genuine stalk request only while native AP is still accepting it.
+      # 9/10 indicate native in progress; 28 is a hands-on request, NOT permission
+      # to spoof hands or continue without driver acknowledgement.
+      valid_state = state in ((6, 8, 9, 28) if prior == 1 else (7, 8, 10, 28))
+      opposite_input = physical in (1, 2) and physical != prior
+      if (not valid or not valid_state or opposite_input or
+          (self._native_alc_progress_seen and state != (9 if prior == 1 else 10)) or
+          int(self.frame) - self._native_alc_hold_since_frame > 700 or
+          (state == 28 and int(self.frame) - self._native_alc_hold_since_frame > 200)):
+        self._native_alc_hold_direction = 0
+    if prior != self._native_alc_hold_direction:
+      cloudlog.info(f'[XNOR_V209_ALC] bridge={self._native_alc_hold_direction} native={state} prior={prior}')
+    return int(self._native_alc_hold_direction)
+
+  def _emit_internal_0x659(self, CS, can_sends, *, native_alc_turn: int = 0) -> None:
     stalk_btn = int(getattr(CS, "cruise_buttons", 0) or 0)
     prev_btn = int(self._op659_prev_btn)
 
@@ -295,7 +356,11 @@ class CarController(CarControllerBase):
 
     self._op659_prev_btn = stalk_btn
 
-    if (self.frame % 10 == 0) or main_edge or cancel_edge:
+    native_alc_mode = bool(self._cached_hybrid_native_ap and not self._cached_autopilot_disabled and
+                           os.path.exists('/data/xnor_enable_native_alc_bridge'))
+    alc_signal = (4 if native_alc_mode else 0) | int(native_alc_turn)
+    if (self.frame % 10 == 0) or main_edge or cancel_edge or alc_signal != int(getattr(self, '_native_alc_last_sent', 0)):
+      self._native_alc_last_sent = int(alc_signal)
       buses = {int(CANBUS.party)}
       if self.CP.carFingerprint in LEGACY_CARS:
         buses.add(int(CANBUS.powertrain))
@@ -308,6 +373,8 @@ class CarController(CarControllerBase):
           stalk_cancel=cancel_edge,
           hybrid_native_ap=(self._cached_hybrid_native_ap and not self._cached_autopilot_disabled),
           autosteer_247_test=self._cached_autosteer_247_test,
+          native_alc_turn=int(native_alc_turn) if int(bus) == int(CANBUS.party) else 0,
+          native_alc_mode=bool(native_alc_mode and int(bus) == int(CANBUS.party)),
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -755,7 +822,8 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
-    self._emit_internal_0x659(CS, can_sends)
+    native_alc_turn = self._native_alc_virtual_hold(CC, CS)
+    self._emit_internal_0x659(CS, can_sends, native_alc_turn=native_alc_turn)
 
     # Config-unlock experiment: transmit GTW_carConfig(0x398) with autopilot=2 natively on bus 2
     # (the AP module's own segment), ~1Hz. Fixed valid payload; no checksum/counter on this frame.
@@ -970,6 +1038,15 @@ class CarController(CarControllerBase):
       self._steer_warmup_until_frame = int(self.frame) + 2  # shorter warmup so turn-in starts sooner
     self._lat_active_prev = bool(lat_active)
 
+    # V209: once real native AP acknowledges ALC, leave its 0x488 trajectory
+    # untouched. Merely requesting an indicator does NOT transfer steering.
+    # The regular panda 10-degree guard remains active outside genuine ALC.
+    native_alc_owns_steer = bool(
+      hybrid_native_ap and os.path.exists('/data/xnor_enable_native_alc_bridge')
+      and bool(getattr(CS, '_native_alc_valid', False))
+      and int(getattr(CS, '_native_alc_state', 31)) in (9, 10)
+      and native_ap_lateral_active and eac_status_raw == 2 and eac_error_raw == 0
+    )
     # Steering (50Hz)
     if self.frame % 2 == 0:
       if ((not lat_active) or human_control_blocks_lateral or steer_inhibit or
@@ -1016,7 +1093,7 @@ class CarController(CarControllerBase):
         # direct TX, then substitutes it onto the next genuine native-AP 0x488 while preserving
         # native cadence/counter. Use a fixed non-zero template counter because panda discards it;
         # this avoids the overlay cache's zero-counter guard dropping every 16th template.
-        if (not hybrid_native_ap) or lat_active:
+        if ((not hybrid_native_ap) or lat_active) and not native_alc_owns_steer:
           template_counter = 1 if hybrid_native_ap else counter
           can_sends.append(
             self.tesla_can.create_steering_control(template_counter, self.apply_angle_last, lat_active)
