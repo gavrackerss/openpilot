@@ -134,6 +134,14 @@ class CarController(CarControllerBase):
     self._v211_alc_epas_abort = False
     self._v211_alc_route = 'IDLE'
     self._v211_alc_last_notice_frame = -100000
+    # V212: observe actual native release and sustained REAL EPAS acceptance before
+    # granting an OP ALC trajectory. This does not request or spoof native release.
+    self._v212_epas_good_frames = 0
+    self._v212_native_idle_good_frames = 0
+    self._v212_handover_state = 'IDLE'
+    self._v212_handover_since_frame = -1
+    self._v212_pending_direction = 0
+    self._v212_prev_physical_turn = 0
     # V209 experimental AP-facing indicator hold. OFF unless enabled on the bench.
     # The DBC gives direction but not half/full detent; only native AP can accept ALC.
     self._native_alc_hold_direction = 0
@@ -312,6 +320,21 @@ class CarController(CarControllerBase):
         return 'WAIT_EPAS'
       return 'OP_IDLE_CARRIER'
     return 'IDLE'
+
+  @staticmethod
+  def _v212_handover_ready(*, native_lkas: bool, epas_healthy: bool,
+                            epas_good_frames: int, native_idle_good_frames: int,
+                            coop_rearm: bool, coop_failed: bool,
+                            steer_inhibit: bool) -> bool:
+    """Authorize only the ALREADY-EXISTING idle-carrier OP path.
+
+    A type-1 native steering request cannot be converted to OP authority by
+    Tesla's ALC-unavailable status. This predicate deliberately has no control
+    output, no native-release command, and no change to panda's tracking guard.
+    """
+    return bool(not native_lkas and epas_healthy and
+                int(epas_good_frames) >= 25 and int(native_idle_good_frames) >= 5 and
+                not coop_rearm and not coop_failed and not steer_inhibit)
 
   def _native_alc_virtual_hold(self, CC, CS) -> int:
     """Request only a bounded AP-facing indicator HOLD; never authorize ALC/EPAS.
@@ -1085,6 +1108,80 @@ class CarController(CarControllerBase):
     op_alc_requested = bool(getattr(CS, 'alca_pre_engage', False) or
                             getattr(CS, 'alca_engaged', False))
     real_epas_healthy = bool(eac_status_raw == 2 and eac_error_raw == 0 and hands_on_level <= 1)
+    # V212 handover qualification runs at the 100 Hz controller cadence and
+    # observes ACTUAL EPAS state, not the AP-presented/scrubbed 0x370. A one-frame
+    # ACTIVE reading immediately after native LKAS falls is not enough.
+    if hybrid_native_ap and op_enabled and real_epas_healthy and not steer_inhibit:
+      self._v212_epas_good_frames = min(25, self._v212_epas_good_frames + 1)
+      if not native_ap_lateral_active:
+        self._v212_native_idle_good_frames = min(5, self._v212_native_idle_good_frames + 1)
+      else:
+        self._v212_native_idle_good_frames = 0
+    else:
+      self._v212_epas_good_frames = 0
+      self._v212_native_idle_good_frames = 0
+
+    v212_ready = self._v212_handover_ready(
+      native_lkas=native_ap_lateral_active, epas_healthy=real_epas_healthy,
+      epas_good_frames=self._v212_epas_good_frames,
+      native_idle_good_frames=self._v212_native_idle_good_frames,
+      coop_rearm=bool(self._hybrid_coop_rearm), coop_failed=bool(self._hybrid_coop_failed),
+      steer_inhibit=steer_inhibit,
+    )
+
+    # Passive observation of a GENUINE physical turn request. The tap can be
+    # transient, so observe both the tap decoder and the raw stalk direction.
+    # A stale/held indicator never becomes an automatic OP trajectory on release.
+    turn = int(getattr(CS, 'turnSignalStalkState', 0) or 0)
+    tap = int(getattr(CS, 'tap_direction', 0) or 0)
+    physical_turn = turn if turn in (1, 2) else (tap if tap in (1, 2) else 0)
+    physical_edge = physical_turn in (1, 2) and physical_turn != self._v212_prev_physical_turn
+    self._v212_prev_physical_turn = physical_turn
+    previous_handover_state = self._v212_handover_state
+    if not hybrid_native_ap or not op_enabled or steer_inhibit or self._hybrid_coop_failed:
+      self._v212_handover_state = 'IDLE'
+      self._v212_pending_direction = 0
+      self._v212_handover_since_frame = -1
+    elif native_alc_owns_steer:
+      self._v212_handover_state = 'NATIVE_ALC'
+      self._v212_pending_direction = 0
+      self._v212_handover_since_frame = -1
+    elif physical_edge:
+      self._v212_pending_direction = physical_turn
+      self._v212_handover_since_frame = int(self.frame)
+      self._v212_handover_state = 'WAIT_NATIVE_RELEASE' if native_ap_lateral_active else 'VERIFY_EPAS'
+    elif self._v212_pending_direction in (1, 2):
+      if native_ap_lateral_active:
+        if int(self.frame) - self._v212_handover_since_frame >= 300:
+          self._v212_handover_state = 'BLOCKED_NATIVE_ACTIVE'
+        else:
+          self._v212_handover_state = 'WAIT_NATIVE_RELEASE'
+      elif not v212_ready:
+        self._v212_handover_state = 'VERIFY_EPAS'
+      else:
+        # READY describes availability for a NEW explicit input only. It does
+        # not change desire_helper's off->on edge rule or queue a manoeuvre.
+        self._v212_handover_state = 'READY_FRESH_REQUEST'
+      if int(self.frame) - self._v212_handover_since_frame >= 500:
+        self._v212_handover_state = 'EXPIRED_FRESH_REQUEST_REQUIRED'
+        self._v212_pending_direction = 0
+    elif op_alc_requested and v212_ready:
+      self._v212_handover_state = 'OP_IDLE_CARRIER'
+    else:
+      self._v212_handover_state = 'IDLE'
+
+    if self._v212_handover_state != previous_handover_state:
+      cloudlog.warning(
+        f'[XNOR_V212_ALC_HANDOVER] state={self._v212_handover_state} '
+        f'native_type={int(native_ap_lateral_active)} '
+        f'native_alc={int(getattr(CS, "_native_alc_state", 31))} '
+        f'physical_dir={physical_turn} pending_dir={self._v212_pending_direction} '
+        f'real_epas={eac_status_raw} error={eac_error_raw} hands={hands_on_level} '
+        f'epas_good={self._v212_epas_good_frames} idle_good={self._v212_native_idle_good_frames} '
+        f'coop_rearm={int(self._hybrid_coop_rearm)} coop_failed={int(self._hybrid_coop_failed)} '
+        f'op_plan={int(op_alc_requested)} ready={int(v212_ready)}'
+      )
+
     if self._v210_native_alc_prev_active and not native_alc_owns_steer:
       self._v210_native_alc_handback_until_frame = int(self.frame) + 100
       self.apply_angle_last = float(CS.out.steeringAngleDeg)
@@ -1101,7 +1198,7 @@ class CarController(CarControllerBase):
 
     alc_route = (self._v211_lane_change_route(
       native_alc_active=native_alc_owns_steer, native_lkas=native_ap_lateral_active,
-      op_request=op_alc_requested, epas_healthy=real_epas_healthy,
+      op_request=op_alc_requested, epas_healthy=(real_epas_healthy and (native_ap_lateral_active or v212_ready)),
       coop_rearm=bool(self._hybrid_coop_rearm), coop_failed=bool(self._hybrid_coop_failed))
       if hybrid_native_ap else 'IDLE')
     if op_alc_requested and alc_route == 'WAIT_EPAS':
@@ -1117,7 +1214,7 @@ class CarController(CarControllerBase):
     if alc_route != self._v211_alc_route or (blocked_alc and int(self.frame) - self._v211_alc_last_notice_frame >= 100):
       cloudlog.warning(f'[XNOR_V211_ALC] route={alc_route} native_lkas={int(native_ap_lateral_active)} '
                        f'native_state={int(getattr(CS, "_native_alc_state", 31))} '
-                       f'op_request={int(op_alc_requested)} real_eac={eac_status_raw} '
+                       f'op_request={int(op_alc_requested)} v212_ready={int(v212_ready)} real_eac={eac_status_raw} '
                        f'error={eac_error_raw} hands={hands_on_level} blocked={int(blocked_alc)}')
       self._v211_alc_last_notice_frame = int(self.frame)
     self._v211_alc_route = alc_route
