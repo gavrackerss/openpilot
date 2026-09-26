@@ -58,6 +58,7 @@ class DesireHelper:
     self._last_param_poll_t = 0.0
     self._pre_lane_change_start_t: float | None = None
     self._v209_native_alc_owns_lane_changes = False
+    self._v211_hybrid_native_ap = False
 
   def _poll_tinkla_params(self) -> None:
     now = time.monotonic()
@@ -83,6 +84,14 @@ class DesireHelper:
     # clamp for safety
     self._tinkla_alc_delay_s = max(0.0, min(self._tinkla_alc_delay_s, 10.0))
 
+    # V211: select the actual lateral owner before permitting an independent OP
+    # lane-change trajectory. This does not make native state 4 into availability.
+    try:
+      self._v211_hybrid_native_ap = (self._params.get_bool('TinklaHybridNativeAP') and
+                                     not self._params.get_bool('TinklaAutopilotDisabled'))
+    except (UnknownKeyName, OSError):
+      self._v211_hybrid_native_ap = False
+
     # Opt-in native ALC uses the genuine Tesla trajectory; don't simultaneously
     # ask the OP model for an independent lane change. Default OFF and no impact
     # on standalone OP or on V208's existing lane-change path.
@@ -94,15 +103,34 @@ class DesireHelper:
     except (UnknownKeyName, OSError):
       self._v209_native_alc_owns_lane_changes = False
 
+  @staticmethod
+  def _v211_op_lane_change_allowed(hybrid_native_ap: bool, native_lkas: bool) -> bool:
+    # An active native type-1 0x488 is a live lane-keeping controller even when
+    # Tesla ALC is state 4/unavailable. The independent OP trajectory is valid
+    # only on the existing idle native carrier / OP-only steering path.
+    return not (bool(hybrid_native_ap) and bool(native_lkas))
+
   def update(self, carstate, lateral_active: bool, lane_change_prob: float) -> None:
     self._poll_tinkla_params()
 
     v_ego = carstate.vEgo
-    one_blinker = carstate.leftBlinker != carstate.rightBlinker
-    if self._v209_native_alc_owns_lane_changes:
-      # Native AP receives the bounded held physical indicator and decides ALC.
-      # Do not run conflicting OP trajectory even if native ALC reports unavailable.
-      one_blinker = False
+    physical_one_blinker = carstate.leftBlinker != carstate.rightBlinker
+    native_lkas = bool(getattr(carstate, 'stockLkas', False))
+    op_lane_change_allowed = self._v211_op_lane_change_allowed(self._v211_hybrid_native_ap, native_lkas)
+    one_blinker = bool(physical_one_blinker and op_lane_change_allowed)
+    if not op_lane_change_allowed and self.lane_change_state != LaneChangeState.off:
+      # Genuine native steering took ownership mid-request: cancel OP's model
+      # desire instead of generating a second physical lane-change trajectory.
+      self.lane_change_state = LaneChangeState.off
+      self.lane_change_direction = LaneChangeDirection.none
+      self._pre_lane_change_start_t = None
+      self.lane_change_timer = 0.0
+      self.lane_change_ll_prob = 1.0
+    # V210: do not suppress OP's independent lane-change planner merely because
+    # the optional native indicator bridge is configured. Tesla can report ALC
+    # unavailable (state 4) on ordinary multi-lane roads. Only genuine native
+    # ALC-in-progress (9/10) may take steering ownership downstream; the panda
+    # tracking guard remains in force otherwise. No full-detent/availability spoof.
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
@@ -167,7 +195,9 @@ class DesireHelper:
     else:
       self.lane_change_timer += DT_MDL
 
-    self.prev_one_blinker = one_blinker
+    # A held/latching indicator is not a fresh OP request after native LKAS
+    # releases. Require physical off -> on before another independent change.
+    self.prev_one_blinker = physical_one_blinker
     self.desire = DESIRES[self.lane_change_direction][self.lane_change_state]
 
     # Send keep pulse once per second during LaneChangeState.preLaneChange

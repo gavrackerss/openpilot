@@ -129,6 +129,11 @@ class CarController(CarControllerBase):
     self._hybrid_drop_warmup_until_frame = -1
     self._hybrid_alc_phase = "IDLE"
     self._hybrid_alc_last_diag_frame = -100000
+    self._v210_native_alc_prev_active = False
+    self._v210_native_alc_handback_until_frame = -1
+    self._v211_alc_epas_abort = False
+    self._v211_alc_route = 'IDLE'
+    self._v211_alc_last_notice_frame = -100000
     # V209 experimental AP-facing indicator hold. OFF unless enabled on the bench.
     # The DBC gives direction but not half/full detent; only native AP can accept ALC.
     self._native_alc_hold_direction = 0
@@ -291,6 +296,22 @@ class CarController(CarControllerBase):
     if (btn not in (BTN_MAIN, BTN_IDLE)) and (btn != prev_btn):
       self._human_cruise_action_time_ms = self._now_ms()
     self._prev_cruise_buttons = btn
+
+  @staticmethod
+  def _v211_lane_change_route(*, native_alc_active: bool, native_lkas: bool,
+                              op_request: bool, epas_healthy: bool,
+                              coop_rearm: bool, coop_failed: bool) -> str:
+    # Route OP's lane change only after genuine native steering has released.
+    # A Tesla state-4/unavailable report alone does NOT release native 0x488.
+    if native_alc_active and native_lkas and epas_healthy:
+      return 'NATIVE_ALC'
+    if op_request:
+      if native_lkas:
+        return 'NATIVE_LKAS_BLOCK'
+      if coop_failed or coop_rearm or not epas_healthy:
+        return 'WAIT_EPAS'
+      return 'OP_IDLE_CARRIER'
+    return 'IDLE'
 
   def _native_alc_virtual_hold(self, CC, CS) -> int:
     """Request only a bounded AP-facing indicator HOLD; never authorize ALC/EPAS.
@@ -953,10 +974,10 @@ class CarController(CarControllerBase):
     hybrid_carrier_overlay = bool(hybrid_native_ap)
     native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
 
-    # V208: native ALC is diagnostic only: OP initiates and finishes its own
-    # lane-change trajectory with the existing 0x488 carrier. Never mistake
-    # a model lane-change phase for accepted EPAS authority; the 10-degree guard
-    # remains unchanged and may constrain a mismatched native path.
+    # V211: genuine native 0x488 ownership and OP's independent lane-change
+    # request are mutually exclusive. Tesla state 4 does not grant OP actuator
+    # authority; OP can run on the genuine idle carrier only after native LKAS
+    # releases and real EPAS acknowledges steering.
     if hybrid_native_ap:
       direction = int(getattr(CS, "alca_direction", 0) or 0)
       native_state = int(getattr(CS, "_native_alc_state", 31))
@@ -985,6 +1006,20 @@ class CarController(CarControllerBase):
         )
         self._hybrid_alc_last_diag_frame = int(self.frame)
       self._hybrid_alc_phase = alc_phase
+      # State 4 on an active native type-1 carrier is a native availability
+      # restriction, not OP steering authority. Log a tap even if the OP model
+      # correctly remains idle; users must not see a fake completed lane change.
+      if (int(getattr(CS, 'tap_direction', 0) or 0) in (1, 2) and native_ap_lateral_active and
+          native_valid and native_state == 4 and
+          int(self.frame) - int(getattr(self, '_v211_native_unavailable_log_frame', -100000)) >= 100):
+        cloudlog.warning('[XNOR_V211_ALC] native_state=4 native_type=1 tap_seen=1; '
+                         'OP independent trajectory unavailable until genuine native LKAS release')
+        self._v211_native_unavailable_log_frame = int(self.frame)
+      if alc_phase == 'OP_INDEPENDENT' and native_ap_lateral_active and native_valid and native_state == 4:
+        if int(self.frame) - int(getattr(self, '_v210_alc_conflict_log_frame', -100000)) >= 100:
+          cloudlog.warning('[XNOR_V210_ALC_LIMIT] native_unavailable=4 OP_plan_active=1 '
+                           'physical_steering_still_subject_to_native_10deg_guard; no_forced_takeover')
+          self._v210_alc_conflict_log_frame = int(self.frame)
 
     # XNOR_V186_HYBRID_EAC_RECOVERY:
     # The V185 logs prove that after a physical co-op takeover Tesla can drop native Autosteer
@@ -1038,18 +1073,58 @@ class CarController(CarControllerBase):
       self._steer_warmup_until_frame = int(self.frame) + 2  # shorter warmup so turn-in starts sooner
     self._lat_active_prev = bool(lat_active)
 
-    # V209: once real native AP acknowledges ALC, leave its 0x488 trajectory
-    # untouched. Merely requesting an indicator does NOT transfer steering.
-    # The regular panda 10-degree guard remains active outside genuine ALC.
+    # V210: a genuine native ALC (including one started by a physical FULL stalk)
+    # owns its trajectory regardless of the optional tap bridge's setting. When
+    # it finishes, briefly retain genuine native lane centering while OP's
+    # model settles; don't immediately overlay a stale mid-change OP angle.
     native_alc_owns_steer = bool(
-      hybrid_native_ap and os.path.exists('/data/xnor_enable_native_alc_bridge')
-      and bool(getattr(CS, '_native_alc_valid', False))
+      hybrid_native_ap and bool(getattr(CS, '_native_alc_valid', False))
       and int(getattr(CS, '_native_alc_state', 31)) in (9, 10)
       and native_ap_lateral_active and eac_status_raw == 2 and eac_error_raw == 0
     )
+    op_alc_requested = bool(getattr(CS, 'alca_pre_engage', False) or
+                            getattr(CS, 'alca_engaged', False))
+    real_epas_healthy = bool(eac_status_raw == 2 and eac_error_raw == 0 and hands_on_level <= 1)
+    if self._v210_native_alc_prev_active and not native_alc_owns_steer:
+      self._v210_native_alc_handback_until_frame = int(self.frame) + 100
+      self.apply_angle_last = float(CS.out.steeringAngleDeg)
+      cloudlog.info('[XNOR_V211_ALC] native_complete; retain native until OP model settles')
+    self._v210_native_alc_prev_active = bool(native_alc_owns_steer)
+    native_alc_handback = bool(
+      hybrid_native_ap and native_ap_lateral_active and real_epas_healthy and
+      int(self._v210_native_alc_handback_until_frame) >= 0 and
+      (int(self.frame) < int(self._v210_native_alc_handback_until_frame) or op_alc_requested)
+    )
+    if not native_ap_lateral_active or not real_epas_healthy:
+      self._v210_native_alc_handback_until_frame = -1
+      native_alc_handback = False
+
+    alc_route = (self._v211_lane_change_route(
+      native_alc_active=native_alc_owns_steer, native_lkas=native_ap_lateral_active,
+      op_request=op_alc_requested, epas_healthy=real_epas_healthy,
+      coop_rearm=bool(self._hybrid_coop_rearm), coop_failed=bool(self._hybrid_coop_failed))
+      if hybrid_native_ap else 'IDLE')
+    if op_alc_requested and alc_route == 'WAIT_EPAS':
+      # An in-flight OP trajectory must not suddenly resume after EPAS recovers.
+      # Wait for a new, independent indicator request once the planner is idle.
+      self._v211_alc_epas_abort = True
+    if not op_alc_requested:
+      self._v211_alc_epas_abort = False
+    blocked_alc = bool(hybrid_native_ap and
+                       (alc_route in ('NATIVE_LKAS_BLOCK', 'WAIT_EPAS') or self._v211_alc_epas_abort))
+    if blocked_alc or native_alc_owns_steer or native_alc_handback:
+      self.apply_angle_last = float(CS.out.steeringAngleDeg)
+    if alc_route != self._v211_alc_route or (blocked_alc and int(self.frame) - self._v211_alc_last_notice_frame >= 100):
+      cloudlog.warning(f'[XNOR_V211_ALC] route={alc_route} native_lkas={int(native_ap_lateral_active)} '
+                       f'native_state={int(getattr(CS, "_native_alc_state", 31))} '
+                       f'op_request={int(op_alc_requested)} real_eac={eac_status_raw} '
+                       f'error={eac_error_raw} hands={hands_on_level} blocked={int(blocked_alc)}')
+      self._v211_alc_last_notice_frame = int(self.frame)
+    self._v211_alc_route = alc_route
     # Steering (50Hz)
     if self.frame % 2 == 0:
       if ((not lat_active) or human_control_blocks_lateral or steer_inhibit or
+          native_alc_owns_steer or native_alc_handback or blocked_alc or
           (int(self.frame) < int(self._steer_warmup_until_frame)) or
           (hybrid_native_ap and int(self.frame) < int(self._hybrid_drop_warmup_until_frame))):
         apply_angle = float(CS.out.steeringAngleDeg)
@@ -1093,7 +1168,7 @@ class CarController(CarControllerBase):
         # direct TX, then substitutes it onto the next genuine native-AP 0x488 while preserving
         # native cadence/counter. Use a fixed non-zero template counter because panda discards it;
         # this avoids the overlay cache's zero-counter guard dropping every 16th template.
-        if ((not hybrid_native_ap) or lat_active) and not native_alc_owns_steer:
+        if ((not hybrid_native_ap) or lat_active) and not (native_alc_owns_steer or native_alc_handback or blocked_alc):
           template_counter = 1 if hybrid_native_ap else counter
           can_sends.append(
             self.tesla_can.create_steering_control(template_counter, self.apply_angle_last, lat_active)

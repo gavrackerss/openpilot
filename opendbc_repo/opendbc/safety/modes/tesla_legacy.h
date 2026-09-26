@@ -105,6 +105,7 @@ static bool tesla_legacy_op_hybrid_native_ap = false;
 static uint8_t tesla_legacy_native_alc_turn = 0U;
 static bool tesla_legacy_native_alc_mode = false;
 static uint8_t tesla_legacy_native_alc_state = 31U;
+static uint32_t tesla_legacy_native_alc_last_status_us = 0U;
 static uint32_t tesla_legacy_native_alc_last_command_us = 0U;
      // bit6: native AP visuals/TACC + OP steering substitution
 static bool tesla_legacy_autosteer_247_test = false;      // bit4: force unknown 0x247 AP-state field to native-Autosteer value
@@ -1255,10 +1256,10 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       // The early 0x488 branch returns before the generic HUD path below.
       // Native ALC-in-progress must therefore bypass OP steering HERE; merely
       // gating the later HUD branch has no effect. Keep native cadence/counter.
-      const bool native_alc_owns_steer = tesla_legacy_native_alc_mode && controls_allowed &&
-        tesla_legacy_stock_lkas &&
+      const bool native_alc_owns_steer = controls_allowed && tesla_legacy_stock_lkas &&
         (tesla_legacy_native_alc_state == 9U || tesla_legacy_native_alc_state == 10U) &&
-        safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_command_us) <= 300000U;
+        tesla_legacy_native_alc_last_status_us != 0U &&
+        safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_status_us) <= 300000U;
       if (!native_alc_owns_steer) {
         (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
       }
@@ -1492,6 +1493,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // RxCheck (so there is no new liveness dependency). Capture before any optional HUD overlay.
   if ((bus_num == 2) && (addr == 0x399)) {
     tesla_legacy_native_alc_state = (uint8_t)(((to_fwd->data[5] >> 6) & 0x03U) | ((to_fwd->data[6] & 0x07U) << 2));
+    tesla_legacy_native_alc_last_status_us = microsecond_timer_get();
     tesla_legacy_ap_status_fwd = (uint8_t)(to_fwd->data[0] & 0x0FU);
     tesla_legacy_ap_hands_state_fwd = (uint8_t)((to_fwd->data[5] >> 2) & 0x0FU);
     if (!((tesla_legacy_ap_status_fwd == 3U) ||
@@ -1508,9 +1510,10 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   if (bus_num == 2) {
     const bool native_alc_owns_steer =
       (addr == 0x488) && tesla_legacy_op_hybrid_native_ap &&
-      tesla_legacy_native_alc_mode && controls_allowed && tesla_legacy_stock_lkas &&
+      controls_allowed && tesla_legacy_stock_lkas &&
       (tesla_legacy_native_alc_state == 9U || tesla_legacy_native_alc_state == 10U) &&
-      safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_command_us) <= 300000U;
+      tesla_legacy_native_alc_last_status_us != 0U &&
+      safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_status_us) <= 300000U;
     if (tesla_legacy_is_hud_status_msg(addr) && !native_alc_owns_steer &&
         ((addr != 0x2B9) || (original_das_control_aeb_event == 0))) {
       (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
@@ -1557,6 +1560,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_native_alc_turn = 0U;
   tesla_legacy_native_alc_mode = false;
   tesla_legacy_native_alc_state = 31U;
+  tesla_legacy_native_alc_last_status_us = 0U;
   tesla_legacy_native_alc_last_command_us = 0U;
   tesla_legacy_op_stalk_enable = GET_FLAG(param, TESLA_LEGACY_FLAG_OP_STALK_ENABLE);
   tesla_legacy_ignore_stock_aeb = GET_FLAG(param, TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB);
