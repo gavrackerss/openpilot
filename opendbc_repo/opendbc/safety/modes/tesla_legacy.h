@@ -160,8 +160,12 @@ static uint32_t tesla_legacy_coop_probe_start_us = 0U;
 static uint8_t tesla_legacy_coop_release_good_frames = 0U;
 static uint8_t tesla_legacy_coop_recovery_good_frames = 0U;
 static const uint8_t TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES = 5U;
+// V214: five raw 0x370 ACTIVE samples (~100ms) were a transient ACK, not a stable
+// handover. Keep the measured-angle probe/allow ownership until 25 independent
+// real EPAS samples are continuously ACTIVE/IDLE; never count cached userspace data.
+static const uint8_t TESLA_LEGACY_COOP_PROBE_GOOD_FRAMES = 25U;
 static const uint32_t TESLA_LEGACY_COOP_HSO_GRACE_US = 1500000U;
-static const uint32_t TESLA_LEGACY_COOP_PROBE_TIMEOUT_US = 1250000U;
+static const uint32_t TESLA_LEGACY_COOP_PROBE_TIMEOUT_US = 2250000U;
 static const uint32_t TESLA_LEGACY_COOP_RELEASE_TIMEOUT_US = 3000000U;
 
 // hands on wheel (from 0x370)
@@ -1385,7 +1389,15 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       const bool real_epas_healthy = (eac_error == 0U) && (eac_status == 2U) &&
                                      (hands_on_level <= 1U);
       if (tesla_legacy_coop_rearm_active && real_epas_healthy) {
-        if (++tesla_legacy_coop_recovery_good_frames >= TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
+        // V214: a short ACTIVE blip must not release the neutral carrier early.
+        // Do not hand native/OP steering back while original HSO numb period is
+        // running; require continuous genuine EPAS feedback, not cached status.
+        if (tesla_legacy_coop_recovery_good_frames < 0xFFU) {
+          tesla_legacy_coop_recovery_good_frames++;
+        }
+        if (tesla_legacy_coop_recovery_good_frames >= TESLA_LEGACY_COOP_PROBE_GOOD_FRAMES &&
+            tesla_legacy_coop_last_hands_us != 0U &&
+            safety_get_ts_elapsed(now, tesla_legacy_coop_last_hands_us) >= TESLA_LEGACY_COOP_HSO_GRACE_US) {
           tesla_legacy_coop_rearm_active = false;
           tesla_legacy_coop_recovery_good_frames = 0U;
         }
@@ -1404,7 +1416,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
         }
         if (tesla_legacy_coop_last_hands_us != 0U &&
             safety_get_ts_elapsed(now, tesla_legacy_coop_last_hands_us) >= TESLA_LEGACY_COOP_HSO_GRACE_US &&
-            tesla_legacy_coop_release_good_frames >= TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
+            tesla_legacy_coop_release_good_frames >= TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES &&
+            !tesla_legacy_stock_lkas) {
+          // V214: only probe after a genuine native type-1 -> type-0 release.
           // Release neutral to permit a fresh, measured-angle type-1 request;
           // only a subsequent real EPAS ACTIVE acknowledgement completes this.
           tesla_legacy_coop_rearm_active = false;
@@ -1421,7 +1435,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
 
       if (tesla_legacy_coop_probe_active) {
         if (real_epas_healthy) {
-          if (++tesla_legacy_coop_recovery_good_frames >= TESLA_LEGACY_COOP_RECOVERY_GOOD_FRAMES) {
+          if (++tesla_legacy_coop_recovery_good_frames >= TESLA_LEGACY_COOP_PROBE_GOOD_FRAMES) {
             tesla_legacy_coop_probe_active = false;
             tesla_legacy_coop_recovery_good_frames = 0U;
           }

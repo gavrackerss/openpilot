@@ -125,6 +125,10 @@ class CarController(CarControllerBase):
     self._hybrid_coop_healthy_frames = 0
     self._hybrid_coop_last_physical_hands_frame = -1
     self._hybrid_coop_failed = False
+    # V214: V207's brake cancellation remains persistent even during a gas override.
+    # This mirrors the controlsd latch; only its accepted CC.longActive rearm clears it.
+    # Never use a pedal override as permission to rearm a brake-cancelled session.
+    self._hybrid_setspeed_brake_cancelled = False
     self._hybrid_drop_frame = -1
     self._hybrid_drop_warmup_until_frame = -1
     self._hybrid_alc_phase = "IDLE"
@@ -822,16 +826,34 @@ class CarController(CarControllerBase):
       self._cached_hybrid_native_ap and not self._cached_autopilot_disabled
       and self.CP.openpilotLongitudinalControl
     )
-    # V207: longitudinal permission is CC.longActive, NOT CC.enabled/latActive.
-    # Physical brake cancels LONG while the existing Hybrid lateral stays latched.
-    # Clear original LONG's pending arbitration when a brake or an explicit
-    # long-cancel is in effect. The pulse release is handled in update() first.
+    # V214: cruise SET synchronization is NOT acceleration authority. An accelerator
+    # override makes CC.longActive false, but the original LONG/ACC road-target
+    # synchronizer must continue through Tesla's normal OVERRIDE cruise state.
+    # The V207 physical-brake latch still wins: no virtual SET/RES while braking,
+    # regen or after brake cancellation until controlsd accepts a fresh MAIN/RES.
+    # Explicit non-pedal longitudinal overrides must not be treated as gas requests.
     if hybrid_original_long:
-      enabled = (enabled and bool(getattr(CC, "longActive", False))
-                 and not bool(getattr(CS.out, "brakePressed", False))
-                 and not bool(getattr(CS.out, "regenBraking", False)))
+      cs_out = getattr(CS, "out", None)
+      brake = bool(getattr(cs_out, "brakePressed", False))
+      regen = bool(getattr(cs_out, "regenBraking", False))
+      gas = bool(getattr(cs_out, "gasPressed", False))
+      long_active = bool(getattr(CC, "longActive", False))
+      stock_state = str(getattr(CS, "stock_cruise_state", "") or "").upper()
+      if not enabled:
+        self._hybrid_setspeed_brake_cancelled = False
+      elif brake:
+        self._hybrid_setspeed_brake_cancelled = True
+      elif long_active and not regen:
+        # controlsd owns the physical-button rearm decision. Do not independently
+        # parse synthetic/echoed virtual stalk commands in this controller.
+        self._hybrid_setspeed_brake_cancelled = False
+      pedal_only_override = gas and stock_state == "OVERRIDE" and not self._hybrid_setspeed_brake_cancelled
+      enabled = (enabled and not brake and not regen and not self._hybrid_setspeed_brake_cancelled
+                 and (long_active or pedal_only_override))
       if not enabled:
         self._long_module.update(CS, enabled=False, frame=int(self.frame), now_ms=int(self._now_ms()))
+      elif pedal_only_override and not long_active and int(self.frame) % 100 == 0:
+        self._diag_log("[XNOR_V214_LONG] accelerator_override: SET sync remains enabled; acceleration authority stays with driver")
     if (not enabled) or (not (self._cached_autopilot_disabled or hybrid_original_long)):
       self._diag_log(
         f"[XNOR_CC_DIAG] gate=pre enabled={int(enabled)} "
@@ -919,7 +941,10 @@ class CarController(CarControllerBase):
           self._hybrid_coop_healthy_frames = 0
         elif real_epas_healthy:
           self._hybrid_coop_healthy_frames += 1
-          if self._hybrid_coop_healthy_frames >= 25:
+          # V214: 25 *100Hz control cycles cleared this before panda's independent
+          # physical 0x370 probe had remained ACTIVE long enough. Require a longer
+          # stable window than panda's 25 genuine 0x370 acknowledgements (~0.5s).
+          if self._hybrid_coop_healthy_frames >= 75:
             self._hybrid_coop_rearm = False
             self._hybrid_coop_healthy_frames = 0
         else:
@@ -937,10 +962,10 @@ class CarController(CarControllerBase):
         self._hybrid_coop_last_physical_hands_frame = int(self.frame)
       real_epas_healthy = eac_status_raw == 2 and eac_error_raw == 0 and hands_on_level <= 1
       if (self._hybrid_coop_rearm and not real_epas_healthy and
-          0 <= self._hybrid_coop_last_physical_hands_frame < int(self.frame) - 300 and hands_on_level <= 1):
+          0 <= self._hybrid_coop_last_physical_hands_frame < int(self.frame) - 450 and hands_on_level <= 1):
         self._hybrid_coop_failed = True
       if (self._hybrid_drop_frame >= 0 and
-          int(self.frame) - self._hybrid_drop_frame >= 200 and
+          int(self.frame) - self._hybrid_drop_frame >= (450 if self._hybrid_coop_rearm else 200) and
           not real_epas_healthy and hands_on_level <= 1):
         self._hybrid_coop_failed = True
       if self._hybrid_coop_failed:
