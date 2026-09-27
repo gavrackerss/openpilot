@@ -22,12 +22,14 @@ def create_fake_das_msg(pedal_enabled: bool, autopilot_disabled: bool, bus: int,
                         stalk_main: bool = False, stalk_cancel: bool = False,
                         hybrid_native_ap: bool = False, autosteer_247_test: bool = False,
                         native_alc_turn: int = 0, native_alc_mode: bool = False,
-                        offhighway_alc_enable: bool = False, acc_from_zero_enable: bool = False):
+                        offhighway_alc_enable: bool = False, acc_from_zero_enable: bool = False,
+                        autopilot_always_on_enable: bool = False):
   dat = bytearray(8)
   # Byte4 is internal to panda, never reaches the car. Only one direction at a time.
   dat[4] = ((0x04 if native_alc_mode else 0) |
             (0x08 if offhighway_alc_enable else 0) |
             (0x10 if acc_from_zero_enable else 0) |
+            (0x20 if autopilot_always_on_enable else 0) |
             (int(native_alc_turn) if int(native_alc_turn) in (1, 2) else 0))
   dat[5] = ((0x20 if pedal_enabled else 0) |
             (0x80 if autopilot_disabled else 0) |
@@ -42,14 +44,16 @@ def create_fake_das_message(pedal_enabled: bool, autopilot_disabled: bool, *,
                             stalk_main: bool = False, stalk_cancel: bool = False,
                             hybrid_native_ap: bool = False, autosteer_247_test: bool = False,
                             native_alc_turn: int = 0, native_alc_mode: bool = False,
-                            offhighway_alc_enable: bool = False, acc_from_zero_enable: bool = False, bus: int = 0):
+                            offhighway_alc_enable: bool = False, acc_from_zero_enable: bool = False,
+                            autopilot_always_on_enable: bool = False, bus: int = 0):
   return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
                              stalk_main=stalk_main, stalk_cancel=stalk_cancel,
                              hybrid_native_ap=hybrid_native_ap,
                              autosteer_247_test=autosteer_247_test,
                              native_alc_turn=native_alc_turn, native_alc_mode=native_alc_mode,
                              offhighway_alc_enable=offhighway_alc_enable,
-                             acc_from_zero_enable=acc_from_zero_enable)
+                             acc_from_zero_enable=acc_from_zero_enable,
+                             autopilot_always_on_enable=autopilot_always_on_enable)
 
 
 class TeslaCAN:

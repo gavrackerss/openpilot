@@ -110,6 +110,9 @@ static bool tesla_legacy_offhighway_alc_enable = false;
 // V216: independent byte4 bit4 requests UI_accFromZero on genuine AP-facing 0x3E8.
 // The configuration request never changes cruise authorization, safety or actuation.
 static bool tesla_legacy_acc_from_zero_enable = false;
+// V217: separate byte4 bit5 requests UI_autopilotAlwaysOn (0x3E8 byte6 bit4).
+// Configuration only: no stalk/engage/safety/actuation override.
+static bool tesla_legacy_autopilot_always_on_enable = false;
 static uint8_t tesla_legacy_native_alc_state = 31U;
 static uint32_t tesla_legacy_native_alc_last_status_us = 0U;
 static uint32_t tesla_legacy_native_alc_last_command_us = 0U;
@@ -918,6 +921,8 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
       tesla_legacy_op_hybrid_native_ap && ((msg->data[4] & 0x08U) != 0U));
     tesla_legacy_acc_from_zero_enable = (!tesla_legacy_external_panda &&
       tesla_legacy_op_hybrid_native_ap && ((msg->data[4] & 0x10U) != 0U));
+    tesla_legacy_autopilot_always_on_enable = (!tesla_legacy_external_panda &&
+      tesla_legacy_op_hybrid_native_ap && ((msg->data[4] & 0x20U) != 0U));
     tesla_legacy_autosteer_247_test = (b5 & 0x10U) != 0U;
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
@@ -1194,17 +1199,20 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   }
 #endif
 
-  // V213/V216: modify only the AP-facing COPY of a genuine GTW 0x3E8.
-  // UI_accFromZero bit53 = data[6] bit5; UI_alcOffHighwayEnable bit54 = bit6.
+  // V213/V216/V217: modify only the AP-facing COPY of a genuine GTW 0x3E8.
+  // UI_autopilotAlwaysOn bit52 = data[6] bit4; UI_accFromZero bit53 = bit5;
+  // UI_alcOffHighwayEnable bit54 = bit6. The three opt-ins are independent.
   // Independent bench opt-ins retain the original other 62 bits, source,
   // cadence and routing. The internal 0x659 must be fresh. Neither flag is an
   // ECU acknowledgement or permission for additional longitudinal TX.
   // Do not touch 0x3C8 road class, 0x399 state, EPAS or driver supervision.
   if (bus_num == 0 && addr == 0x3E8 && !tesla_legacy_external_panda &&
       GET_LEN(to_fwd) == 8 && tesla_legacy_op_hybrid_native_ap &&
-      (tesla_legacy_acc_from_zero_enable || tesla_legacy_offhighway_alc_enable) &&
+      (tesla_legacy_autopilot_always_on_enable || tesla_legacy_acc_from_zero_enable ||
+       tesla_legacy_offhighway_alc_enable) &&
       safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_command_us) <= 300000U) {
     uint8_t feature_bits = 0U;
+    if (tesla_legacy_autopilot_always_on_enable) { feature_bits |= 0x10U; }
     if (tesla_legacy_acc_from_zero_enable) { feature_bits |= 0x20U; }
     if (tesla_legacy_offhighway_alc_enable) { feature_bits |= 0x40U; }
     to_fwd->data[6] |= feature_bits;
@@ -1599,6 +1607,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_native_alc_mode = false;
   tesla_legacy_offhighway_alc_enable = false;
   tesla_legacy_acc_from_zero_enable = false;
+  tesla_legacy_autopilot_always_on_enable = false;
   tesla_legacy_native_alc_state = 31U;
   tesla_legacy_native_alc_last_status_us = 0U;
   tesla_legacy_native_alc_last_command_us = 0U;

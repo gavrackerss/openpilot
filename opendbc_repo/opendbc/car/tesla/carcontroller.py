@@ -158,6 +158,13 @@ class CarController(CarControllerBase):
       and os.path.exists("/data/xnor_enable_acc_from_zero_bench")
       and not os.path.exists("/data/xnor_disable_acc_from_zero_bench")
     )
+    # V217: separate AP Always On configuration REQUEST, never a virtual engage.
+    # Latched at controller init and requires explicit enable without disable override.
+    self._v217_autopilot_always_on_enable = bool(
+      self._cached_hybrid_native_ap
+      and os.path.exists("/data/xnor_enable_autopilot_always_on_bench")
+      and not os.path.exists("/data/xnor_disable_autopilot_always_on_bench")
+    )
     # V209 experimental AP-facing indicator hold. OFF unless enabled on the bench.
     # The DBC gives direction but not half/full detent; only native AP can accept ALC.
     self._native_alc_hold_direction = 0
@@ -420,8 +427,10 @@ class CarController(CarControllerBase):
                            os.path.exists('/data/xnor_enable_native_alc_bridge'))
     offhighway_alc = bool(self._v213_offhighway_alc_enable)
     acc_from_zero = bool(self._v216_acc_from_zero_enable)
+    autopilot_always_on = bool(self._v217_autopilot_always_on_enable)
     alc_signal = ((4 if native_alc_mode else 0) | (8 if offhighway_alc else 0) |
-                  (16 if acc_from_zero else 0) | int(native_alc_turn))
+                  (16 if acc_from_zero else 0) | (32 if autopilot_always_on else 0) |
+                  int(native_alc_turn))
     if (self.frame % 10 == 0) or main_edge or cancel_edge or alc_signal != int(getattr(self, '_native_alc_last_sent', 0)):
       self._native_alc_last_sent = int(alc_signal)
       buses = {int(CANBUS.party)}
@@ -440,6 +449,7 @@ class CarController(CarControllerBase):
           native_alc_mode=bool(native_alc_mode and int(bus) == int(CANBUS.party)),
           offhighway_alc_enable=bool(offhighway_alc and int(bus) == int(CANBUS.party)),
           acc_from_zero_enable=bool(acc_from_zero and int(bus) == int(CANBUS.party)),
+          autopilot_always_on_enable=bool(autopilot_always_on and int(bus) == int(CANBUS.party)),
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -913,6 +923,12 @@ class CarController(CarControllerBase):
       cloudlog.info(
         f'[XNOR_V216_ACC_ZERO] request=1 stock={getattr(CS, "stock_cruise_state", "UNKNOWN")} '
         f'set_ms={float(getattr(CS, "stock_cruise_set_speed_ms", 0.0) or 0.0):.2f} '
+        f'ego_ms={float(getattr(getattr(CS, "out", None), "vEgo", 0.0) or 0.0):.2f}'
+      )
+
+    if self._v217_autopilot_always_on_enable and (self.frame % 500 == 0):
+      cloudlog.info(
+        f'[XNOR_V217_AP_ALWAYS_ON] request=1 stock={getattr(CS, "stock_cruise_state", "UNKNOWN")} '
         f'ego_ms={float(getattr(getattr(CS, "out", None), "vEgo", 0.0) or 0.0):.2f}'
       )
 
