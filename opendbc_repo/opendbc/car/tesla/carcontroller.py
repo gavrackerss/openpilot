@@ -150,6 +150,14 @@ class CarController(CarControllerBase):
     # This modifies only the AP-facing genuine 0x3E8 configuration copy; no road-class spoof.
     self._v213_offhighway_alc_enable = bool(self._cached_hybrid_native_ap and
                                              os.path.exists("/data/xnor_enable_offhighway_alc_bench"))
+    # V216: native AP ACC-from-zero capability REQUEST, independently opt-in and
+    # latched at controller init. This is not proof of native ECU acceptance.
+    # Disable-file override allows a rapid rollback without editing any CAN code.
+    self._v216_acc_from_zero_enable = bool(
+      self._cached_hybrid_native_ap
+      and os.path.exists("/data/xnor_enable_acc_from_zero_bench")
+      and not os.path.exists("/data/xnor_disable_acc_from_zero_bench")
+    )
     # V209 experimental AP-facing indicator hold. OFF unless enabled on the bench.
     # The DBC gives direction but not half/full detent; only native AP can accept ALC.
     self._native_alc_hold_direction = 0
@@ -411,7 +419,9 @@ class CarController(CarControllerBase):
     native_alc_mode = bool(self._cached_hybrid_native_ap and not self._cached_autopilot_disabled and
                            os.path.exists('/data/xnor_enable_native_alc_bridge'))
     offhighway_alc = bool(self._v213_offhighway_alc_enable)
-    alc_signal = (4 if native_alc_mode else 0) | (8 if offhighway_alc else 0) | int(native_alc_turn)
+    acc_from_zero = bool(self._v216_acc_from_zero_enable)
+    alc_signal = ((4 if native_alc_mode else 0) | (8 if offhighway_alc else 0) |
+                  (16 if acc_from_zero else 0) | int(native_alc_turn))
     if (self.frame % 10 == 0) or main_edge or cancel_edge or alc_signal != int(getattr(self, '_native_alc_last_sent', 0)):
       self._native_alc_last_sent = int(alc_signal)
       buses = {int(CANBUS.party)}
@@ -429,6 +439,7 @@ class CarController(CarControllerBase):
           native_alc_turn=int(native_alc_turn) if int(bus) == int(CANBUS.party) else 0,
           native_alc_mode=bool(native_alc_mode and int(bus) == int(CANBUS.party)),
           offhighway_alc_enable=bool(offhighway_alc and int(bus) == int(CANBUS.party)),
+          acc_from_zero_enable=bool(acc_from_zero and int(bus) == int(CANBUS.party)),
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -896,6 +907,14 @@ class CarController(CarControllerBase):
     self._refresh_cached_params()
     native_alc_turn = self._native_alc_virtual_hold(CC, CS)
     self._emit_internal_0x659(CS, can_sends, native_alc_turn=native_alc_turn)
+    # Request diagnostics only. Actual acceptance is evidenced by real native
+    # cruise-state / DI_cruiseSet changes and AP-facing frame capture, not this log.
+    if self._v216_acc_from_zero_enable and (self.frame % 500 == 0):
+      cloudlog.info(
+        f'[XNOR_V216_ACC_ZERO] request=1 stock={getattr(CS, "stock_cruise_state", "UNKNOWN")} '
+        f'set_ms={float(getattr(CS, "stock_cruise_set_speed_ms", 0.0) or 0.0):.2f} '
+        f'ego_ms={float(getattr(getattr(CS, "out", None), "vEgo", 0.0) or 0.0):.2f}'
+      )
 
     # Config-unlock experiment: transmit GTW_carConfig(0x398) with autopilot=2 natively on bus 2
     # (the AP module's own segment), ~1Hz. Fixed valid payload; no checksum/counter on this frame.

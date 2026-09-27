@@ -209,6 +209,14 @@ class LongController:
   _NATIVE_TACC_BOOTSTRAP_MIN_TARGET_MS = 8.0 * CV.MPH_TO_MS
   _NATIVE_TACC_SET_TOLERANCE_MPH = 0.7
   _NATIVE_TACC_SET_TOLERANCE_KPH = 1.0
+  # V215: stabilise only the virtual Tesla SET target during continuous lead follow.
+  # Neither planner acceleration nor Tesla's native adaptive braking is filtered.
+  _NATIVE_LEAD_SET_DROP_DWELL_MS = 650
+  _NATIVE_LEAD_SET_RELEASE_DWELL_MS = 2200
+  _NATIVE_LEAD_SET_MISSING_DWELL_MS = 1200
+  _NATIVE_LEAD_SET_DROP_BAND_MS = 2.0 * CV.MPH_TO_MS
+  _NATIVE_LEAD_SET_RELEASE_GAP_M = 45.0
+  _NATIVE_LEAD_SET_RELEASE_GAP_S = 3.0
   _ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
   _ROADWORKS_CAP_MAX_AGE_MS = 120_000
   _ROADWORKS_CAP_HIGHER_LIMIT_GRACE_MS = 8_000
@@ -599,6 +607,11 @@ class LongController:
     self._unconfirmed_set_target_mph = None
     self._unconfirmed_set_since_ms = 0
     self._native_tacc_last_button = int(CruiseButtons.IDLE)
+    self._native_lead_set_hold_ms: Optional[float] = None
+    self._native_lead_set_last_seen_ms = 0
+    self._native_lead_set_drop_candidate_ms: Optional[float] = None
+    self._native_lead_set_drop_since_ms = 0
+    self._native_lead_set_release_since_ms = 0
     self._native_tacc_latched_until_ms = 0
     self._zero_floor_setspeed_active = False
     services = ["longitudinalPlan", "radarState", "controlsState"]
@@ -3329,6 +3342,7 @@ class LongController:
     self._native_standstill_resume_sent = False
     self._unconfirmed_set_target_mph = None
     self._unconfirmed_set_since_ms = 0
+    self._reset_native_lead_set_hold()
     self.acc._standstill_lead_prev_drel_m = 0.0
     self.acc._standstill_lead_prev_ms = 0
     self.acc._standstill_lead_opening_rate_ms = 0.0
@@ -4638,26 +4652,117 @@ class LongController:
       return False
     return float(v_ego_ms) <= (float(self._NATIVE_TACC_HANDOFF_REFERENCE_MS) + float(self._NATIVE_TACC_HANDOFF_WINDOW_MS))
 
-  def _native_tacc_lead_only_src(self, src: str) -> bool:
-    src_l = str(src or "").lower()
-    has_lead = any(token in src_l for token in (
-      "lead",
-      "planner[lead",
-      "planner[lead_guard",
-      "lead_present",
-      "lead_follow",
-      "lead_low_speed",
-      "lead_constrain",
-    ))
-    has_curve_or_cap = any(token in src_l for token in (
-      "curve",
-      "roundabout",
-      "mapd_cap",
-      "csa",
-      "speed_limit_target",
-      "roadworks_cap",
-    ))
-    return bool(has_lead and not has_curve_or_cap)
+  def _reset_native_lead_set_hold(self) -> None:
+    self._native_lead_set_hold_ms = None
+    self._native_lead_set_last_seen_ms = 0
+    self._native_lead_set_drop_candidate_ms = None
+    self._native_lead_set_drop_since_ms = 0
+    self._native_lead_set_release_since_ms = 0
+
+
+  def _native_tacc_lead_set_stabilise(
+    self, *, now_ms: int, desired_ms: float, reference_ms: float,
+    current_set_ms: float, v_ego_ms: float, src: str,
+  ) -> tuple[float, str]:
+    """Keep a continuous lead's virtual SET target stable, without changing TACC braking.
+
+    The diagnostic source always begins with posted-limit context; text matching
+    `speed_limit_target`/`roadworks_cap` is NOT a test of a binding road cap. Use
+    the final arbitration state, fresh radar, and actual numeric cap values.
+    A lower confirmed curve/limit/roadworks cap always takes precedence.
+    """
+    fresh = bool(
+      int(self._lead_raw_seen_ms) > 0
+      and 0 <= int(now_ms) - int(self._lead_raw_seen_ms) <= 550
+    )
+    live = bool(fresh and self._lead_present and float(self._lead_drel) > 0.0
+                and abs(float(self._lead_yrel)) < float(self._LEAD_OFFLANE_YREL_M))
+    gap_s = float(self._lead_drel) / max(float(v_ego_ms), 0.1) if live else 99.0
+    closing_ms = max(0.0, -float(self._lead_vrel)) if live else 0.0
+    ttc_s = float(self._lead_drel) / closing_ms if closing_ms > 0.05 else 1e6
+
+    # Check live numeric caps; merely seeing a tag in src proves nothing. The
+    # posted-limit reference itself remains a ceiling even while a lead is held.
+    independent_cap_ms = float(reference_ms)
+    csa_cap, _ = self._csa_curve_target_ms(reference_ms=float(reference_ms), v_ego_ms=float(v_ego_ms))
+    if csa_cap is not None:
+      independent_cap_ms = min(float(independent_cap_ms), float(csa_cap))
+    works_cap, _ = self._roadworks_cap_ms(now_ms=int(now_ms))
+    if works_cap is not None:
+      independent_cap_ms = min(float(independent_cap_ms), float(works_cap))
+    map_fresh = bool(self._mapd_last_ns > 0 and 0 <= int(now_ms) * 1_000_000 - int(self._mapd_last_ns) <= int(self._MAPD_FRESH_NS))
+    source_l = str(src or "").lower()
+    map_confirmed = bool(
+      ("state[curve_" in source_l and "curve_owner_mapd" in source_l)
+      or "+mapd_cap[" in source_l or "+mapd_pre_entry" in source_l
+    )
+    # Do not turn an arbitrary mapd value into a *new* cap if normal LONG
+    # arbitration rejected it; only preserve an independently accepted map cap.
+    if map_confirmed and map_fresh and self._mapd_map_curve_ms is not None and float(self._mapd_map_curve_ms) > 0.0:
+      independent_cap_ms = min(float(independent_cap_ms), float(self._mapd_map_curve_ms))
+    if self._roundabout_active:
+      independent_cap_ms = min(float(independent_cap_ms), float(self._ROUNDABOUT_CAP_MS))
+
+    requested_ms = min(float(desired_ms), float(independent_cap_ms))
+    lead_owned = bool(live and str(self._arbitration_state) in ("LEAD_CRITICAL", "LEAD_FOLLOW"))
+    if lead_owned:
+      self._native_lead_set_last_seen_ms = int(now_ms)
+      self._native_lead_set_release_since_ms = 0
+      if self._native_lead_set_hold_ms is None:
+        self._native_lead_set_hold_ms = min(float(reference_ms), float(current_set_ms)) if float(current_set_ms) > 0.1 else float(reference_ms)
+
+      hold_ms = min(float(self._native_lead_set_hold_ms), float(independent_cap_ms))
+      urgent = bool(gap_s <= 1.10 or ttc_s <= 5.0)
+      if float(requested_ms) < float(hold_ms) - (0.75 * CV.MPH_TO_MS):
+        candidate = self._native_lead_set_drop_candidate_ms
+        if urgent:
+          hold_ms = float(requested_ms)
+          self._native_lead_set_drop_candidate_ms = None
+          self._native_lead_set_drop_since_ms = 0
+        elif candidate is None or abs(float(requested_ms) - float(candidate)) > float(self._NATIVE_LEAD_SET_DROP_BAND_MS):
+          self._native_lead_set_drop_candidate_ms = float(requested_ms)
+          self._native_lead_set_drop_since_ms = int(now_ms)
+        elif int(now_ms) - int(self._native_lead_set_drop_since_ms) >= int(self._NATIVE_LEAD_SET_DROP_DWELL_MS):
+          hold_ms = min(float(hold_ms), float(requested_ms))
+          self._native_lead_set_drop_candidate_ms = None
+          self._native_lead_set_drop_since_ms = 0
+      else:
+        self._native_lead_set_drop_candidate_ms = None
+        self._native_lead_set_drop_since_ms = 0
+      self._native_lead_set_hold_ms = float(hold_ms)
+      return float(hold_ms), f"{src}+v215_lead_set_hold[g={gap_s:.1f},ttc={ttc_s:.1f}]"
+
+    # A continuous tracked lead may briefly change from LEAD_FOLLOW into
+    # CRUISE_SYNC when vRel approaches zero. That must not immediately issue
+    # five-step RES pulses, only to issue SET-down on the next radar update.
+    if self._native_lead_set_hold_ms is None:
+      return float(requested_ms), str(src)
+
+    if live:
+      self._native_lead_set_last_seen_ms = int(now_ms)
+      opening = bool(float(self._lead_vrel) >= 0.20 or float(self._lead_drel_rate_ms) >= 0.35)
+      clearly_releasing = bool(
+        float(self._lead_drel) >= float(self._NATIVE_LEAD_SET_RELEASE_GAP_M)
+        and gap_s >= float(self._NATIVE_LEAD_SET_RELEASE_GAP_S)
+        and opening
+      )
+      if clearly_releasing:
+        if not self._native_lead_set_release_since_ms:
+          self._native_lead_set_release_since_ms = int(now_ms)
+        if int(now_ms) - int(self._native_lead_set_release_since_ms) >= int(self._NATIVE_LEAD_SET_RELEASE_DWELL_MS):
+          self._reset_native_lead_set_hold()
+          return float(requested_ms), f"{src}+v215_lead_release[opening]"
+      else:
+        self._native_lead_set_release_since_ms = 0
+    elif self._native_lead_set_last_seen_ms and int(now_ms) - int(self._native_lead_set_last_seen_ms) >= int(self._NATIVE_LEAD_SET_MISSING_DWELL_MS):
+      self._reset_native_lead_set_hold()
+      return float(requested_ms), f"{src}+v215_lead_release[missing]"
+
+    held_ms = min(float(self._native_lead_set_hold_ms), float(independent_cap_ms))
+    # A newly confirmed independent curve/road cap can reduce SET immediately;
+    # no old lead value is allowed to raise a stricter target.
+    self._native_lead_set_hold_ms = min(float(self._native_lead_set_hold_ms), float(independent_cap_ms))
+    return float(held_ms), f"{src}+v215_lead_set_hold[release_pending]"
 
 
   def _native_tacc_sync_decision(
@@ -4685,11 +4790,18 @@ class LongController:
       self._native_standstill_resume_sent = False
 
     target_ms = float(desired_ms)
-    if self._native_tacc_lead_only_src(src):
-      target_ms = max(float(target_ms), float(reference_ms))
+    if str(mode_tag) == "native_tacc_passthrough" and state != "STANDSTILL":
+      target_ms, src = self._native_tacc_lead_set_stabilise(
+        now_ms=int(now_ms), desired_ms=float(target_ms),
+        reference_ms=float(reference_ms), current_set_ms=float(current_set_ms),
+        v_ego_ms=float(v_ego_ms), src=str(src),
+      )
+    else:
+      # Standstill's original one-shot RES and TACC handoff are independent.
+      self._reset_native_lead_set_hold()
 
-    # V209: the native TACC set speed is a road/cruise ceiling, NOT the planner's
-    # short-horizon speed. Earlier V208 exempted planner[lead...] from the curve
+    # V209 weak/far-lead veto only: confirmed lead SET targets are retained by V215.
+    # Earlier V208 exempted planner[lead...] from the curve
     # stability gate even for radar returns >90 m with weak closing speed, and
     # those same planner values then acquired a self-confirming curve owner.
     # This guard changes ONLY virtual SET detents; planner/TACC braking is intact.
@@ -4715,8 +4827,16 @@ class LongController:
       unsupported = (
         target_ms < float(reference_ms) - (1.0 * CV.MPH_TO_MS)
         and planner_owned and weak_lead
+        # A continuously tracked lead that has already reduced SET must finish
+        # its hysteretic release; a momentary weak/far sample is not a clearance.
+        and self._native_lead_set_hold_ms is None
         and self._csa_confidently_flat(v_ego_ms=float(v_ego_ms))
         and csa_cap is None and not bool(self._roundabout_active) and not works_binding
+        and not (self._mapd_last_ns > 0 and 0 <= int(now_ms) * 1_000_000 - int(self._mapd_last_ns) <= int(self._MAPD_FRESH_NS)
+                 and self._mapd_map_curve_ms is not None and float(self._mapd_map_curve_ms) > 0.0
+                 and float(self._mapd_map_curve_ms) < float(reference_ms) - (1.0 * CV.MPH_TO_MS)
+                 and (("state[curve_" in source and "curve_owner_mapd" in source)
+                      or "+mapd_cap[" in source or "+mapd_pre_entry" in source))
         and physical_angle <= 2.5 and physical_rate <= 9.0
       )
       if unsupported:
