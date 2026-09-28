@@ -52,9 +52,11 @@ class TeslaCANRaven:
       "DAS_controlCounter": counter,
     }
 
-    # Powertrain DBC uses 0x2BF for DAS_control (legacy HW2)
+    # On Model S legacy HW2, 0x2BF is the powertrain *CAN address*, but Tesla's
+    # DAS_control checksum uses the chassis 0x2B9 address as its additive seed.
+    # Verified against genuine AP 0x2BF frames, original XNOR and panda safety.
     data = self.packers[CANBUS.powertrain].make_can_msg("DAS_control", CANBUS.powertrain, values)[1]
-    values["DAS_controlChecksum"] = self.checksum(0x2BF, data[:7])
+    values["DAS_controlChecksum"] = self.checksum(0x2B9, data[:7])
     return self.packers[CANBUS.powertrain].make_can_msg("DAS_control", CANBUS.powertrain, values)
 
   def create_longitudinal_command_chassis(self, acc_state, accel, counter, v_ego, active,
