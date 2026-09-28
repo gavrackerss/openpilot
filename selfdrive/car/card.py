@@ -22,6 +22,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.tesla_0x659 import Tesla659Carrier
+from openpilot.selfdrive.car.tesla_longitudinal_shadow import LongitudinalShadow
 
 
 class _TeslaSpeedLimitRaw:
@@ -251,6 +252,14 @@ class Car:
       and not os.path.exists('/data/xnor_disable_experimental_direct_bench')
     )
 
+    # V220: passive owner trace only; never changes fwd_hook, safety, or actuator
+    # permission. Explicit opt-in in the same V218 direct Hybrid mode.
+    self._xnor_v220_shadow = LongitudinalShadow() if (
+      self._xnor_experimental_direct_selected
+      and os.path.exists('/data/xnor_enable_long_owner_shadow_bench')
+      and not os.path.exists('/data/xnor_disable_long_owner_shadow_bench')
+    ) else None
+
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
 
@@ -291,6 +300,11 @@ class Car:
     RD: structs.RadarDataT | None = self.RI.update(can_list)
 
     self.sm.update(0)
+    if self._xnor_v220_shadow is not None:
+      self._xnor_v220_shadow.observe_rx(can_list)
+      # The delta is a whole-panda TX counter, not evidence of rejection of a
+      # particular 0x2BF message. Log it as such.
+      self._xnor_v220_shadow.observe_pandas(self.sm['pandaStates'])
 
     try:
       self.CI.post_update(self.sm['carControl'], CS)
@@ -391,6 +405,15 @@ class Car:
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
+      if self._xnor_v220_shadow is not None:
+        self._xnor_v220_shadow.observe_tx(
+          can_sends, enabled=bool(CC.enabled), long_active=bool(CC.longActive),
+          requested_accel=float(CC.actuators.accel),
+          native_cruise=str(getattr(self.CI.CS, 'stock_cruise_state', 'UNKNOWN')),
+          a_ego=float(CS.aEgo), v_ego=float(CS.vEgo))
+        owner_line = self._xnor_v220_shadow.flush_if_due(now_nanos)
+        if owner_line is not None:
+          cloudlog.info(owner_line)
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC
