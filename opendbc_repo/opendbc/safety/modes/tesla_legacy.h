@@ -61,6 +61,7 @@ static const char *const xnor_v200_marker __attribute__((unused)) =
 #endif
 #define TESLA_LEGACY_V221_HIL_CUTOVER 1
 static const char tesla_v222_owner_firmware_marker[] __attribute__((used)) = "XNOR_V222_EXCLUSIVE_OWNER_SOURCE";
+static const char tesla_v223_independent_owner_marker[] __attribute__((used)) = "XNOR_V223_RX_STALK_OWNER";
 
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
 // Sets GTW_autopilot (61|2, byte7 bits 4-5) from 0 to 2 as the panda forwards GTW_carConfig,
@@ -146,6 +147,11 @@ static uint32_t tesla_legacy_v221_native_cruise_us = 0U;
 static bool tesla_legacy_v221_native_cruise_engaged = false;
 static uint32_t tesla_legacy_v221_op_pt_tx_us = 0U;
 static uint8_t tesla_legacy_v221_op_pt_tx_count = 0U;
+// Real bus-0 pedal/brake and bus-2 genuine AP longitudinal frames. These are
+// tracked through the public safety_rx_hook dispatcher (not direct rx_hook tests).
+static uint32_t tesla_legacy_v223_pedal_us = 0U;
+static uint32_t tesla_legacy_v223_brake_us = 0U;
+static uint32_t tesla_legacy_v223_native_long_us = 0U;
 // V186: after genuine native Autosteer drops while Hybrid OP remains engaged, OP may need to
 // take over the EPAS allow handshake (0x27D) because the V185 logs show EPAS falling from
 // EAC_ACTIVE to EAC_AVAILABLE even though OP's type-1 0x488 overlay continues. This latch is
@@ -224,6 +230,9 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_v221_native_cruise_engaged = false;
   tesla_legacy_v221_op_pt_tx_us = 0U;
   tesla_legacy_v221_op_pt_tx_count = 0U;
+  tesla_legacy_v223_pedal_us = 0U;
+  tesla_legacy_v223_brake_us = 0U;
+  tesla_legacy_v223_native_long_us = 0U;
   tesla_legacy_hybrid_eac_recovery = false;
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;
@@ -713,9 +722,11 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (addr == id_pedal) {  // DI_torque1
       const float pedal_pct = ((float)msg->data[6]) * 0.4f;  // DI_pedalPos
       gas_pressed = pedal_pct > 3.0f;
+      tesla_legacy_v223_pedal_us = microsecond_timer_get();
     } else if (addr == id_brake) {  // BrakeMessage
       const uint8_t st = (msg->data[0] >> 2) & 0x3U;         // driverBrakeStatus
       brake_pressed = (st == 2U);
+      tesla_legacy_v223_brake_us = microsecond_timer_get();
     } else if (addr == id_distate) {  // DI_state
       const uint8_t cruise_state = (msg->data[1] >> 4) & 0x0FU;
       const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U);
@@ -801,6 +812,19 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // Real native DAS_control, with original AEB bits before any HUD/forward mutation.
+  // Both pandas validate this through their own RxCheck: chassis 0x2B9 and PT 0x2BF.
+  if ((bus == 2) && tesla_legacy_is_das_control_msg(addr)) {
+    tesla_legacy_v223_native_long_us = microsecond_timer_get();
+    const bool real_aeb = (msg->data[2] & 0x03U) == 1U;
+    tesla_legacy_stock_aeb = real_aeb;
+    if (real_aeb) {
+      controls_allowed = false;
+      tesla_legacy_v221_op_pt_tx_count = 0U;
+      tesla_legacy_v221_op_pt_tx_us = 0U;
+    }
+  }
+
   // Stock system detection + Unity "disable when stock features active" (bus2)
   if (bus == 2) {
     if (!tesla_legacy_external_panda && (addr == 0x488)) {
@@ -832,12 +856,6 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
       // transport selection only.
       if (!tesla_legacy_op_hybrid_native_ap && !tesla_legacy_op_autopilot_disabled &&
           tesla_legacy_stock_lkas) {
-        controls_allowed = false;
-      }
-    } else if (tesla_legacy_external_panda && tesla_legacy_is_das_control_msg(addr)) {
-      const int aeb_event = (int)(msg->data[2] & 0x03);
-      tesla_legacy_stock_aeb = (!tesla_legacy_ignore_stock_aeb) && (aeb_event == 1);
-      if (tesla_legacy_stock_aeb) {
         controls_allowed = false;
       }
     } else {
@@ -872,18 +890,23 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   tesla_legacy_track_controls_allowed_edge();
 }
 
-// HIL-only owner predicate. Requires an OP request, native DI engagement, physical
-// driver inputs clear and the normal panda longitudinal safety latch. It does not
-// establish ECU acceptance and it never creates controls_allowed.
+// V223: independent OP stalk latch is the longitudinal engagement source in Hybrid.
+// Native TACC DI_state may be STANDBY. Critical inputs must instead arrive on the
+// correct physical buses through the actual safety dispatcher. Missing/stale input
+// fails closed; the touch option alone never authorises longitudinal commands.
 static bool tesla_legacy_v221_hil_base_allowed(void) {
 #if TESLA_LEGACY_V221_HIL_CUTOVER
   const uint32_t now = microsecond_timer_get();
-  return tesla_legacy_op_hybrid_native_ap && tesla_legacy_v221_owner_request &&
+  return tesla_legacy_op_hybrid_native_ap && tesla_legacy_op_stalk_enable &&
+         tesla_legacy_v221_owner_request &&
          (tesla_legacy_v221_owner_request_us != 0U) &&
          (safety_get_ts_elapsed(now, tesla_legacy_v221_owner_request_us) <= 150000U) &&
-         tesla_legacy_v221_native_cruise_engaged &&
-         (tesla_legacy_v221_native_cruise_us != 0U) &&
-         (safety_get_ts_elapsed(now, tesla_legacy_v221_native_cruise_us) <= 250000U) &&
+         (tesla_legacy_v223_pedal_us != 0U) &&
+         (safety_get_ts_elapsed(now, tesla_legacy_v223_pedal_us) <= 250000U) &&
+         (tesla_legacy_v223_brake_us != 0U) &&
+         (safety_get_ts_elapsed(now, tesla_legacy_v223_brake_us) <= 250000U) &&
+         (tesla_legacy_v223_native_long_us != 0U) &&
+         (safety_get_ts_elapsed(now, tesla_legacy_v223_native_long_us) <= 150000U) &&
          controls_allowed && get_longitudinal_allowed() &&
          !brake_pressed && !gas_pressed && !tesla_legacy_stock_aeb;
 #else
@@ -1311,7 +1334,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   if (tesla_legacy_is_das_control_msg(addr)) {
     const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
     tesla_legacy_note_aeb_hud_warning(aeb_event);
-    if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
+    if (aeb_event != 1 && tesla_legacy_should_scrub_aeb_event(aeb_event)) {
       tesla_legacy_scrub_das_control_aeb(to_fwd);
     }
   }
@@ -1705,7 +1728,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if (tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       tesla_legacy_note_aeb_hud_warning(aeb_event);
-      if (tesla_legacy_should_scrub_aeb_event(aeb_event)) {
+      if (aeb_event != 1 && tesla_legacy_should_scrub_aeb_event(aeb_event)) {
         tesla_legacy_scrub_das_control_aeb(to_fwd);
       }
     }
@@ -1769,6 +1792,9 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_v221_native_cruise_engaged = false;
   tesla_legacy_v221_op_pt_tx_us = 0U;
   tesla_legacy_v221_op_pt_tx_count = 0U;
+  tesla_legacy_v223_pedal_us = 0U;
+  tesla_legacy_v223_brake_us = 0U;
+  tesla_legacy_v223_native_long_us = 0U;
   tesla_legacy_hybrid_eac_recovery = false;
 
   tesla_legacy_autopilot_enabled = false;
@@ -1821,13 +1847,23 @@ static safety_config tesla_legacy_init(uint16_t param) {
 
   };
 
-  // RX checks: MINIMAL torque-only set (reverted from the Unity-parity EPAS/brake/DI_state set).
-  // The expanded set required EPAS(0x370)/BrakeMessage(0x20A)/DI_state(0x368) on specific buses; if
-  // any of those lagged >1s mid-drive on this harness it set safety_rx_checks_invalid -> controls
-  // mismatch + steerFaultTemporary mid-drive. Torque frames (0x106/0x108 + 0x116/0x118) are the most
-  // reliably-present signals and never tripped, so we validate only those. Each lists bus0 + its
-  // bus2 forward-mirror so a frame on either bus satisfies the check.
+  // V223: critical physical brake and genuine AP longitudinal RX must be checked
+  // by the public safety dispatcher. They are REQUIRED safety inputs in active owner
+  // mode; missing source fails closed. Do not restore native DI_state engagement as
+  // a control permission. Keep torque checks and native steering carrier checks.
+  // A missing added RX input may itself invalidate panda safety; investigate bus
+  // wiring rather than bypassing the input or whitelisting a synthetic substitute.
   static RxCheck tesla_legacy_rx_checks_external[] = {
+  // Real PT brake + genuine AP DAS_control. Validity and liveness are handled by
+  // safety_rx_hook; V223 also applies 250/150 ms freshness to ownership itself.
+  {.msg = {
+    {0x1F8, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},
+    {0}, {0},
+  }},
+  {.msg = {
+    {0x2BF, 2, 8, 25U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},
+    {0}, {0},
+  }},
   {.msg = {
     {0x106, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque1 (PT)
     {0x106, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror
@@ -1841,6 +1877,14 @@ static safety_config tesla_legacy_init(uint16_t param) {
 };
 
   static RxCheck tesla_legacy_rx_checks_main[] = {
+  {.msg = {
+    {0x20A, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},
+    {0}, {0},
+  }},
+  {.msg = {
+    {0x2B9, 2, 8, 25U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},
+    {0}, {0},
+  }},
   {.msg = {
     {0x108, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // DI_torque1
     {0x108, 2, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true},  // mirror

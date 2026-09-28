@@ -947,9 +947,9 @@ class CarController(CarControllerBase):
 
     self._refresh_cached_params()
     native_alc_turn = self._native_alc_virtual_hold(CC, CS)
-    # V221 single-owner request is a BENCH candidate, not an implicit consequence of
-    # enabling Hybrid or the Experimental UI. Two pandas must still independently
-    # enforce safety, a fresh native cruise state, and valid OP commands.
+    # V223: direct longitudinal owner request follows OP's independent stalk latch,
+    # not native TACC. Both pandas independently require fresh real pedal/brake/AP
+    # messages and enforce safety; no request alone grants longitudinal authority.
     v221_hil_request = bool(
       self._v221_hil_selected and self._cached_hybrid_native_ap and
       getattr(CS, '_xnor_experimental_direct_active', False) and
@@ -963,7 +963,7 @@ class CarController(CarControllerBase):
       cloudlog.info(f'[XNOR_V221_HIL] request={int(v221_hil_request)} '
                     f'longActive={int(bool(CC.longActive))} '
                     f'nativeTacc={getattr(CS,"stock_cruise_state","UNKNOWN")} '
-                    'firmware_required=V222_EXCLUSIVE_OWNER image_on_device=UNVERIFIED acceptance=UNPROVEN')
+                    'firmware_required=V223_RX_STALK_OWNER image_on_device=UNVERIFIED acceptance=UNPROVEN')
     # Request diagnostics only. Actual acceptance is evidenced by real native
     # cruise-state / DI_cruiseSet changes and AP-facing frame capture, not this log.
     if self._v216_acc_from_zero_enable and (self.frame % 500 == 0):
