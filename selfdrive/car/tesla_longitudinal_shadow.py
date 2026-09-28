@@ -55,6 +55,8 @@ class LongitudinalShadow:
     self.rx = Counter()
     self.tx = Counter()
     self.rx_data = {}
+    self._native_pt_payloads = Counter()
+    self._pt_tx_echo_payloads = Counter()
     self.last_tx_hex = ''
     self.last_requested_accel = 0.0
     self.last_a_ego = 0.0
@@ -89,7 +91,11 @@ class LongitudinalShadow:
           continue
         self.rx[(addr, src)] += 1
         self.rx_data[(addr, src)] = data.hex()
-        if data[2] & 0x03:
+        if addr == 0x2BF and src == 6:
+          self._native_pt_payloads[data] += 1
+        elif addr == 0x2BF and src == 132:
+          self._pt_tx_echo_payloads[data] += 1
+        if (data[2] & 0x03) == 1 and src in (2, 6):
           self.rx[('aeb', addr, src)] += 1
 
   def observe_pandas(self, pandas):
@@ -128,6 +134,8 @@ class LongitudinalShadow:
     op_requested = sum(n for (addr, _), n in self.tx.items() if addr == 0x2BF)
     tx_blocked = sum(self._panda_deltas.values())
     external_allowed = self._panda_allowed.get(1)
+    native_echo = sum(min(n, self._pt_tx_echo_payloads.get(payload, 0))
+                      for payload, n in self._native_pt_payloads.items())
     assessment = assess_owner(cc_enabled=self.cc_enabled, long_active=self.long_active,
                               op_requests=op_requested, ap_frames=ap_frames,
                               aeb_frames=aeb, panda_allowed=external_allowed,
@@ -139,7 +147,7 @@ class LongitudinalShadow:
     return (f'[XNOR_V220_OWNER_SHADOW] owner={assessment.label} reason={assessment.reason} '
             f'cutover=0 ccEnabled={int(self.cc_enabled)} longActive={int(self.long_active)} '
             f'nativeTacc={self.native_cruise} rx={rx_repr} sendcan={tx_repr} '
-            f'aebRaw={aeb} {p_repr} reqAccel={self.last_requested_accel:.3f} '
+            f'actualAeb={aeb} nativePtEchoMatch={native_echo} {p_repr} reqAccel={self.last_requested_accel:.3f} '
             f'aEgo={self.last_a_ego:.3f} vEgo={self.last_v_ego:.3f} '
             f'lastOp2BF={self.last_tx_hex or "none"} acceptance=UNPROVEN')
 
@@ -152,6 +160,8 @@ class LongitudinalShadow:
     result = self.summary()
     self.rx.clear()
     self.tx.clear()
+    self._native_pt_payloads.clear()
+    self._pt_tx_echo_payloads.clear()
     self._panda_deltas.clear()
     self._window_start_ns = int(now_ns)
     return result

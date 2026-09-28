@@ -53,14 +53,14 @@ static const char *const xnor_v200_marker __attribute__((unused)) =
 #define TESLA_LEGACY_FLAG_OP_STALK_ENABLE    0x40U
 #define TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB  0x80U
 
-// V221R1 BENCH / HIL-ONLY SOURCE: native-message cutover is COMPILED IN.
-// This variant MUST remain isolated from the vehicle deployment source tree.
-// Runtime owner request, genuine native TACC ENABLED/STANDSTILL, pedal, AEB,
-// controls_allowed, watchdog and two validated OP-frame checks are unchanged.
-// The active build does not provide independent actuation in native STANDBY.
-#ifndef TESLA_LEGACY_V221_HIL_CUTOVER
-#define TESLA_LEGACY_V221_HIL_CUTOVER 1
+// V222: Explicit active source ownership on a matched two-panda safety build.
+// The compile value must not silently be overwritten by an inherited build flag.
+// NOT an ECU-acceptance guarantee; requires independently verified vehicle-facing CAN.
+#ifdef TESLA_LEGACY_V221_HIL_CUTOVER
+#undef TESLA_LEGACY_V221_HIL_CUTOVER
 #endif
+#define TESLA_LEGACY_V221_HIL_CUTOVER 1
+static const char tesla_v222_owner_firmware_marker[] __attribute__((used)) = "XNOR_V222_EXCLUSIVE_OWNER_SOURCE";
 
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
 // Sets GTW_autopilot (61|2, byte7 bits 4-5) from 0 to 2 as the panda forwards GTW_carConfig,
@@ -891,6 +891,24 @@ static bool tesla_legacy_v221_hil_base_allowed(void) {
 #endif
 }
 
+// The external panda must independently observe accepted OP PT commands. A userspace
+// request alone never suppresses the native carrier. Any interruption resets priming.
+static bool tesla_legacy_v222_pt_owner_ready(void) {
+#if TESLA_LEGACY_V221_HIL_CUTOVER
+  const uint32_t now = microsecond_timer_get();
+  if (!tesla_legacy_external_panda || !tesla_legacy_v221_hil_base_allowed() ||
+      (tesla_legacy_v221_op_pt_tx_us == 0U) ||
+      (safety_get_ts_elapsed(now, tesla_legacy_v221_op_pt_tx_us) > 75000U)) {
+    tesla_legacy_v221_op_pt_tx_count = 0U;
+    tesla_legacy_v221_op_pt_tx_us = 0U;
+    return false;
+  }
+  return tesla_legacy_v221_op_pt_tx_count >= 2U;
+#else
+  return false;
+#endif
+}
+
 // Validate the userspace chassis 0x2B9 TEMPLATE before allowing it into the forward-overlay
 // cache. The packet is never directly transmitted, but the cached accel/state fields can later
 // reach the vehicle when merged onto a genuine AP frame, so apply the same longitudinal envelope
@@ -1220,9 +1238,20 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     // A fresh, accepted active OP 0x2BF is a necessary but insufficient
     // cutover condition. Never count inactive frames or a source before safety.
     if (long_active && tesla_legacy_v221_hil_base_allowed()) {
-      tesla_legacy_v221_op_pt_tx_us = microsecond_timer_get();
-      if (tesla_legacy_v221_op_pt_tx_count < 3U) {
-        tesla_legacy_v221_op_pt_tx_count++;
+      const uint32_t now = microsecond_timer_get();
+      // Do not carry the two-frame qualification across an interrupted OP stream.
+      if (tesla_legacy_v221_op_pt_tx_us != 0U &&
+          safety_get_ts_elapsed(now, tesla_legacy_v221_op_pt_tx_us) > 75000U) {
+        tesla_legacy_v221_op_pt_tx_count = 0U;
+      }
+      // A duplicated burst cannot qualify an owner: two distinct samples are needed.
+      const bool first = tesla_legacy_v221_op_pt_tx_us == 0U || tesla_legacy_v221_op_pt_tx_count == 0U;
+      const uint32_t since_last = safety_get_ts_elapsed(now, tesla_legacy_v221_op_pt_tx_us);
+      if (first || since_last >= 15000U) {
+        tesla_legacy_v221_op_pt_tx_us = now;
+        if (tesla_legacy_v221_op_pt_tx_count < 3U) {
+          tesla_legacy_v221_op_pt_tx_count++;
+        }
       }
     }
 #endif
@@ -1267,7 +1296,10 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   // inherited optional HUD warning scrub, on either longitudinal channel.
   // Observe the raw event before any mutation, and preserve its complete bytes.
   if (bus_num == 2 && (addr == 0x2BF || addr == 0x2B9) &&
-      original_das_control_aeb_event == 1 && tesla_legacy_v221_owner_request) {
+      (original_das_control_aeb_event == 1 ||
+       (tesla_legacy_v221_owner_request && original_das_control_aeb_event != 0))) {
+    // Event 1 is genuine AEB and always wins; during an active OP request all
+    // other nonzero native events are likewise passed byte-for-byte.
     return false;
   }
 #endif
@@ -1347,12 +1379,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
 #if TESLA_LEGACY_V221_HIL_CUTOVER
-        const uint32_t now = microsecond_timer_get();
-        if ((addr == 0x2BF) && tesla_legacy_v221_hil_base_allowed() &&
-            (tesla_legacy_v221_op_pt_tx_count >= 2U) &&
-            (tesla_legacy_v221_op_pt_tx_us != 0U) &&
-            (safety_get_ts_elapsed(now, tesla_legacy_v221_op_pt_tx_us) <= 75000U)) {
-          // Only one non-AEB powertrain owner in an *explicit HIL build*.
+        if ((addr == 0x2BF) && tesla_legacy_v222_pt_owner_ready()) {
+          // OP owns the non-AEB powertrain stream only while its validated
+          // request is fresh. Forwarding is restored immediately otherwise.
           return true;
         }
 #endif
