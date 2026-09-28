@@ -963,7 +963,7 @@ class CarController(CarControllerBase):
       cloudlog.info(f'[XNOR_V221_HIL] request={int(v221_hil_request)} '
                     f'longActive={int(bool(CC.longActive))} '
                     f'nativeTacc={getattr(CS,"stock_cruise_state","UNKNOWN")} '
-                    'firmware_required=V223_RX_STALK_OWNER image_on_device=UNVERIFIED acceptance=UNPROVEN')
+                    'firmware_required=V224_AEB_ACTIVE_ONLY_OWNER image_on_device=UNVERIFIED acceptance=UNPROVEN')
     # Request diagnostics only. Actual acceptance is evidenced by real native
     # cruise-state / DI_cruiseSet changes and AP-facing frame capture, not this log.
     if self._v216_acc_from_zero_enable and (self.frame % 500 == 0):

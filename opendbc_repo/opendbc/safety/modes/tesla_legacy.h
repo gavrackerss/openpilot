@@ -62,6 +62,7 @@ static const char *const xnor_v200_marker __attribute__((unused)) =
 #define TESLA_LEGACY_V221_HIL_CUTOVER 1
 static const char tesla_v222_owner_firmware_marker[] __attribute__((used)) = "XNOR_V222_EXCLUSIVE_OWNER_SOURCE";
 static const char tesla_v223_independent_owner_marker[] __attribute__((used)) = "XNOR_V223_RX_STALK_OWNER";
+static const char tesla_v224_aeb_state_marker[] __attribute__((used)) = "XNOR_V224_AEB_ACTIVE_ONLY_OWNER";
 
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
 // Sets GTW_autopilot (61|2, byte7 bits 4-5) from 0 to 2 as the panda forwards GTW_carConfig,
@@ -498,9 +499,11 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
           !tesla_legacy_v221_hil_base_allowed()) {
         return false;
       }
-      // Never replace a genuine AP DAS_control warning/AEB frame with an OP longitudinal template.
-      // Let the existing stock-AEB handling below decide whether that frame is passed or scrubbed.
-      if ((addr == 0x2B9) && ((to_fwd->data[2] & 0x03U) != 0U)) {
+      // V224: only raw event 1 is an actual AEB braking intervention. Preserve that
+      // native frame byte-for-byte. Values 2/3 indicate fault/unavailable status:
+      // retain the existing warning handling, but do not treat them as active AEB
+      // and needlessly veto an otherwise validated OP chassis template.
+      if ((addr == 0x2B9) && ((to_fwd->data[2] & 0x03U) == 1U)) {
         return false;
       }
       // V180 Hybrid steering is fail-open to the genuine AP frame but does not require native
@@ -1304,7 +1307,7 @@ static bool tesla_legacy_fwd_hook(int bus_num, int addr) {
 static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   const int addr = (int)to_fwd->addr;
   // Preserve the original stock DAS_control event before any existing HUD/AEB scrub mutates it.
-  // A nonzero stock event always wins over the stop/go overlay.
+  // Preserve the raw event for real-AEB arbitration before HUD warning processing.
   const int original_das_control_aeb_event = tesla_legacy_is_das_control_msg(addr)
     ? (int)(to_fwd->data[2] & 0x03U)
     : 0;
@@ -1315,14 +1318,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   }
 
 #if TESLA_LEGACY_V221_HIL_CUTOVER
-  // A genuine AEB-active frame MUST bypass V221 source replacement AND the
-  // inherited optional HUD warning scrub, on either longitudinal channel.
-  // Observe the raw event before any mutation, and preserve its complete bytes.
+  // V224: protect genuine native AEB braking (event 1) on both channels;
+  // NEVER scrub, replace or block it. A raw 2/3 is diagnostic fault/unavailable,
+  // not an active braking intervention. The existing warning/HUD path below
+  // handles it separately; it must not veto otherwise qualified OP ownership.
   if (bus_num == 2 && (addr == 0x2BF || addr == 0x2B9) &&
-      (original_das_control_aeb_event == 1 ||
-       (tesla_legacy_v221_owner_request && original_das_control_aeb_event != 0))) {
-    // Event 1 is genuine AEB and always wins; during an active OP request all
-    // other nonzero native events are likewise passed byte-for-byte.
+      original_das_control_aeb_event == 1) {
     return false;
   }
 #endif
@@ -1718,7 +1719,7 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       tesla_legacy_native_alc_last_status_us != 0U &&
       safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_status_us) <= 300000U;
     if (tesla_legacy_is_hud_status_msg(addr) && !native_alc_owns_steer &&
-        ((addr != 0x2B9) || (original_das_control_aeb_event == 0))) {
+        ((addr != 0x2B9) || (original_das_control_aeb_event != 1))) {
       (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
     }
 
