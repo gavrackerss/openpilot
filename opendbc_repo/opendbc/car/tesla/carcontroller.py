@@ -117,6 +117,9 @@ class CarController(CarControllerBase):
     # OP sent APS_eacMonitor during normal Hybrid pre-engagement and disturbed Tesla's native
     # Autosteer handshake.
     self._hybrid_native_lkas_prev = False
+    # V219: distinguish a genuinely native-Autosteer-supervised session from
+    # the original OP-only co-op case. Hybrid configuration alone is NOT native LKAS.
+    self._hybrid_native_lkas_seen_this_engagement = False
     self._hybrid_eac_recovery = False
     # V199 co-op re-arm is independent of native-LKAS state. A physical hands-on takeover can
     # leave the real EPAS in EAC_AVAILABLE/HANDS_ON before native 0x488 falls. Hold a controller
@@ -856,7 +859,7 @@ class CarController(CarControllerBase):
       decision = self._long_module.update(CS, enabled=policy_enabled,
                                           frame=int(self.frame), now_ms=int(self._now_ms()))
       if self.frame % 100 == 0:
-        cloudlog.info(f'[XNOR_V218_DIRECT] longActive={int(bool(getattr(CC,"longActive",False)))} '
+        cloudlog.info(f'[XNOR_V218_DIRECT] ccEnabled={int(bool(getattr(CC,"enabled",False)))} latActive={int(bool(getattr(CC,"latActive",False)))} longActive={int(bool(getattr(CC,"longActive",False)))} '
                       f'policy={getattr(self._long_module,"op_target_ms",None)} '
                       f'policy_src={getattr(self._long_module,"op_target_source","none")} '
                       f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))} '
@@ -975,6 +978,16 @@ class CarController(CarControllerBase):
 
     op_enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
 
+    # Native EPAS co-op recovery is only for a session that actually observed
+    # genuine native type-1 0x488. The original OP-only steering did not enter
+    # this native neutral/probe/timeout lifecycle for a routine driver takeover.
+    native_ap_lateral_active = bool(getattr(cs_out, "stockLkas", False)) if cs_out is not None else False
+    if not op_enabled:
+      self._hybrid_native_lkas_seen_this_engagement = False
+    elif hybrid_native_ap and native_ap_lateral_active:
+      self._hybrid_native_lkas_seen_this_engagement = True
+    native_supervised_coop = bool(hybrid_native_ap and self._hybrid_native_lkas_seen_this_engagement)
+
     # XNOR_V199_HYBRID_COOP_STATE_DRIVEN_REARM:
     # Arm from the real EPAS hands/error/status tuple, not HSO's 1.5 s presentation timer. Panda
     # owns the actual neutral-carrier gate and clears it after five real 0x370 frames; userspace
@@ -983,9 +996,9 @@ class CarController(CarControllerBase):
     eac_error_raw = int(getattr(CS, "eac_error_code_raw", -1))
     hands_on_level = int(getattr(CS, "hands_on_level", 0))
     physical_coop_takeover = (
-      hands_on_level >= 3 and eac_error_raw == 3 and eac_status_raw in (2, 4, 6)
+      native_supervised_coop and hands_on_level >= 3 and eac_error_raw == 3 and eac_status_raw in (2, 4, 6)
     )
-    if hybrid_native_ap and op_enabled:
+    if native_supervised_coop and op_enabled:
       if physical_coop_takeover:
         self._hybrid_coop_rearm = True
         self._hybrid_coop_healthy_frames = 0
@@ -1015,7 +1028,7 @@ class CarController(CarControllerBase):
     # reacquires real EPAS authority must not leave the driver with green/blue
     # steering indications but no actuator. The CarState fault is published on
     # the next card cycle and triggers the normal OP fault/disengagement path.
-    if hybrid_native_ap and op_enabled:
+    if native_supervised_coop and op_enabled:
       if self._hybrid_coop_rearm and hands_on_level >= 2:
         self._hybrid_coop_last_physical_hands_frame = int(self.frame)
       real_epas_healthy = eac_status_raw == 2 and eac_error_raw == 0 and hands_on_level <= 1
@@ -1069,11 +1082,24 @@ class CarController(CarControllerBase):
       self._process_lane_telemetry(CC, CS, can_sends)
       self._speed_limit_sync(CC, CS, can_sends)
     else:
-      # Original LONG/ACC stalk pulses must be released on the next frame. Do not
-      # enable the non-Hybrid virtual-turn/HUD path merely to release cruise.
-      if int(self._stw_release_frame) == int(self.frame):
-        self._send_stw(CS, can_sends, BTN_IDLE, bus=int(self._stw_release_bus))
-        self._stw_release_frame = -1
+      # V219: restore the original (3) OP ALC comfort-tap hold when actual
+      # native Autosteer is OFF. ALC indicator ownership is independent of LONG.
+      # When native LKAS is ON, the existing AP-facing native tap bridge remains
+      # the sole virtual indicator owner. Never author competing synthetic stalk.
+      raw_native_lkas = bool(getattr(cs_out, 'stockLkas', False)) if cs_out is not None else False
+      if op_enabled and not raw_native_lkas:
+        self._process_stalk_actions(CS, can_sends)
+      else:
+        # On OP disengagement (native still idle), release our own virtual
+        # hold explicitly. On native takeover do not send a competing release:
+        # native Tesla now owns the AP-side stalk/indicator lifecycle.
+        if not raw_native_lkas and int(self._virtual_turn_prev) in (1, 2):
+          self._send_stw(CS, can_sends, BTN_IDLE,
+                         bus=int(self._stw_bus(CS)), turn_signal_stalk_state=0)
+        self._virtual_turn_prev = 0
+        if int(self._stw_release_frame) == int(self.frame):
+          self._send_stw(CS, can_sends, BTN_IDLE, bus=int(self._stw_release_bus))
+          self._stw_release_frame = -1
       self._speed_limit_sync(CC, CS, can_sends)
 
     # Normal xnor: OP owns lateral directly only in Autopilot Disabled mode.
@@ -1405,11 +1431,17 @@ class CarController(CarControllerBase):
       # Original longitudinal encoding: the LONG/ACC virtual stalk adjusts
       # Tesla's cruise SET separately from OP's acceleration frame. Preserve
       # the V198/V201 continuous 0x2BF sender and native carrier forwarding.
-      can_sends.append(
-        self.tesla_can.create_longitudinal_command(
-          state, accel, counter, float(CS.out.vEgo), long_active,
-        )
+      long_frame = self.tesla_can.create_longitudinal_command(
+        state, accel, counter, float(CS.out.vEgo), long_active,
       )
+      can_sends.append(long_frame)
+      if bool(getattr(CS, '_xnor_experimental_direct_active', False)) and (self.frame % 100 == 0):
+        cloudlog.info(f'[XNOR_V219_LONG_TX] ccEnabled={int(bool(CC.enabled))} '
+                      f'longActive={int(bool(CC.longActive))} encodedActive={int(long_active)} '
+                      f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))} '
+                      f'accel={accel:.3f} accState={state} '
+                      f'addr={int(long_frame[0]):#x} bus={int(long_frame[2])} '
+                      'stage=userspace_requested_not_ECU_ack')
 
       # Keep the old direct chassis/stalk low-speed experiment restricted to non-Hybrid. Hybrid
       # reproduces the pre-rollback powertrain 0x2BF path and does not introduce a second 0x2B9.

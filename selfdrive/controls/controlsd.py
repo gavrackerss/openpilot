@@ -117,10 +117,34 @@ class Controls:
           self._xnor_hybrid_brake_long_cancelled = False
     else:
       self._xnor_hybrid_brake_long_cancelled = False
+    # V219: OP-longitudinal eligibility is sourced from OP engagement and driver
+    # override, NOT from native DI_cruiseState. Keep the physical brake latch:
+    # a brake press cancels long until a fresh physical MAIN/RES. Do not infer
+    # ECU acceptance from CC.longActive; the outgoing 0x2BF must be checked too.
+    overriding_events = [e for e in self.sm['onroadEvents'] if e.overrideLongitudinal]
     CC.longActive = (CC.enabled and self.CP.openpilotLongitudinalControl
-                     and not any(e.overrideLongitudinal for e in self.sm['onroadEvents'])
+                     and not overriding_events
                      and not CS.brakePressed and not CS.regenBraking
                      and not self._xnor_hybrid_brake_long_cancelled)
+    # Sample unmodified planning and all independent gating conditions even
+    # when LoC is reset; V218's LONG cached planner fields were misleading then.
+    self._xnor_long_diag_count = getattr(self, '_xnor_long_diag_count', 0) + 1
+    if self.CP.brand == 'tesla' and self._xnor_long_diag_count % 100 == 0:
+      overrides = ','.join(str(getattr(e, 'name', 'override')) for e in overriding_events) or 'none'
+      buttons = ','.join(f'{str(be.type)}:{int(bool(be.pressed))}' for be in CS.buttonEvents) or 'none'
+      cloudlog.info(f'[XNOR_V219_LONG_GATE] ccEnabled={int(bool(CC.enabled))} '
+                    f'selfdriveActive={int(bool(self.sm["selfdriveState"].active))} '
+                    f'latActive={int(bool(CC.latActive))} longActive={int(bool(CC.longActive))} '
+                    f'pcmCruise={int(bool(self.CP.pcmCruise))} '
+                    f'cruiseAvailable={int(bool(CS.cruiseState.available))} '
+                    f'cruiseLatch={int(bool(CS.cruiseState.enabled))} buttons={buttons} '
+                    f'brake={int(bool(CS.brakePressed))} regen={int(bool(CS.regenBraking))} '
+                    f'gas={int(bool(CS.gasPressed))} brakeLatch={int(self._xnor_hybrid_brake_long_cancelled)} '
+                    f'override={overrides} planner_a={float(long_plan.aTarget):.3f} '
+                    f'planner_stop={int(bool(long_plan.shouldStop))} '
+                    f'model_a={float(model_v2.action.desiredAcceleration):.3f} '
+                    f'model_stop={int(bool(model_v2.action.shouldStop))} '
+                    f'ego={float(CS.vEgo):.3f}')
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
