@@ -985,9 +985,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   if (!tesla_legacy_external_panda && (addr == 0x27D) && ((int)msg->bus == 0) &&
       tesla_legacy_op_hybrid_native_ap) {
     const uint8_t eac_allow = msg->data[0] & 0x03U;
-    const bool recovery_allowed = !tesla_legacy_coop_failed && !tesla_legacy_stock_lkas &&
-                                  (tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active ||
-                                   tesla_legacy_hybrid_eac_recovery);
+    // V218: genuine native Autosteer OFF => OP is the single 0x27D owner for
+    // the entire authorised session, as in the proven original OP-only build.
+    // Native 0x27D is blocked by the forward hook below while stock_lkas=0.
+    // A genuine native LKAS transition immediately revokes OP TX and restores
+    // native ownership; no competing allow stream and no bypass of coop_failed.
+    const bool recovery_allowed = !tesla_legacy_coop_failed && !tesla_legacy_stock_lkas;
     return controls_allowed && recovery_allowed && (eac_allow == 1U);
   }
 
@@ -1310,11 +1313,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       return true;  // block stock 0x27D: OP sends the single EPAS-allow stream
     }
     if (tesla_legacy_op_hybrid_native_ap) {
-      // Native owns the handshake normally. During either tightly-gated recovery latch, OP sends
-      // the single allow=1 stream; suppress the competing native counter/cadence until recovery.
-      return !tesla_legacy_coop_failed && !tesla_legacy_stock_lkas &&
-             (tesla_legacy_coop_rearm_active || tesla_legacy_coop_probe_active ||
-              tesla_legacy_hybrid_eac_recovery);
+      // V218: while OP is authorised and genuine native Autosteer is idle,
+      // OP continuously owns the allow=1 handshake (the original OP-only path).
+      // Suppress Tesla's idle allow=0 stream, including during rearm/probe.
+      // Genuine native Autosteer takes ownership immediately on its real 0x488 edge.
+      // With OP disengaged or a co-op fault, the genuine native path is untouched.
+      return controls_allowed && !tesla_legacy_coop_failed && !tesla_legacy_stock_lkas;
     }
     return !tesla_legacy_stock_lkas;
   }

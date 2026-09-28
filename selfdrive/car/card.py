@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import math
 import time
 import threading
 
@@ -12,6 +13,7 @@ from openpilot.common.realtime import config_realtime_process, Priority, Ratekee
 from openpilot.common.swaglog import cloudlog, ForwardingHandler
 
 from opendbc.car import DT_CTRL, structs
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.can_definitions import CanData, CanRecvCallable, CanSendCallable
 from opendbc.car.carlog import carlog
 from opendbc.car.fw_versions import ObdCallback
@@ -236,6 +238,18 @@ class Car:
     self.params.put_nonblocking("CarParamsPersistent", cp_bytes)
 
     self.v_cruise_helper = VCruiseHelper(self.CP)
+    # Explicit Hybrid/OP longitudinal mode, cached once per card process (100 Hz loop).
+    self._xnor_hybrid_op_long = (getattr(self.CP, "brand", "") == "tesla"
+                                 and self.params.get_bool("TinklaHybridNativeAP")
+                                 and not self.params.get_bool("TinklaAutopilotDisabled")
+                                 and bool(self.CP.openpilotLongitudinalControl))
+    # V218: an explicit, drive-latched Experimental DIRECT actuator test. The mode
+    # switches only the speed-policy adapter and virtual stalk, NEVER panda limits.
+    self._xnor_experimental_direct_selected = bool(
+      self._xnor_hybrid_op_long
+      and os.path.exists('/data/xnor_enable_experimental_direct_bench')
+      and not os.path.exists('/data/xnor_disable_experimental_direct_bench')
+    )
 
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
@@ -297,9 +311,39 @@ class Car:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode)
 
-    # TODO: mirror the carState.cruiseState struct?
-    CS.vCruise = float(self.v_cruise_helper.v_cruise_kph)
+    # V218: the planner remains the sole acceleration authority. The selected
+    # Experimental DIRECT mode supplies LONG's *policy ceiling* through vCruise,
+    # never a second acceleration request or a virtual Tesla SET/RES pulse.
+    # The touch-file selection is drive-latched. The UI Experimental toggle
+    # chooses E2E-vs-MPC *within* the same direct actuator path, and must not
+    # unexpectedly switch back to virtual stalk if the UI toggle changes.
+    self.CI.CS._xnor_experimental_direct_active = self._xnor_experimental_direct_selected
+    # V202: preserve the driver's OP-owned base ceiling independently of temporary
+    # LONG/ACC/mapd/CSA reductions. This is an in-process link to the CarController's
+    # original LONG instance, not a Params file or a second CAN listener.
+    base_kph = float(self.v_cruise_helper.v_cruise_kph)
+    CS.vCruise = base_kph
     CS.vCruiseCluster = float(self.v_cruise_helper.v_cruise_cluster_kph)
+    if getattr(self.CP, "brand", "") == "tesla":
+      hybrid = self._xnor_hybrid_op_long
+      self.CI.CS._xnor_op_base_set_speed_ms = (base_kph * CV.KPH_TO_MS) if 0.0 < base_kph < 255.0 else 0.0
+      if (hybrid and self.CI.CS._xnor_experimental_direct_active
+          and bool(self.sm['carControl'].enabled) and bool(CS.cruiseState.enabled)
+          and 0.0 < base_kph < 255.0):
+        long_module = getattr(self.CI.CC, "_long_module", None)
+        now_ms = time.monotonic_ns() // 1_000_000
+        target_ms = getattr(long_module, "op_target_ms", None)
+        target_ms_time = int(getattr(long_module, "op_target_mono_ms", 0) or 0)
+        if target_ms is not None and 0 <= now_ms - target_ms_time <= 700:
+          # Never interpret an uninitialised/stale value as a target or feed the
+          # effective cap back as the driver base. LONG independently guards
+          # speed-limit/roadworks/curve policy while OP planner owns lead/E2E.
+          # This adapter may reduce the OP target, never silently raise it.
+          target_ms = float(target_ms)
+          if math.isfinite(target_ms):
+            effective_kph = min(base_kph, max(0.0, target_ms * CV.MS_TO_KPH))
+            CS.vCruise = min(145.0, max(0.0, effective_kph))
+            CS.vCruiseCluster = CS.vCruise
 
     return CS, RD
 

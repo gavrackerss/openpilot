@@ -843,6 +843,29 @@ class CarController(CarControllerBase):
 
   def _speed_limit_sync(self, CC, CS, can_sends) -> None:
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
+    # V218: one selected Experimental longitudinal authority. LONG still runs
+    # and publishes an advisory cap to the next carState for the OP planner,
+    # but MUST NOT send SET, RES or CANCEL while OP owns direct acceleration.
+    # Stalk input from the driver is not modified by this branch.
+    if bool(getattr(CS, '_xnor_experimental_direct_active', False)):
+      policy_enabled = bool(getattr(CC, 'longActive', False)) and bool(enabled)
+      cs_out = getattr(CS, 'out', None)
+      if (bool(getattr(cs_out, 'brakePressed', False)) or
+          bool(getattr(cs_out, 'regenBraking', False))):
+        policy_enabled = False
+      decision = self._long_module.update(CS, enabled=policy_enabled,
+                                          frame=int(self.frame), now_ms=int(self._now_ms()))
+      if self.frame % 100 == 0:
+        cloudlog.info(f'[XNOR_V218_DIRECT] longActive={int(bool(getattr(CC,"longActive",False)))} '
+                      f'policy={getattr(self._long_module,"op_target_ms",None)} '
+                      f'policy_src={getattr(self._long_module,"op_target_source","none")} '
+                      f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))} '
+                      f'planner_stop={int(bool(getattr(self._long_module,"_lp_should_stop",False)))} '
+                      f'planner_a={float(getattr(self._long_module,"_lp_a_target",0.0)):.2f} '
+                      f'ego={float(getattr(cs_out,"vEgo",0.0)):.2f} '
+                      f'accel_cmd={float(getattr(CC.actuators,"accel",0.0)):.2f} '
+                      f'virtual_stalk=0 decision={decision.log}')
+      return
     hybrid_original_long = bool(
       self._cached_hybrid_native_ap and not self._cached_autopilot_disabled
       and self.CP.openpilotLongitudinalControl
@@ -1352,9 +1375,13 @@ class CarController(CarControllerBase):
       counter = (self.frame // 2) % 16
       # V213: Tesla retains the sole 0x27D handshake while its native 0x488 is active.
       # OP may take it only after real native release, avoiding competing allow streams.
+      # V218: match the original OP-only lifecycle whenever genuine Tesla
+      # Autosteer is idle. The original continuously sent allow=1 in 0x27D.
+      # V217 forwarded native idle allow=0 but withheld OP allow=1 outside a
+      # special recovery latch, leaving OP-only without its EPAS-allow owner.
+      # V218 grants only one owner and retains genuine EPAS fault handling.
       hybrid_recovery = (bool(op_enabled) and not self._hybrid_coop_failed and
-                         not native_ap_lateral_active and
-                         (bool(self._hybrid_coop_rearm) or bool(self._hybrid_eac_recovery)))
+                         not native_ap_lateral_active)
       if (not hybrid_native_ap) or hybrid_recovery:
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 

@@ -61,6 +61,36 @@ from openpilot.selfdrive.car.modules.ACC_module import ACCController, AccDecisio
 def _mono_ms() -> int:
   return time.monotonic_ns() // 1_000_000
 
+def experimental_policy_cap_ms(*, base_ms: float, speed_limit_ms: Optional[float],
+                               roadworks_ms: Optional[float], guarded_target_ms: float,
+                               source: str, has_lead: bool) -> tuple[Optional[float], str]:
+  """V218: independent LONG policy cap for the OP planner, not a second actuator.
+
+  E2E/lead predictions already feed the planner's acceleration and stopping logic.
+  Feeding that trajectory back as vCruise would create a zero-speed/stale-lead loop.
+  A lower LONG curve target is eligible only in a vetted curve/CSA/roundabout
+  context with no lead; other caps are independent posted-limit/roadworks inputs.
+  If the driver base is uninitialised, leave the planner's own base untouched.
+  """
+  if not math.isfinite(base_ms) or base_ms <= 0.0:
+    return None, 'base_uninitialised'
+  cap_ms = base_ms
+  sources = []
+  if speed_limit_ms is not None and math.isfinite(float(speed_limit_ms)) and float(speed_limit_ms) > 0.0:
+    cap_ms = min(cap_ms, float(speed_limit_ms))
+    sources.append('posted_limit')
+  if roadworks_ms is not None and math.isfinite(float(roadworks_ms)) and float(roadworks_ms) > 0.0:
+    cap_ms = min(cap_ms, float(roadworks_ms))
+    sources.append('roadworks')
+  source_lc = str(source).lower()
+  curve_context = any(tag in source_lc for tag in ('curve', 'csa', 'roundabout'))
+  if (curve_context and not has_lead and math.isfinite(float(guarded_target_ms))
+      and 0.0 < float(guarded_target_ms) < cap_ms):
+    cap_ms = float(guarded_target_ms)
+    sources.append('long_curve')
+  return max(0.0, cap_ms), '+'.join(sources) if sources else 'driver_base'
+
+
 
 @dataclass
 class LongDecision:
@@ -602,6 +632,11 @@ class LongController:
 
   def __init__(self) -> None:
     self.acc = ACCController()
+    # V218: strictly advisory, short-lived cap consumed by card.py/OP planner.
+    # Never re-feed the planner's own lead/E2E stop-speed as a cruise ceiling.
+    self.op_target_ms: Optional[float] = None
+    self.op_target_mono_ms: int = 0
+    self.op_target_source: str = 'none'
     self._native_tacc_last_button_ms = 0
     self._native_standstill_resume_sent = False
     self._unconfirmed_set_target_mph = None
@@ -641,6 +676,7 @@ class LongController:
     self._lp_has_lead: bool = False
     self._lp_a_target: float = 0.0
     self._lp_source: str = ""
+    self._lp_should_stop: bool = False
 
     self._lead_present: bool = False
     self._lead_drel: float = 0.0
@@ -1962,6 +1998,7 @@ class LongController:
         self._lp_has_lead = bool(getattr(lp, "hasLead", False))
         self._lp_a_target = float(getattr(lp, "aTarget", 0.0) or 0.0)
         self._lp_source = str(getattr(lp, "longitudinalPlanSource", "") or "").lower()
+        self._lp_should_stop = bool(getattr(lp, "shouldStop", False))
     except Exception:
       pass
 
@@ -3288,6 +3325,9 @@ class LongController:
 
 
   def _reset_all_cached_state(self) -> None:
+    self.op_target_ms = None
+    self.op_target_mono_ms = 0
+    self.op_target_source = 'reset'
     """Q3: hard flush of every cached/stored value on an on-road<->off-road / ignition
     transition. Fail-safe by construction -- it only ever CLEARS caps and latches (never adds
     a slowdown), so a spurious call just costs one clean cycle. Fixes the 'stale / dead after
@@ -3320,6 +3360,7 @@ class LongController:
     self._lp_has_lead = False
     self._lp_a_target = 0.0
     self._lp_source = ""
+    self._lp_should_stop = False
     self._last_lp_seen_ns = 0
     self._stable_plan_samples = 0
     # live CSA snapshot -> unavailable
@@ -4967,7 +5008,10 @@ class LongController:
     if (int(frame) % 20) != 0:
       return LongDecision(None, "gated: 5Hz(frame)")
 
-    controller_enabled = bool(enabled) and bool(getattr(CS, "enable_adaptive_cruise", False) or getattr(CS, "enableACC", False))
+    direct_policy = bool(getattr(CS, '_xnor_experimental_direct_active', False))
+    controller_enabled = bool(enabled) and bool(
+      direct_policy or getattr(CS, 'enable_adaptive_cruise', False) or getattr(CS, 'enableACC', False)
+    )
     if not controller_enabled:
       if self._last_active:
         self._reset_all_cached_state()   # Q3: hard flush on the on-road -> off-road edge
@@ -4988,12 +5032,14 @@ class LongController:
       self._curve_limit_guard_active = False
       self._curve_limit_guard_candidate_since_ms = 0
       self._curve_limit_guard_release_candidate_since_ms = 0
+      self.op_target_ms = None
+      self.op_target_mono_ms = 0
       return LongDecision(None, "gated: not enabled/adaptive")
 
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "")
     if stock_state != "STANDSTILL":
       self._native_standstill_resume_sent = False
-    if stock_state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
+    if not direct_policy and stock_state not in ("ENABLED", "OVERRIDE", "STANDSTILL", "STANDBY"):
       if self._last_active:
         self._reset_all_cached_state()   # Q3: hard flush when leaving the active stock cruise state
       self._last_active = False
@@ -5028,7 +5074,7 @@ class LongController:
 
     self._poll_plan_and_lead(now_ns=now_ns, cs_out=cs_out)
 
-    native_tacc_feature_enabled = self._native_tacc_feature_enabled()
+    native_tacc_feature_enabled = bool(self._native_tacc_feature_enabled()) and not direct_policy
     zero_floor_setspeed_enabled = bool(self._zero_floor_setspeed_enabled())
     if bool(native_tacc_feature_enabled):
       self._native_tacc_mark_latch_if_active(
@@ -5075,7 +5121,7 @@ class LongController:
       )
     )
     native_tacc_mode = bool(native_tacc_passthrough or native_tacc_handoff_pending or native_tacc_setspeed_bootstrap or native_tacc_wait_for_latch)
-    self._zero_floor_setspeed_active = bool(native_tacc_mode or zero_floor_setspeed_enabled)
+    self._zero_floor_setspeed_active = bool(direct_policy or native_tacc_mode or zero_floor_setspeed_enabled)
     set_speed_floor_ms = float(self._effective_set_speed_floor_ms())
 
     # Option 1: snapshot CSA from CarState (decoded off the party parser, no 2nd 'can' sock).
@@ -5721,6 +5767,34 @@ class LongController:
       desired_ms = float(roadworks_cap_ms)
       if "roadworks_cap" not in src:
         src = f"{src}+roadworks_cap"
+
+    # V218: LONG is a policy advisor in Experimental DIRECT, never a second actuator.
+    # The driver-selected OP speed is preserved in card.py. Only independently
+    # validated posted-limit, roadworks and LONG's guarded curve/CSA decisions
+    # may lower the planner's cruise ceiling. The ordinary planner's predicted
+    # lead/E2E near-zero trajectory must NEVER be fed back as a cruise-speed cap:
+    # it would latch the selected speed at zero after a stop and cause oscillation.
+    # MPC/radar and the E2E action remain responsible for lead and stop decisions.
+    if direct_policy:
+      base_ms = float(getattr(CS, '_xnor_op_base_set_speed_ms', 0.0) or 0.0)
+      cap_ms, policy_src = experimental_policy_cap_ms(
+        base_ms=base_ms,
+        speed_limit_ms=speed_limit_target_ms if set_speed_limit_active else None,
+        roadworks_ms=roadworks_cap_ms,
+        guarded_target_ms=desired_ms,
+        source=src,
+        has_lead=bool(self._lead_present or self._lp_has_lead),
+      )
+      self.op_target_ms = cap_ms
+      self.op_target_mono_ms = int(now) if cap_ms is not None else 0
+      self.op_target_source = policy_src
+      msg = (f'[XNOR_V218_DIRECT] base={base_ms:.2f} policy={cap_ms} '
+             f'src={policy_src} planner_near={planner_near_ms:.2f} '
+             f'plan_a={self._lp_a_target:.2f} shouldStop={int(self._lp_should_stop)} '
+             f'plan_src={self._lp_source} lead={int(bool(self._lead_present or self._lp_has_lead))} '
+             'stalk=NONE accel_owner=OP')
+      self._rate_log(msg)
+      return LongDecision(None, msg)
 
     stock_cruise_enabled = stock_state in ("ENABLED", "OVERRIDE", "STANDSTILL")
     brake_pressed = bool(getattr(cs_out, "brakePressed", False))
