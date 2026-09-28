@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import os
 import numpy as np
 
 import cereal.messaging as messaging
@@ -58,6 +59,12 @@ class LongitudinalPlanner:
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
+    # V220: observational comparison of model acceleration vs MPC vs final.
+    # Does not alter selection, stop/go, limits or the generated MPC solver.
+    self._xnor_v220_diag = (getattr(CP, 'brand', '') == 'tesla'
+                            and os.path.exists('/data/xnor_enable_long_owner_shadow_bench')
+                            and not os.path.exists('/data/xnor_disable_long_owner_shadow_bench'))
+    self._xnor_v220_diag_frames = 0
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -165,6 +172,22 @@ class LongitudinalPlanner:
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
+
+    if self._xnor_v220_diag:
+      self._xnor_v220_diag_frames += 1
+      if self._xnor_v220_diag_frames % 20 == 0:
+        model_x, model_v, _, _, _ = self.parse_model(sm['modelV2'])
+        preview_x = float(np.interp(3.0, T_IDXS_MPC, model_x))
+        preview_v = float(np.interp(3.0, T_IDXS_MPC, model_v))
+        cloudlog.info(f'[XNOR_V220_PLANNER_SHADOW] experimental={int(bool(sm["selfdriveState"].experimentalMode))} '
+                      f'lead={int(bool(sm["radarState"].leadOne.status))} '
+                      f'ego={v_ego:.2f} cruiseCap={v_cruise:.2f} '
+                      f'model3s_x={preview_x:.2f} model3s_v={preview_v:.2f} '
+                      f'e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} '
+                      f'final_a={float(self.output_a_target):.3f} '
+                      f'e2e_stop={int(bool(output_should_stop_e2e))} mpc_stop={int(bool(output_should_stop_mpc))} '
+                      f'final_stop={int(bool(self.output_should_stop))} '
+                      'mode=observer_only recognition=UNPROVEN')
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')
