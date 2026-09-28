@@ -53,6 +53,15 @@ static const char *const xnor_v200_marker __attribute__((unused)) =
 #define TESLA_LEGACY_FLAG_OP_STALK_ENABLE    0x40U
 #define TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB  0x80U
 
+// V221R1 BENCH / HIL-ONLY SOURCE: native-message cutover is COMPILED IN.
+// This variant MUST remain isolated from the vehicle deployment source tree.
+// Runtime owner request, genuine native TACC ENABLED/STANDSTILL, pedal, AEB,
+// controls_allowed, watchdog and two validated OP-frame checks are unchanged.
+// The active build does not provide independent actuation in native STANDBY.
+#ifndef TESLA_LEGACY_V221_HIL_CUTOVER
+#define TESLA_LEGACY_V221_HIL_CUTOVER 1
+#endif
+
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
 // Sets GTW_autopilot (61|2, byte7 bits 4-5) from 0 to 2 as the panda forwards GTW_carConfig,
 // testing whether overriding the FEATURE-CODING flag (not the command) makes the DI arm cruise
@@ -129,6 +138,14 @@ static bool tesla_legacy_stock_lkas = false;  // from 0x488 steerControlType
 // steering and prevents the native co-op probe faulting a normal OP takeover.
 static bool tesla_legacy_stock_lkas_seen_this_engagement = false;
 static bool tesla_legacy_stock_aeb = false;   // from 0x2BF AEB event
+// V221 HIL state is per-panda and sourced from REAL local RX/TX, never userspace
+// claims alone. Watchdogs fail open to native; genuine AEB is not replaced.
+static bool tesla_legacy_v221_owner_request = false;
+static uint32_t tesla_legacy_v221_owner_request_us = 0U;
+static uint32_t tesla_legacy_v221_native_cruise_us = 0U;
+static bool tesla_legacy_v221_native_cruise_engaged = false;
+static uint32_t tesla_legacy_v221_op_pt_tx_us = 0U;
+static uint8_t tesla_legacy_v221_op_pt_tx_count = 0U;
 // V186: after genuine native Autosteer drops while Hybrid OP remains engaged, OP may need to
 // take over the EPAS allow handshake (0x27D) because the V185 logs show EPAS falling from
 // EAC_ACTIVE to EAC_AVAILABLE even though OP's type-1 0x488 overlay continues. This latch is
@@ -201,6 +218,12 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_stock_lkas = false;
   tesla_legacy_stock_lkas_seen_this_engagement = false;
   tesla_legacy_stock_aeb = false;
+  tesla_legacy_v221_owner_request = false;
+  tesla_legacy_v221_owner_request_us = 0U;
+  tesla_legacy_v221_native_cruise_us = 0U;
+  tesla_legacy_v221_native_cruise_engaged = false;
+  tesla_legacy_v221_op_pt_tx_us = 0U;
+  tesla_legacy_v221_op_pt_tx_count = 0U;
   tesla_legacy_hybrid_eac_recovery = false;
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;
@@ -446,6 +469,8 @@ static bool tesla_legacy_capture_hud_tx(const CANPacket_t *msg, bool violation) 
   return true;
 }
 
+static bool tesla_legacy_v221_hil_base_allowed(void);
+
 static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num) {
   const int addr = (int)to_fwd->addr;
   const int len = GET_LEN(to_fwd);
@@ -458,6 +483,12 @@ static bool tesla_legacy_apply_hud_forward_data(CANPacket_t *to_fwd, int bus_num
   for (int i = 0; i < fwd_len; i++) {
     TeslaLegacyHudForwardData *fwd = &tesla_legacy_hud_forward_data[i];
     if ((addr == fwd->addr) && (bus_num == fwd->source_bus) && (len == fwd->len)) {
+      // Never apply a Hybrid chassis longitudinal template without verified
+      // HIL ownership. Normal (deployment) Hybrid remains byte-for-byte native.
+      if ((addr == 0x2B9) && tesla_legacy_op_hybrid_native_ap &&
+          !tesla_legacy_v221_hil_base_allowed()) {
+        return false;
+      }
       // Never replace a genuine AP DAS_control warning/AEB frame with an OP longitudinal template.
       // Let the existing stock-AEB handling below decide whether that frame is passed or scrubbed.
       if ((addr == 0x2B9) && ((to_fwd->data[2] & 0x03U) != 0U)) {
@@ -688,6 +719,8 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     } else if (addr == id_distate) {  // DI_state
       const uint8_t cruise_state = (msg->data[1] >> 4) & 0x0FU;
       const bool cruise_engaged = (cruise_state == 2U) || (cruise_state == 3U);
+      tesla_legacy_v221_native_cruise_engaged = cruise_engaged;
+      tesla_legacy_v221_native_cruise_us = microsecond_timer_get();
       vehicle_moving = (cruise_state != 3U);
 
       // Normal/native mode follows Tesla cruise. Hybrid has an independent OP stalk latch, so
@@ -839,6 +872,25 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
   tesla_legacy_track_controls_allowed_edge();
 }
 
+// HIL-only owner predicate. Requires an OP request, native DI engagement, physical
+// driver inputs clear and the normal panda longitudinal safety latch. It does not
+// establish ECU acceptance and it never creates controls_allowed.
+static bool tesla_legacy_v221_hil_base_allowed(void) {
+#if TESLA_LEGACY_V221_HIL_CUTOVER
+  const uint32_t now = microsecond_timer_get();
+  return tesla_legacy_op_hybrid_native_ap && tesla_legacy_v221_owner_request &&
+         (tesla_legacy_v221_owner_request_us != 0U) &&
+         (safety_get_ts_elapsed(now, tesla_legacy_v221_owner_request_us) <= 150000U) &&
+         tesla_legacy_v221_native_cruise_engaged &&
+         (tesla_legacy_v221_native_cruise_us != 0U) &&
+         (safety_get_ts_elapsed(now, tesla_legacy_v221_native_cruise_us) <= 250000U) &&
+         controls_allowed && get_longitudinal_allowed() &&
+         !brake_pressed && !gas_pressed && !tesla_legacy_stock_aeb;
+#else
+  return false;
+#endif
+}
+
 // Validate the userspace chassis 0x2B9 TEMPLATE before allowing it into the forward-overlay
 // cache. The packet is never directly transmitted, but the cached accel/state fields can later
 // reach the vehicle when merged onto a genuine AP frame, so apply the same longitudinal envelope
@@ -847,9 +899,11 @@ static bool tesla_legacy_chassis_overlay_violation(const CANPacket_t *msg) {
   if (tesla_legacy_external_panda || ((int)msg->addr != 0x2B9) || ((int)msg->bus != 0)) {
     return true;
   }
-  // Hybrid never accepts an OP chassis template: 0x2B9 remains completely native while OP owns
-  // only the powertrain 0x2BF path.
-  if (!tesla_legacy_op_autopilot_disabled || !controls_allowed || !get_longitudinal_allowed()) {
+  // Ordinary Hybrid remains native. HIL alone can capture a coordinated OP
+  // chassis template; the same safe accel envelope applies in either mode.
+  if ((!tesla_legacy_op_autopilot_disabled &&
+       !(tesla_legacy_op_hybrid_native_ap && tesla_legacy_v221_hil_base_allowed())) ||
+      !controls_allowed || !get_longitudinal_allowed()) {
     return true;
   }
   if ((msg->data[2] & 0x03U) != 0U || tesla_legacy_stock_aeb) {
@@ -932,6 +986,13 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
       tesla_legacy_op_hybrid_native_ap && ((msg->data[4] & 0x10U) != 0U));
     tesla_legacy_autopilot_always_on_enable = (!tesla_legacy_external_panda &&
       tesla_legacy_op_hybrid_native_ap && ((msg->data[4] & 0x20U) != 0U));
+    tesla_legacy_v221_owner_request = tesla_legacy_op_hybrid_native_ap &&
+                                       ((msg->data[4] & 0x40U) != 0U);
+    tesla_legacy_v221_owner_request_us = microsecond_timer_get();
+    if (!tesla_legacy_v221_owner_request || tesla_legacy_op_stalk_cancel_edge) {
+      tesla_legacy_v221_op_pt_tx_count = 0U;
+      tesla_legacy_v221_op_pt_tx_us = 0U;
+    }
     tesla_legacy_autosteer_247_test = (b5 & 0x10U) != 0U;
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
@@ -1155,6 +1216,16 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
       return false;
     }
 
+#if TESLA_LEGACY_V221_HIL_CUTOVER
+    // A fresh, accepted active OP 0x2BF is a necessary but insufficient
+    // cutover condition. Never count inactive frames or a source before safety.
+    if (long_active && tesla_legacy_v221_hil_base_allowed()) {
+      tesla_legacy_v221_op_pt_tx_us = microsecond_timer_get();
+      if (tesla_legacy_v221_op_pt_tx_count < 3U) {
+        tesla_legacy_v221_op_pt_tx_count++;
+      }
+    }
+#endif
     return true;
   }
 
@@ -1190,6 +1261,16 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
   if (addr == 0x659) {
     return true;
   }
+
+#if TESLA_LEGACY_V221_HIL_CUTOVER
+  // A genuine AEB-active frame MUST bypass V221 source replacement AND the
+  // inherited optional HUD warning scrub, on either longitudinal channel.
+  // Observe the raw event before any mutation, and preserve its complete bytes.
+  if (bus_num == 2 && (addr == 0x2BF || addr == 0x2B9) &&
+      original_das_control_aeb_event == 1 && tesla_legacy_v221_owner_request) {
+    return false;
+  }
+#endif
 
   // Scrub DAS_control AEB bits on every forwarding path, because AP1/HW2 can expose both
   // 0x2B9 and 0x2BF on both main and external pandas. The latest rlogs showed bad 0x2BF
@@ -1265,6 +1346,16 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
+#if TESLA_LEGACY_V221_HIL_CUTOVER
+        const uint32_t now = microsecond_timer_get();
+        if ((addr == 0x2BF) && tesla_legacy_v221_hil_base_allowed() &&
+            (tesla_legacy_v221_op_pt_tx_count >= 2U) &&
+            (tesla_legacy_v221_op_pt_tx_us != 0U) &&
+            (safety_get_ts_elapsed(now, tesla_legacy_v221_op_pt_tx_us) <= 75000U)) {
+          // Only one non-AEB powertrain owner in an *explicit HIL build*.
+          return true;
+        }
+#endif
         return false;
       }
       if (!controls_allowed) {
@@ -1643,6 +1734,12 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_stock_lkas = false;
   tesla_legacy_stock_lkas_seen_this_engagement = false;
   tesla_legacy_stock_aeb = false;
+  tesla_legacy_v221_owner_request = false;
+  tesla_legacy_v221_owner_request_us = 0U;
+  tesla_legacy_v221_native_cruise_us = 0U;
+  tesla_legacy_v221_native_cruise_engaged = false;
+  tesla_legacy_v221_op_pt_tx_us = 0U;
+  tesla_legacy_v221_op_pt_tx_count = 0U;
   tesla_legacy_hybrid_eac_recovery = false;
 
   tesla_legacy_autopilot_enabled = false;

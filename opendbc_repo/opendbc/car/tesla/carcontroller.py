@@ -101,6 +101,10 @@ class CarController(CarControllerBase):
     # Hybrid mode is latched at CarController startup. UI changes apply next drive/restart so
     # CarParams, panda safety ownership, and longitudinal authority cannot change mid-drive.
     self._cached_hybrid_native_ap = bool(self.params.get_bool("TinklaHybridNativeAP")) and not bool(self.params.get_bool("TinklaAutopilotDisabled"))
+    # V221: the HIL request is latched at startup and cannot follow a touch change mid-drive.
+    # It has no vehicle effect with stock V221 firmware: firmware cutover is compile-disabled.
+    self._v221_hil_selected = (os.path.exists('/data/xnor_enable_v221_hil_owner') and
+                               not os.path.exists('/data/xnor_disable_v221_hil_owner'))
     self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
     self._cached_pedal_enabled = False
     self._cached_adjust_acc_with_speed_limit = False
@@ -417,7 +421,7 @@ class CarController(CarControllerBase):
       cloudlog.info(f'[XNOR_V209_ALC] bridge={self._native_alc_hold_direction} native={state} prior={prior}')
     return int(self._native_alc_hold_direction)
 
-  def _emit_internal_0x659(self, CS, can_sends, *, native_alc_turn: int = 0) -> None:
+  def _emit_internal_0x659(self, CS, can_sends, *, native_alc_turn: int = 0, v221_hil_request: bool = False) -> None:
     stalk_btn = int(getattr(CS, "cruise_buttons", 0) or 0)
     prev_btn = int(self._op659_prev_btn)
 
@@ -433,7 +437,7 @@ class CarController(CarControllerBase):
     autopilot_always_on = bool(self._v217_autopilot_always_on_enable)
     alc_signal = ((4 if native_alc_mode else 0) | (8 if offhighway_alc else 0) |
                   (16 if acc_from_zero else 0) | (32 if autopilot_always_on else 0) |
-                  int(native_alc_turn))
+                  (64 if v221_hil_request else 0) | int(native_alc_turn))
     if (self.frame % 10 == 0) or main_edge or cancel_edge or alc_signal != int(getattr(self, '_native_alc_last_sent', 0)):
       self._native_alc_last_sent = int(alc_signal)
       buses = {int(CANBUS.party)}
@@ -453,6 +457,7 @@ class CarController(CarControllerBase):
           offhighway_alc_enable=bool(offhighway_alc and int(bus) == int(CANBUS.party)),
           acc_from_zero_enable=bool(acc_from_zero and int(bus) == int(CANBUS.party)),
           autopilot_always_on_enable=bool(autopilot_always_on and int(bus) == int(CANBUS.party)),
+          v221_hil_owner_request=bool(v221_hil_request),
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -942,7 +947,23 @@ class CarController(CarControllerBase):
 
     self._refresh_cached_params()
     native_alc_turn = self._native_alc_virtual_hold(CC, CS)
-    self._emit_internal_0x659(CS, can_sends, native_alc_turn=native_alc_turn)
+    # V221 single-owner request is a BENCH candidate, not an implicit consequence of
+    # enabling Hybrid or the Experimental UI. Two pandas must still independently
+    # enforce safety, a fresh native cruise state, and valid OP commands.
+    v221_hil_request = bool(
+      self._v221_hil_selected and self._cached_hybrid_native_ap and
+      getattr(CS, '_xnor_experimental_direct_active', False) and
+      CC.longActive and not CC.cruiseControl.cancel and
+      not bool(getattr(CS.out, 'brakePressed', False)) and
+      not bool(getattr(CS.out, 'gasPressed', False))
+    )
+    self._emit_internal_0x659(CS, can_sends, native_alc_turn=native_alc_turn,
+                              v221_hil_request=v221_hil_request)
+    if self._v221_hil_selected and self.frame % 100 == 0:
+      cloudlog.info(f'[XNOR_V221_HIL] request={int(v221_hil_request)} '
+                    f'longActive={int(bool(CC.longActive))} '
+                    f'nativeTacc={getattr(CS,"stock_cruise_state","UNKNOWN")} '
+                    'firmware_cutover=COMPILED_ON_RUNTIME_GATED acceptance=UNPROVEN')
     # Request diagnostics only. Actual acceptance is evidenced by real native
     # cruise-state / DI_cruiseSet changes and AP-facing frame capture, not this log.
     if self._v216_acc_from_zero_enable and (self.frame % 500 == 0):
@@ -1491,7 +1512,7 @@ class CarController(CarControllerBase):
     # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
     # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
     if (
-      (not hybrid_native_ap)
+      ((not hybrid_native_ap) or v221_hil_request)
       and _UNITY_2B9_OVERLAY_TEMPLATE
       and self.CP.openpilotLongitudinalControl
       and (self.CP.carFingerprint in LEGACY_CARS)
@@ -1500,7 +1521,7 @@ class CarController(CarControllerBase):
     ):
       native_acc_overlay = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active_overlay = bool(CC.longActive) and ((not autopilot_disabled) or native_acc_overlay)
-      if long_active_overlay and native_acc_overlay:
+      if long_active_overlay and (native_acc_overlay or v221_hil_request):
         overlay_state = 13 if CC.cruiseControl.cancel else 4
         overlay_accel = float(np.clip(
           float(actuators.accel),
