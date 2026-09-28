@@ -68,15 +68,29 @@ class LongitudinalShadow:
     self._last_aeb_count = 0
     self._window_start_ns = None
 
-  def observe_rx(self, messages: Iterable):
-    for m in messages:
-      addr, data, src = _can_tuple(m)
-      if addr not in LONG_ADDRS or len(data) != 8:
-        continue
-      self.rx[(addr, src)] += 1
-      self.rx_data[(addr, src)] = data.hex()
-      if data[2] & 0x03:
-        self.rx[('aeb', addr, src)] += 1
+  def observe_rx(self, packets: Iterable):
+    # card.py receives can_capnp_to_list(), whose real shape is:
+    # [(logMonoTime, [(address, data, src), ...]), ...]. The original V220
+    # mistakenly treated each OUTER (timestamp, frames) as a CAN triple,
+    # crashing card as soon as shadow mode was enabled. Also retain support
+    # for flat CAN-frame lists used by replay and existing QA.
+    for packet in packets:
+      if isinstance(packet, tuple) and len(packet) == 2 and isinstance(packet[1], (tuple, list)):
+        messages = packet[1]
+      else:
+        messages = (packet,)
+      for m in messages:
+        try:
+          addr, data, src = _can_tuple(m)
+        except (AttributeError, TypeError, ValueError, IndexError):
+          # An observer must never take down the vehicle-state process.
+          continue
+        if addr not in LONG_ADDRS or len(data) != 8:
+          continue
+        self.rx[(addr, src)] += 1
+        self.rx_data[(addr, src)] = data.hex()
+        if data[2] & 0x03:
+          self.rx[('aeb', addr, src)] += 1
 
   def observe_pandas(self, pandas):
     for index, p in enumerate(pandas):

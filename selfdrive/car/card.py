@@ -301,10 +301,13 @@ class Car:
 
     self.sm.update(0)
     if self._xnor_v220_shadow is not None:
-      self._xnor_v220_shadow.observe_rx(can_list)
-      # The delta is a whole-panda TX counter, not evidence of rejection of a
-      # particular 0x2BF message. Log it as such.
-      self._xnor_v220_shadow.observe_pandas(self.sm['pandaStates'])
+      try:
+        self._xnor_v220_shadow.observe_rx(can_list)
+        # Whole-panda TX counter, not proof of any specific frame rejection.
+        self._xnor_v220_shadow.observe_pandas(self.sm['pandaStates'])
+      except Exception:
+        cloudlog.exception('XNOR_V220R1_SHADOW_RX_ERROR: disabling optional observer; preserving card')
+        self._xnor_v220_shadow = None
 
     try:
       self.CI.post_update(self.sm['carControl'], CS)
@@ -406,14 +409,18 @@ class Car:
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       if self._xnor_v220_shadow is not None:
-        self._xnor_v220_shadow.observe_tx(
-          can_sends, enabled=bool(CC.enabled), long_active=bool(CC.longActive),
-          requested_accel=float(CC.actuators.accel),
-          native_cruise=str(getattr(self.CI.CS, 'stock_cruise_state', 'UNKNOWN')),
-          a_ego=float(CS.aEgo), v_ego=float(CS.vEgo))
-        owner_line = self._xnor_v220_shadow.flush_if_due(now_nanos)
-        if owner_line is not None:
-          cloudlog.info(owner_line)
+        try:
+          self._xnor_v220_shadow.observe_tx(
+            can_sends, enabled=bool(CC.enabled), long_active=bool(CC.longActive),
+            requested_accel=float(CC.actuators.accel),
+            native_cruise=str(getattr(self.CI.CS, 'stock_cruise_state', 'UNKNOWN')),
+            a_ego=float(CS.aEgo), v_ego=float(CS.vEgo))
+          owner_line = self._xnor_v220_shadow.flush_if_due(now_nanos)
+          if owner_line is not None:
+            cloudlog.info(owner_line)
+        except Exception:
+          cloudlog.exception('XNOR_V220R1_SHADOW_TX_ERROR: disabling optional observer; preserving card')
+          self._xnor_v220_shadow = None
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC
