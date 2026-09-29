@@ -85,6 +85,18 @@ ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
 ROADWORKS_DEFAULT_KPH = 50.0 * CV.MPH_TO_KPH
 
 
+def _v226_powertrain_tx_allowed(hybrid_native_ap: bool, exclusive_hybrid_selected: bool,
+                                owner_request: bool) -> bool:
+  """Only a qualified Hybrid owner may author powertrain DAS_control.
+
+  When exclusive Hybrid is selected, the real AP is the *sole* standby sender.
+  Sending OP ACC_ON while disengaged competes with native ACC_OFF and can poison
+  the next native cruise MAIN transition. Non-Hybrid and legacy unselected modes
+  retain their previous sender lifecycle; the panda remains the final safety gate.
+  """
+  return not (hybrid_native_ap and exclusive_hybrid_selected) or bool(owner_request)
+
+
 class CarController(CarControllerBase):
   def __init__(self, dbc_names, CP, VM=None):
     try:
@@ -963,7 +975,7 @@ class CarController(CarControllerBase):
       cloudlog.info(f'[XNOR_V221_HIL] request={int(v221_hil_request)} '
                     f'longActive={int(bool(CC.longActive))} '
                     f'nativeTacc={getattr(CS,"stock_cruise_state","UNKNOWN")} '
-                    'firmware_required=V224_AEB_ACTIVE_ONLY_OWNER image_on_device=UNVERIFIED acceptance=UNPROVEN')
+                    'firmware_required=V224_AEB_ACTIVE_ONLY_OWNER v226_tx_lifecycle=OWNER_ONLY image_on_device=UNVERIFIED acceptance=UNPROVEN')
     # Request diagnostics only. Actual acceptance is evidenced by real native
     # cruise-state / DI_cruiseSet changes and AP-facing frame capture, not this log.
     if self._v216_acc_from_zero_enable and (self.frame % 500 == 0):
@@ -1432,11 +1444,13 @@ class CarController(CarControllerBase):
       if (not hybrid_native_ap) or hybrid_recovery:
         can_sends.append(self.tesla_can.create_steering_allowed(counter))
 
-    # V200 retains V198's fault-free continuous sender and forwarding lifecycle exactly. OP
-    # authors powertrain 0x2BF at 25 Hz from startup with ACC_ON(4) while inactive; only requested
-    # accel/set-speed activity changes at engagement. The genuine native carrier is never cut at
-    # MAIN: V199 proved that a controlsAllowed-keyed forwarding cutover immediately disables
-    # cruise before selfdrive has even engaged.
+    # V226: Hybrid exclusive longitudinal has ONE owner in every lifecycle state.
+    # When OP is inactive/cancelled, DO NOT transmit a second powertrain DAS_control
+    # with ACC_ON(4) (or a lingering ACC_CANCEL) beside native Tesla ACC_OFF.
+    # Internal 0x659 above announces the owner transition immediately on a changed
+    # bit6, before this 25 Hz TX block. Panda then releases the native AP carrier;
+    # neither OP chassis templates nor the PT frame are sent without ownership.
+    # The original continuous sender remains unchanged in non-Hybrid/legacy modes.
     if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
       state = 13 if CC.cruiseControl.cancel else 4
       accel = float(np.clip(
@@ -1448,21 +1462,30 @@ class CarController(CarControllerBase):
 
       native_acc = bool(hybrid_native_ap) or bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active = bool(CC.longActive) and ((not autopilot_disabled) or native_acc)
-
-      # Original longitudinal encoding: the LONG/ACC virtual stalk adjusts
-      # Tesla's cruise SET separately from OP's acceleration frame. Preserve
-      # the V198/V201 continuous 0x2BF sender and native carrier forwarding.
-      long_frame = self.tesla_can.create_longitudinal_command(
-        state, accel, counter, float(CS.out.vEgo), long_active,
+      send_op_powertrain = _v226_powertrain_tx_allowed(
+        bool(hybrid_native_ap), bool(self._v221_hil_selected), bool(v221_hil_request)
       )
-      can_sends.append(long_frame)
-      if bool(getattr(CS, '_xnor_experimental_direct_active', False)) and (self.frame % 100 == 0):
-        cloudlog.info(f'[XNOR_V219_LONG_TX] ccEnabled={int(bool(CC.enabled))} '
-                      f'longActive={int(bool(CC.longActive))} encodedActive={int(long_active)} '
-                      f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))} '
-                      f'accel={accel:.3f} accState={state} '
-                      f'addr={int(long_frame[0]):#x} bus={int(long_frame[2])} '
-                      'stage=userspace_requested_not_ECU_ack')
+
+      # LONG/ACC virtual stalk still manages native cruise SET independently;
+      # direct OP acceleration is emitted only while OP holds the Hybrid owner.
+      if send_op_powertrain:
+        long_frame = self.tesla_can.create_longitudinal_command(
+          state, accel, counter, float(CS.out.vEgo), long_active,
+        )
+        can_sends.append(long_frame)
+        if bool(getattr(CS, '_xnor_experimental_direct_active', False)) and (self.frame % 100 == 0):
+          cloudlog.info(f'[XNOR_V226_LONG_TX] ccEnabled={int(bool(CC.enabled))} '
+                        f'longActive={int(bool(CC.longActive))} encodedActive={int(long_active)} '
+                        f'owner={int(bool(v221_hil_request))} '
+                        f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))} '
+                        f'accel={accel:.3f} accState={state} '
+                        f'addr={int(long_frame[0]):#x} bus={int(long_frame[2])} '
+                        'stage=userspace_requested_not_ECU_ack')
+      elif self.frame % 100 == 0:
+        cloudlog.info(f'[XNOR_V226_LONG_RELEASE] native_only=1 owner=0 '
+                      f'longActive={int(bool(CC.longActive))} '
+                      f'cancel={int(bool(CC.cruiseControl.cancel))} '
+                      f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))}')
 
       # Keep the old direct chassis/stalk low-speed experiment restricted to non-Hybrid. Hybrid
       # reproduces the pre-rollback powertrain 0x2BF path and does not introduce a second 0x2B9.
