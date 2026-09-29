@@ -343,8 +343,11 @@ class Car:
     CS.vCruiseCluster = float(self.v_cruise_helper.v_cruise_cluster_kph)
     if getattr(self.CP, "brand", "") == "tesla":
       hybrid = self._xnor_hybrid_op_long
+      # V229: while OP is the Unity-style stop-and-go DAS_control owner, LONG is advisory only and
+      # supplies the same policy ceiling (speed limit / roadworks / curves) as the V218 direct mode.
+      v229_owner = bool(getattr(getattr(self.CI, "CC", None), "_v229_owner_now", False))
       self.CI.CS._xnor_op_base_set_speed_ms = (base_kph * CV.KPH_TO_MS) if 0.0 < base_kph < 255.0 else 0.0
-      if (hybrid and self.CI.CS._xnor_experimental_direct_active
+      if (((hybrid and self.CI.CS._xnor_experimental_direct_active) or v229_owner)
           and bool(self.sm['carControl'].enabled) and bool(CS.cruiseState.enabled)
           and 0.0 < base_kph < 255.0):
         long_module = getattr(self.CI.CC, "_long_module", None)

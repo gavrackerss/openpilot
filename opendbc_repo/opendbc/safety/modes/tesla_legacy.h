@@ -12,6 +12,9 @@
 #define XNOR_V198_HYBRID_PRE_ROLLBACK_OP_LONGITUDINAL 1
 #define XNOR_V199_HYBRID_OP_LONG_SINGLE_OWNER_COOP_REARM 1
 #define XNOR_V200_HYBRID_OP_LONG_NO_CARRIER_CUTOVER 1
+#define XNOR_V229_UNITY_STOPGO_OWNER 1
+static const char xnor_v229_unity_stopgo_owner_marker[] __attribute__((used)) =
+    "XNOR_V229_UNITY_STOPGO_OWNER";
 static const char xnor_v167_aeb_only_early_base_marker[] __attribute__((used)) =
     "XNOR_V179_HYBRID_PANDA_RX_OBSERVATION_FIX";
 static const char xnor_v180_hybrid_idle_native_carrier_marker[] __attribute__((used)) =
@@ -43,6 +46,24 @@ static const char *const xnor_v200_marker __attribute__((unused)) =
 //      LONG_CONTROL=1, FSD_14=2 (non-legacy only), FLAG_EXTERNAL_PANDA=4, FLAG_HW1=8, FLAG_HW2=16, FLAG_HW3=32, OP_STALK_ENABLE=64, IGNORE_STOCK_AEB=128
 //  - Main panda: lateral TX + stock LKAS passthrough + Unity forwarding mods
 //  - External panda: longitudinal TX + stock AEB passthrough
+//
+// XNOR_V229_UNITY_STOPGO_OWNER (HW2 only, opt-out from userspace):
+//  Unity-style single DAS_control author so the DI can arm TACC from 0 mph with no lead.
+//  - Selected by internal 0x659 byte5 bit3 (0x08), which must be fresh (<=250 ms) and only
+//    counts in Autopilot-Disabled or Hybrid mode.
+//  - Userspace sends DAS_control as a TEMPLATE only: main panda 0x2B9 (chassis), external panda
+//    0x2BF (powertrain). The template is never transmitted directly. It is substituted onto the
+//    genuine AP DAS_control as it crosses bus2->bus0, preserving the AP cadence and 3-bit counter
+//    and recomputing the additive checksum. There is never a second DAS_control sender.
+//  - While disengaged the template is a gentle "priming" frame (ACC_ON, 0 kph, accel -1.4..+1.8,
+//    jerk -0.46..+0.53) exactly like Unity, so a stalk pull arms the DI even when native TACC is
+//    unavailable. Non-neutral acceleration outside that priming box requires controls_allowed +
+//    longitudinal_allowed; otherwise the template is reduced to a neutral 0/0 envelope.
+//  - Genuine native AEB (event 1) always passes untouched. In Hybrid, genuine native Autosteer
+//    (stock LKAS) returns DAS_control ownership to the AP. A stale template (>100 ms) fails open
+//    to the genuine AP frame.
+//  - Backstop: if the DI cruise stays engaged for >1.5 s without controls_allowed, the panda
+//    forces ACC_CANCEL_GENERIC_SILENT (13) with a neutral envelope into the frame it authors.
 
 // --- safetyParam bits (TeslaSafetyFlags) ---
 #define TESLA_LEGACY_FLAG_LONG_CONTROL       0x01U
@@ -155,6 +176,26 @@ static uint8_t tesla_legacy_v221_op_pt_tx_count = 0U;
 static uint32_t tesla_legacy_v223_pedal_us = 0U;
 static uint32_t tesla_legacy_v223_brake_us = 0U;
 static uint32_t tesla_legacy_v223_native_long_us = 0U;
+// V229 Unity-style stop-and-go owner (see header). Per-panda state; the request bit is sourced
+// from the internal 0x659 carrier, DI state from genuine bus0 DI_state frames in the forward path.
+static bool tesla_legacy_is_hw2 = false;
+static bool tesla_legacy_v229_request = false;
+static uint32_t tesla_legacy_v229_request_us = 0U;
+static bool tesla_legacy_v229_tmpl_valid = false;
+static bool tesla_legacy_v229_tmpl_needs_long = false;  // template carries non-neutral, non-priming accel
+static uint32_t tesla_legacy_v229_tmpl_l = 0U;
+static uint32_t tesla_legacy_v229_tmpl_h = 0U;
+static uint32_t tesla_legacy_v229_tmpl_us = 0U;
+static bool tesla_legacy_v229_di_engaged = false;
+static uint32_t tesla_legacy_v229_di_state_us = 0U;
+static bool tesla_legacy_v229_unowned_di = false;
+static uint32_t tesla_legacy_v229_unowned_di_since_us = 0U;
+static const uint32_t TESLA_LEGACY_V229_REQUEST_FRESH_US = 250000U;
+static const uint32_t TESLA_LEGACY_V229_TEMPLATE_HOLD_US = 100000U;
+static const uint32_t TESLA_LEGACY_V229_DI_STATE_FRESH_US = 300000U;
+static const uint32_t TESLA_LEGACY_V229_UNOWNED_DI_CANCEL_US = 1500000U;
+// DAS_control counter (53|3) lives in byte6 bits 5..7 => bits 21..23 of the high LE word.
+static const uint32_t TESLA_LEGACY_V229_COUNTER_MASK_H = 0x00E00000U;
 // V186: after genuine native Autosteer drops while Hybrid OP remains engaged, OP may need to
 // take over the EPAS allow handshake (0x27D) because the V185 logs show EPAS falling from
 // EAC_ACTIVE to EAC_AVAILABLE even though OP's type-1 0x488 overlay continues. This latch is
@@ -236,6 +277,13 @@ static void tesla_legacy_reset_after_gear_change(void) {
   tesla_legacy_v223_pedal_us = 0U;
   tesla_legacy_v223_brake_us = 0U;
   tesla_legacy_v223_native_long_us = 0U;
+  tesla_legacy_v229_tmpl_valid = false;
+  tesla_legacy_v229_tmpl_needs_long = false;
+  tesla_legacy_v229_tmpl_l = 0U;
+  tesla_legacy_v229_tmpl_h = 0U;
+  tesla_legacy_v229_tmpl_us = 0U;
+  tesla_legacy_v229_unowned_di = false;
+  tesla_legacy_v229_unowned_di_since_us = 0U;
   tesla_legacy_hybrid_eac_recovery = false;
   tesla_legacy_autopilot_enabled = false;
   tesla_legacy_eac_enabled = false;
@@ -1009,6 +1057,186 @@ static bool tesla_legacy_hybrid_steering_overlay_violation(const CANPacket_t *ms
   return steer_angle_cmd_checks_vm(desired_angle, true, limits, params);
 }
 
+// --- V229 Unity-style stop-and-go owner ------------------------------------------------------
+// DAS_control (tesla_can 0x2B9 / tesla_powertrain 0x2BF share one layout, little-endian):
+//   setSpeed 0|12, accState 12|4, aebEvent 16|2, jerkMin 18|9, jerkMax 27|8,
+//   accelMin 35|9, accelMax 44|9, counter 53|3, checksum 56|8.
+// Raw accel = (a + 15) / 0.04 (375 == 0 m/s^2). Raw jerkMin = (j + 15.232) / 0.03,
+// raw jerkMax = j / 0.059.
+static const int TESLA_LEGACY_V229_ACCEL_RAW_MIN = 288;       // -3.48 m/s^2 (existing envelope)
+static const int TESLA_LEGACY_V229_ACCEL_RAW_MAX = 425;       // +2.00 m/s^2 (existing envelope)
+static const int TESLA_LEGACY_V229_ACCEL_RAW_ZERO = 375;      //  0.00 m/s^2
+static const int TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MIN = 340; // -1.40 m/s^2 (Unity priming)
+static const int TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MAX = 420; // +1.80 m/s^2 (Unity priming)
+static const int TESLA_LEGACY_V229_PRIME_JERK_MIN_RAW = 492;  // >= -0.46 m/s^3
+static const int TESLA_LEGACY_V229_PRIME_JERK_MAX_RAW = 9;    // <= +0.53 m/s^3
+static const uint8_t TESLA_LEGACY_V229_ACC_STATE_CANCEL_GENERIC = 0U;
+static const uint8_t TESLA_LEGACY_V229_ACC_STATE_ON = 4U;
+static const uint8_t TESLA_LEGACY_V229_ACC_STATE_CANCEL_SILENT = 13U;
+
+static int tesla_legacy_das_raw_set_speed(const uint8_t *data) {
+  return ((int)data[0]) | (((int)(data[1] & 0x0FU)) << 8);
+}
+
+static int tesla_legacy_das_acc_state(const uint8_t *data) {
+  return (int)((data[1] >> 4) & 0x0FU);
+}
+
+static int tesla_legacy_das_raw_jerk_min(const uint8_t *data) {
+  return (((int)(data[3] & 0x07U)) << 6) | ((int)(data[2] >> 2));
+}
+
+static int tesla_legacy_das_raw_jerk_max(const uint8_t *data) {
+  return (((int)(data[4] & 0x07U)) << 5) | ((int)(data[3] >> 3));
+}
+
+static int tesla_legacy_das_raw_accel_min(const uint8_t *data) {
+  return (((int)(data[5] & 0x0FU)) << 5) | ((int)(data[4] >> 3));
+}
+
+static int tesla_legacy_das_raw_accel_max(const uint8_t *data) {
+  return (((int)(data[6] & 0x1FU)) << 4) | ((int)(data[5] >> 4));
+}
+
+static void tesla_legacy_das_set_neutral_accel(uint8_t *data) {
+  const uint32_t raw = (uint32_t)TESLA_LEGACY_V229_ACCEL_RAW_ZERO;
+  data[4] = (uint8_t)((data[4] & 0x07U) | ((raw & 0x1FU) << 3));          // accelMin bits 0..4
+  data[5] = (uint8_t)(((raw & 0x0FU) << 4) | ((raw >> 5) & 0x0FU));        // accelMax 0..3 | accelMin 5..8
+  data[6] = (uint8_t)((data[6] & 0xE0U) | ((raw >> 4) & 0x1FU));          // accelMax bits 4..8
+}
+
+static void tesla_legacy_das_set_acc_state(uint8_t *data, uint8_t state) {
+  data[1] = (uint8_t)((data[1] & 0x0FU) | ((uint8_t)(state & 0x0FU) << 4));
+}
+
+// Mode selected by fresh userspace request, on HW2 AP hardware, in an OP-lateral mode.
+static bool tesla_legacy_v229_selected(void) {
+  const uint32_t now = microsecond_timer_get();
+  return tesla_legacy_is_hw2 && tesla_legacy_has_ap_hw && tesla_legacy_v229_request &&
+         (tesla_legacy_op_hybrid_native_ap || tesla_legacy_op_autopilot_disabled) &&
+         (tesla_legacy_v229_request_us != 0U) &&
+         (safety_get_ts_elapsed(now, tesla_legacy_v229_request_us) <= TESLA_LEGACY_V229_REQUEST_FRESH_US);
+}
+
+// OP is the (single) DAS_control author right now. Genuine AEB and, in Hybrid, genuine native
+// Autosteer (observed directly by the main panda) always hand DAS_control back to the AP.
+static bool tesla_legacy_v229_owner_active(void) {
+  bool active = tesla_legacy_v229_selected() && !tesla_legacy_stock_aeb;
+  if (active && !tesla_legacy_external_panda && tesla_legacy_op_hybrid_native_ap &&
+      tesla_legacy_stock_lkas) {
+    active = false;
+  }
+  return active;
+}
+
+// Validate a userspace DAS_control TEMPLATE and cache it for substitution. Never transmits.
+static void tesla_legacy_v229_capture_das_control(const CANPacket_t *msg) {
+  uint8_t d[8];
+  for (int i = 0; i < 8; i++) {
+    d[i] = msg->data[i];
+  }
+
+  const int acc_state = tesla_legacy_das_acc_state(d);
+  const int aeb_event = (int)(d[2] & 0x03U);
+  const int raw_min = tesla_legacy_das_raw_accel_min(d);
+  const int raw_max = tesla_legacy_das_raw_accel_max(d);
+
+  // Structural checks: no AEB authored by OP, only ACC_ON / cancel states (never APC/autopark
+  // states), and a split envelope (min <= 0 <= max) inside the existing Tesla long limits.
+  const bool state_ok = (acc_state == (int)TESLA_LEGACY_V229_ACC_STATE_ON) ||
+                        (acc_state == (int)TESLA_LEGACY_V229_ACC_STATE_CANCEL_SILENT) ||
+                        (acc_state == (int)TESLA_LEGACY_V229_ACC_STATE_CANCEL_GENERIC);
+  const bool envelope_ok = (raw_min >= TESLA_LEGACY_V229_ACCEL_RAW_MIN) &&
+                           (raw_min <= TESLA_LEGACY_V229_ACCEL_RAW_ZERO) &&
+                           (raw_max >= TESLA_LEGACY_V229_ACCEL_RAW_ZERO) &&
+                           (raw_max <= TESLA_LEGACY_V229_ACCEL_RAW_MAX);
+  const bool valid = (GET_LEN(msg) == 8) && (aeb_event == 0) && !tesla_legacy_stock_aeb &&
+                     state_ok && envelope_ok;
+
+  if (!valid) {
+    tesla_legacy_v229_tmpl_valid = false;
+    return;
+  }
+
+  const bool long_allowed = controls_allowed && get_longitudinal_allowed();
+  const bool neutral = (raw_min == TESLA_LEGACY_V229_ACCEL_RAW_ZERO) &&
+                       (raw_max == TESLA_LEGACY_V229_ACCEL_RAW_ZERO);
+  // Priming (Unity parity) is only ever a 0 kph target with a very low jerk envelope, so even
+  // an unexpectedly engaged DI can only ease gently until the 1.5 s cancel backstop.
+  const bool priming = (tesla_legacy_das_raw_set_speed(d) == 0) &&
+                       (raw_min >= TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MIN) &&
+                       (raw_max <= TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MAX) &&
+                       (tesla_legacy_das_raw_jerk_min(d) >= TESLA_LEGACY_V229_PRIME_JERK_MIN_RAW) &&
+                       (tesla_legacy_das_raw_jerk_max(d) <= TESLA_LEGACY_V229_PRIME_JERK_MAX_RAW);
+  if (!long_allowed && !neutral && !priming) {
+    // Not authorised to accelerate/brake: keep OP as the single author, but only with a
+    // neutral 0/0 envelope (no handing the DI back to a native frame mid-stream).
+    tesla_legacy_das_set_neutral_accel(d);
+  }
+  // Re-checked at substitution time: authority may be revoked after capture.
+  tesla_legacy_v229_tmpl_needs_long = long_allowed && !neutral && !priming;
+
+  tesla_legacy_v229_tmpl_l = tesla_legacy_get_u32_le(&d[0]);
+  tesla_legacy_v229_tmpl_h = tesla_legacy_get_u32_le(&d[4]);
+  tesla_legacy_v229_tmpl_us = microsecond_timer_get();
+  tesla_legacy_v229_tmpl_valid = true;
+}
+
+// Observe genuine DI_state (main 0x368 chassis / external 0x256 powertrain) on bus0.
+static void tesla_legacy_v229_observe_di_state(int bus_num, const CANPacket_t *to_fwd) {
+  const int id_distate = tesla_legacy_external_panda ? 0x256 : 0x368;
+  if ((bus_num == 0) && ((int)to_fwd->addr == id_distate) && (GET_LEN(to_fwd) >= 2)) {
+    const uint8_t cruise_state = (to_fwd->data[1] >> 4) & 0x0FU;
+    // ENABLED(2), STANDSTILL(3), OVERRIDE(4): DI cruise is actively engaged.
+    tesla_legacy_v229_di_engaged = (cruise_state == 2U) || (cruise_state == 3U) || (cruise_state == 4U);
+    tesla_legacy_v229_di_state_us = microsecond_timer_get();
+  }
+}
+
+// Substitute the cached OP template onto a genuine AP DAS_control crossing bus2->bus0.
+// Returns true if the frame was modified (OP authored), false to forward the genuine frame.
+static bool tesla_legacy_v229_apply_das_control(CANPacket_t *to_fwd) {
+  if (!tesla_legacy_v229_owner_active() || (GET_LEN(to_fwd) != 8)) {
+    tesla_legacy_v229_unowned_di = false;
+    return false;
+  }
+
+  const uint32_t now = microsecond_timer_get();
+  const bool di_fresh = (tesla_legacy_v229_di_state_us != 0U) &&
+                        (safety_get_ts_elapsed(now, tesla_legacy_v229_di_state_us) <= TESLA_LEGACY_V229_DI_STATE_FRESH_US);
+  const bool unowned_di = di_fresh && tesla_legacy_v229_di_engaged && !controls_allowed;
+  if (unowned_di && !tesla_legacy_v229_unowned_di) {
+    tesla_legacy_v229_unowned_di_since_us = now;
+  }
+  tesla_legacy_v229_unowned_di = unowned_di;
+  const bool force_cancel = unowned_di &&
+    (safety_get_ts_elapsed(now, tesla_legacy_v229_unowned_di_since_us) >= TESLA_LEGACY_V229_UNOWNED_DI_CANCEL_US);
+
+  const bool fresh = tesla_legacy_v229_tmpl_valid && (tesla_legacy_v229_tmpl_us != 0U) &&
+                     (safety_get_ts_elapsed(now, tesla_legacy_v229_tmpl_us) <= TESLA_LEGACY_V229_TEMPLATE_HOLD_US);
+  if (!fresh && !force_cancel) {
+    return false;  // fail open to the genuine AP frame
+  }
+
+  if (fresh) {
+    const uint32_t stock_h = tesla_legacy_get_u32_le(&to_fwd->data[4]);
+    tesla_legacy_set_u32_le(&to_fwd->data[0], tesla_legacy_v229_tmpl_l);
+    tesla_legacy_set_u32_le(&to_fwd->data[4], (tesla_legacy_v229_tmpl_h & ~TESLA_LEGACY_V229_COUNTER_MASK_H) |
+                                              (stock_h & TESLA_LEGACY_V229_COUNTER_MASK_H));
+    // Authority revoked since capture (disengage, gas, brake-lateral-only): neutral envelope.
+    if (tesla_legacy_v229_tmpl_needs_long && !(controls_allowed && get_longitudinal_allowed())) {
+      tesla_legacy_das_set_neutral_accel(to_fwd->data);
+    }
+  }
+  if (force_cancel) {
+    tesla_legacy_das_set_acc_state(to_fwd->data, TESLA_LEGACY_V229_ACC_STATE_CANCEL_SILENT);
+    tesla_legacy_das_set_neutral_accel(to_fwd->data);
+    to_fwd->data[2] = (uint8_t)(to_fwd->data[2] & 0xFCU);
+  }
+  tesla_legacy_set_last_byte_checksum(to_fwd);
+  return true;
+}
+
 // --- TX hook ---
 static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
   const int addr = (int)msg->addr;
@@ -1043,6 +1271,12 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
       tesla_legacy_v221_op_pt_tx_us = 0U;
     }
     tesla_legacy_autosteer_247_test = (b5 & 0x10U) != 0U;
+    // V229: Unity-style stop-and-go DAS_control owner request. Freshness is enforced where used.
+    tesla_legacy_v229_request = (b5 & 0x08U) != 0U;
+    tesla_legacy_v229_request_us = microsecond_timer_get();
+    if (!tesla_legacy_v229_request) {
+      tesla_legacy_v229_tmpl_valid = false;
+    }
     tesla_legacy_op_stalk_main_edge = (b5 & 0x02U) != 0U;
     tesla_legacy_op_stalk_cancel_edge = (b5 & 0x01U) != 0U;
     if (!tesla_legacy_op_hybrid_native_ap || tesla_legacy_op_stalk_cancel_edge) {
@@ -1074,6 +1308,16 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     // test flag was allowed onto the real chassis bus in non-Hybrid mode; that changed an on-wire
     // synthetic frame before OP could engage and could disturb native AP/TACC availability.
     // Both pandas still receive/process their respective sendcan copies before this return.
+    return false;
+  }
+
+  // V229 Unity-style stop-and-go owner: while selected, each panda consumes ITS DAS_control
+  // (main 0x2B9 / external 0x2BF) as a template only, and never transmits any DAS_control
+  // directly. Substitution happens on the genuine AP frame in the forward hook.
+  if (tesla_legacy_is_das_control_msg(addr) && tesla_legacy_v229_selected()) {
+    if ((addr == tesla_legacy_das_control_addr) && ((int)msg->bus == 0)) {
+      tesla_legacy_v229_capture_das_control(msg);
+    }
     return false;
   }
 
@@ -1340,6 +1584,9 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     return true;
   }
 
+  // V229: observe genuine DI cruise state on bus0 (read-only; frame is forwarded unchanged).
+  tesla_legacy_v229_observe_di_state(bus_num, to_fwd);
+
 #if TESLA_LEGACY_V221_HIL_CUTOVER
   // V224: protect genuine native AEB braking (event 1) on both channels;
   // NEVER scrub, replace or block it. A raw 2/3 is diagnostic fault/unavailable,
@@ -1425,6 +1672,11 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
     if ((bus_num == 2) && tesla_legacy_is_das_control_msg(addr)) {
       const int aeb_event = (int)(to_fwd->data[2] & 0x03U);
       if (aeb_event == 0) {
+        // V229: OP-authored payload on the genuine AP 0x2BF (AP cadence/counter preserved).
+        // Genuine AEB (event 1) already returned above untouched.
+        if ((addr == tesla_legacy_das_control_addr) && tesla_legacy_v229_apply_das_control(to_fwd)) {
+          return false;
+        }
 #if TESLA_LEGACY_V221_HIL_CUTOVER
         if ((addr == 0x2BF) && tesla_legacy_v222_pt_owner_ready()) {
           // OP owns the non-AEB powertrain stream only while its validated
@@ -1741,7 +1993,12 @@ static bool tesla_legacy_fwd_msg_hook(int bus_num, CANPacket_t *to_fwd) {
       (tesla_legacy_native_alc_state == 9U || tesla_legacy_native_alc_state == 10U) &&
       tesla_legacy_native_alc_last_status_us != 0U &&
       safety_get_ts_elapsed(microsecond_timer_get(), tesla_legacy_native_alc_last_status_us) <= 300000U;
-    if (tesla_legacy_is_hud_status_msg(addr) && !native_alc_owns_steer &&
+    // V229: in stop-and-go owner mode OP authors the genuine AP 0x2B9 (AP cadence/counter
+    // preserved). Genuine AEB (event 1) returned untouched above. Otherwise use the existing
+    // HUD / legacy template overlay path unchanged.
+    const bool v229_authored = (addr == 0x2B9) && (original_das_control_aeb_event != 1) &&
+                               tesla_legacy_v229_apply_das_control(to_fwd);
+    if (!v229_authored && tesla_legacy_is_hud_status_msg(addr) && !native_alc_owns_steer &&
         ((addr != 0x2B9) || (original_das_control_aeb_event != 1))) {
       (void)tesla_legacy_apply_hud_forward_data(to_fwd, bus_num);
     }
@@ -1795,6 +2052,7 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_op_stalk_enable = GET_FLAG(param, TESLA_LEGACY_FLAG_OP_STALK_ENABLE);
   tesla_legacy_ignore_stock_aeb = GET_FLAG(param, TESLA_LEGACY_FLAG_IGNORE_STOCK_AEB);
   tesla_legacy_has_ap_hw = GET_FLAG(param, TESLA_LEGACY_FLAG_HW2) || GET_FLAG(param, TESLA_LEGACY_FLAG_HW3);
+  tesla_legacy_is_hw2 = GET_FLAG(param, TESLA_LEGACY_FLAG_HW2);
   // chassis_bus: only the MAIN panda on HW3 (raven) reads chassis vehicle-state off bus 1. The
   // external (powertrain) panda always reads its frames off its local bus 0, and HW1/HW2 main read
   // chassis off bus 0. (Vanilla parity: HW3 main -> chassis_bus=1; external or HW2 -> 0.)
@@ -1819,6 +2077,17 @@ static safety_config tesla_legacy_init(uint16_t param) {
   tesla_legacy_v223_pedal_us = 0U;
   tesla_legacy_v223_brake_us = 0U;
   tesla_legacy_v223_native_long_us = 0U;
+  tesla_legacy_v229_request = false;
+  tesla_legacy_v229_request_us = 0U;
+  tesla_legacy_v229_tmpl_valid = false;
+  tesla_legacy_v229_tmpl_needs_long = false;
+  tesla_legacy_v229_tmpl_l = 0U;
+  tesla_legacy_v229_tmpl_h = 0U;
+  tesla_legacy_v229_tmpl_us = 0U;
+  tesla_legacy_v229_di_engaged = false;
+  tesla_legacy_v229_di_state_us = 0U;
+  tesla_legacy_v229_unowned_di = false;
+  tesla_legacy_v229_unowned_di_since_us = 0U;
   tesla_legacy_hybrid_eac_recovery = false;
 
   tesla_legacy_autopilot_enabled = false;

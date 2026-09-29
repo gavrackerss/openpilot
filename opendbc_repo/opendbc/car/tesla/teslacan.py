@@ -23,7 +23,8 @@ def create_fake_das_msg(pedal_enabled: bool, autopilot_disabled: bool, bus: int,
                         hybrid_native_ap: bool = False, autosteer_247_test: bool = False,
                         native_alc_turn: int = 0, native_alc_mode: bool = False,
                         offhighway_alc_enable: bool = False, acc_from_zero_enable: bool = False,
-                        autopilot_always_on_enable: bool = False, v221_hil_owner_request: bool = False):
+                        autopilot_always_on_enable: bool = False, v221_hil_owner_request: bool = False,
+                        v229_stopgo_owner: bool = False):
   dat = bytearray(8)
   # Byte4 is internal to panda, never reaches the car. Only one direction at a time.
   dat[4] = ((0x04 if native_alc_mode else 0) |
@@ -36,6 +37,8 @@ def create_fake_das_msg(pedal_enabled: bool, autopilot_disabled: bool, bus: int,
             (0x80 if autopilot_disabled else 0) |
             (0x40 if hybrid_native_ap else 0) |
             (0x10 if autosteer_247_test else 0) |
+            # V229: Unity-style stop-and-go DAS_control owner request (see tesla_legacy.h).
+            (0x08 if v229_stopgo_owner else 0) |
             (0x02 if stalk_main else 0) |
             (0x01 if stalk_cancel else 0))
   return (0x659, bytes(dat), bus)
@@ -46,7 +49,8 @@ def create_fake_das_message(pedal_enabled: bool, autopilot_disabled: bool, *,
                             hybrid_native_ap: bool = False, autosteer_247_test: bool = False,
                             native_alc_turn: int = 0, native_alc_mode: bool = False,
                             offhighway_alc_enable: bool = False, acc_from_zero_enable: bool = False,
-                            autopilot_always_on_enable: bool = False, v221_hil_owner_request: bool = False, bus: int = 0):
+                            autopilot_always_on_enable: bool = False, v221_hil_owner_request: bool = False,
+                            v229_stopgo_owner: bool = False, bus: int = 0):
   return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
                              stalk_main=stalk_main, stalk_cancel=stalk_cancel,
                              hybrid_native_ap=hybrid_native_ap,
@@ -55,7 +59,8 @@ def create_fake_das_message(pedal_enabled: bool, autopilot_disabled: bool, *,
                              offhighway_alc_enable=offhighway_alc_enable,
                              acc_from_zero_enable=acc_from_zero_enable,
                              autopilot_always_on_enable=autopilot_always_on_enable,
-                             v221_hil_owner_request=v221_hil_owner_request)
+                             v221_hil_owner_request=v221_hil_owner_request,
+                             v229_stopgo_owner=v229_stopgo_owner)
 
 
 class TeslaCAN:

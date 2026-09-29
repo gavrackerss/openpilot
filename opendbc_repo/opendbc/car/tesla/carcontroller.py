@@ -13,6 +13,12 @@ What this file does (only two things):
      by emitting STW_ACTN_RQ (cruise stalk up/down), using TeslaCAN.create_action_request() (CRC+counter).
 
 It does *not* change steering behavior or ALC behavior.
+
+V229 (XNOR_V229_UNITY_STOPGO_OWNER): Unity-style stop-and-go. On HW2 legacy cars in Hybrid or
+Autopilot-Disabled+EnableACC mode, openpilot is the single DAS_control author on both buses
+(main 0x2B9 / external 0x2BF). Userspace sends TEMPLATES; panda substitutes them onto the genuine
+AP frames. While disengaged a gentle Unity "priming" frame (ACC_ON, 0 kph) is kept on the bus so a
+stalk pull arms the DI from 0 mph without a lead. Opt out: touch /data/xnor_disable_op_stopgo.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.modules.LONG_module import LongController
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus
+from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.lateral import apply_std_steer_angle_limits
@@ -84,6 +90,23 @@ ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
 ROADWORKS_PRESET_FILE = "/data/xnor_roadworks_speed_cap_preset_kph.txt"
 ROADWORKS_DEFAULT_KPH = 50.0 * CV.MPH_TO_KPH
 
+# --- V229: Unity-style stop-and-go longitudinal owner (tesla_legacy.h XNOR_V229_UNITY_STOPGO_OWNER)
+# Drive-latched. Default ON for HW2 Hybrid / Autopilot-Disabled+EnableACC; opt out with this file.
+_V229_STOPGO_DISABLE_FILE = "/data/xnor_disable_op_stopgo"
+_V229_STOPGO_CARS = (CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_X_HW2)
+_V229_ACCEL_TO_SPEED_S = 3.0                # Unity ACCEL_TO_SPEED_MULTIPLIER: setSpeed = vEgo + 3 * accel
+_V229_SET_SPEED_MAX_KPH = 200.0             # Unity clip
+_V229_ACTIVE_JERK = (-8.0, 8.0)             # Unity JERK_LIMIT_MIN/MAX
+_V229_PRIME_ACCEL = (-1.4, 1.8)             # Unity: "send this values so we can enable at 0 km/h"
+_V229_PRIME_JERK = (-0.46, 0.476)
+_V229_ACC_STATE_CANCEL_GENERIC = 0
+_V229_ACC_STATE_ON = 4
+_V229_ACC_STATE_CANCEL_SILENT = 13
+# DI engaged by the stalk before OP enables (same stalk edge). Only after this grace, or if OP was
+# enabled during this DI engagement and has since disengaged, do we cancel an unowned DI cruise.
+_V229_UNOWNED_DI_GRACE_FRAMES = 50          # 0.5 s at 100 Hz (panda backstop cancels at 1.5 s)
+_V229_DI_ENGAGED_STATES = ("ENABLED", "STANDSTILL", "OVERRIDE")
+
 
 def _v226_powertrain_tx_allowed(hybrid_native_ap: bool, exclusive_hybrid_selected: bool,
                                 owner_request: bool) -> bool:
@@ -118,6 +141,28 @@ class CarController(CarControllerBase):
     self._v221_hil_selected = (os.path.exists('/data/xnor_enable_v221_hil_owner') and
                                not os.path.exists('/data/xnor_disable_v221_hil_owner'))
     self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
+    # V229: Unity-style stop-and-go owner, latched for the drive like Hybrid.
+    _v229_ap_disabled_init = bool(self.params.get_bool("TinklaAutopilotDisabled"))
+    _v229_enable_acc_init = bool(self.params.get_bool("TinklaEnableACC"))
+    self._v229_stopgo_selected = bool(
+      CP.carFingerprint in _V229_STOPGO_CARS
+      and CP.openpilotLongitudinalControl
+      and (self._cached_hybrid_native_ap or (_v229_ap_disabled_init and _v229_enable_acc_init))
+      and not os.path.exists(_V229_STOPGO_DISABLE_FILE)
+    )
+    if self._v229_stopgo_selected:
+      # Exactly one longitudinal ownership mechanism per drive: V229 replaces the V221 HIL owner.
+      self._v221_hil_selected = False
+    self._v229_owner_now = False
+    self._v229_owner_last_sent = None
+    self._v229_di_engaged_since_frame = -1
+    self._v229_op_enabled_during_di = False
+    self._v229_mode = "init"
+    self._v229_last_diag_frame = -100000
+    cloudlog.info(f'[XNOR_V229_STOPGO] selected={int(self._v229_stopgo_selected)} '
+                  f'hybrid={int(self._cached_hybrid_native_ap)} ap_disabled={int(_v229_ap_disabled_init)} '
+                  f'enable_acc={int(_v229_enable_acc_init)} '
+                  f'opt_out_file={int(os.path.exists(_V229_STOPGO_DISABLE_FILE))}')
     self._cached_pedal_enabled = False
     self._cached_adjust_acc_with_speed_limit = False
     self._cached_speed_limit_offset_uom = 0.0
@@ -433,7 +478,8 @@ class CarController(CarControllerBase):
       cloudlog.info(f'[XNOR_V209_ALC] bridge={self._native_alc_hold_direction} native={state} prior={prior}')
     return int(self._native_alc_hold_direction)
 
-  def _emit_internal_0x659(self, CS, can_sends, *, native_alc_turn: int = 0, v221_hil_request: bool = False) -> None:
+  def _emit_internal_0x659(self, CS, can_sends, *, native_alc_turn: int = 0, v221_hil_request: bool = False,
+                           v229_stopgo_owner: bool = False) -> None:
     stalk_btn = int(getattr(CS, "cruise_buttons", 0) or 0)
     prev_btn = int(self._op659_prev_btn)
 
@@ -450,8 +496,11 @@ class CarController(CarControllerBase):
     alc_signal = ((4 if native_alc_mode else 0) | (8 if offhighway_alc else 0) |
                   (16 if acc_from_zero else 0) | (32 if autopilot_always_on else 0) |
                   (64 if v221_hil_request else 0) | int(native_alc_turn))
-    if (self.frame % 10 == 0) or main_edge or cancel_edge or alc_signal != int(getattr(self, '_native_alc_last_sent', 0)):
+    v229_changed = self._v229_owner_last_sent is None or bool(v229_stopgo_owner) != bool(self._v229_owner_last_sent)
+    if (self.frame % 10 == 0) or main_edge or cancel_edge or v229_changed or \
+       alc_signal != int(getattr(self, '_native_alc_last_sent', 0)):
       self._native_alc_last_sent = int(alc_signal)
+      self._v229_owner_last_sent = bool(v229_stopgo_owner)
       buses = {int(CANBUS.party)}
       if self.CP.carFingerprint in LEGACY_CARS:
         buses.add(int(CANBUS.powertrain))
@@ -470,6 +519,7 @@ class CarController(CarControllerBase):
           acc_from_zero_enable=bool(acc_from_zero and int(bus) == int(CANBUS.party)),
           autopilot_always_on_enable=bool(autopilot_always_on and int(bus) == int(CANBUS.party)),
           v221_hil_owner_request=bool(v221_hil_request),
+          v229_stopgo_owner=bool(v229_stopgo_owner),
         ))
 
   def _speed_limit_target_ms(self, CS) -> float:
@@ -867,7 +917,9 @@ class CarController(CarControllerBase):
     # and publishes an advisory cap to the next carState for the OP planner,
     # but MUST NOT send SET, RES or CANCEL while OP owns direct acceleration.
     # Stalk input from the driver is not modified by this branch.
-    if bool(getattr(CS, '_xnor_experimental_direct_active', False)):
+    # V229: while OP owns DAS_control (stop-and-go owner) LONG is advisory only, exactly like the
+    # V218 direct path: it caps vCruise via card.py and never presses SET/RES/CANCEL.
+    if bool(getattr(CS, '_xnor_experimental_direct_active', False)) or bool(self._v229_owner_now):
       policy_enabled = bool(getattr(CC, 'longActive', False)) and bool(enabled)
       cs_out = getattr(CS, 'out', None)
       if (bool(getattr(cs_out, 'brakePressed', False)) or
@@ -876,7 +928,7 @@ class CarController(CarControllerBase):
       decision = self._long_module.update(CS, enabled=policy_enabled,
                                           frame=int(self.frame), now_ms=int(self._now_ms()))
       if self.frame % 100 == 0:
-        cloudlog.info(f'[XNOR_V218_DIRECT] ccEnabled={int(bool(getattr(CC,"enabled",False)))} latActive={int(bool(getattr(CC,"latActive",False)))} longActive={int(bool(getattr(CC,"longActive",False)))} '
+        cloudlog.info(f'[XNOR_V218_DIRECT] v229={int(bool(self._v229_owner_now))} ccEnabled={int(bool(getattr(CC,"enabled",False)))} latActive={int(bool(getattr(CC,"latActive",False)))} longActive={int(bool(getattr(CC,"longActive",False)))} '
                       f'policy={getattr(self._long_module,"op_target_ms",None)} '
                       f'policy_src={getattr(self._long_module,"op_target_source","none")} '
                       f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))} '
@@ -948,6 +1000,106 @@ class CarController(CarControllerBase):
     if self._queue_stalk_pulse(CS, can_sends, int(decision.button)):
       self._automated_cruise_action_time_ms = int(self._now_ms())
 
+  # --- V229: Unity-style stop-and-go owner -------------------------------------------------------
+  def _v229_compute_owner(self, CS) -> bool:
+    """True while OP should be the single DAS_control author (panda enforces the same rules)."""
+    if not self._v229_stopgo_selected:
+      return False
+    autopilot_disabled = bool(self._cached_autopilot_disabled)
+    hybrid = bool(self._cached_hybrid_native_ap) and not autopilot_disabled
+    ap_disabled_acc = autopilot_disabled and (bool(getattr(self, "_cached_enable_acc", False)) or
+                                              bool(getattr(CS, "enableACC", False)))
+    if not (hybrid or ap_disabled_acc):
+      return False
+    cs_out = getattr(CS, "out", None)
+    # Unity parity: genuine native Autosteer owns TACC. Hand DAS_control back to the AP.
+    if hybrid and bool(getattr(cs_out, "stockLkas", False)):
+      return False
+    return True
+
+  def _v229_stopgo_long(self, CC, CS, can_sends) -> None:
+    """Emit Unity-parity DAS_control TEMPLATES at 50 Hz for both pandas.
+
+    Modes (first match wins):
+      not_drive : ACC_CANCEL_GENERIC(0), 0 kph, priming envelope          (Unity parity)
+      cancel    : ACC_CANCEL_SILENT(13), neutral 0/0 -> DI cruise engaged but OP is not
+      active    : ACC_ON(4), setSpeed = vEgo + 3*a, split accel limits     (Unity parity)
+      neutral   : ACC_ON(4), setSpeed = vEgo, 0/0 (OP engaged, long overridden: gas/brake latch)
+      priming   : ACC_ON(4), 0 kph, accel -1.4..+1.8, jerk -0.46..+0.476   (Unity parity)
+    """
+    cs_out = CS.out
+    stock_state = str(getattr(CS, "stock_cruise_state", "") or "").upper()
+    di_engaged = stock_state in _V229_DI_ENGAGED_STATES
+    op_enabled = bool(CC.enabled)
+
+    if di_engaged:
+      if self._v229_di_engaged_since_frame < 0:
+        self._v229_di_engaged_since_frame = int(self.frame)
+        self._v229_op_enabled_during_di = False
+      if op_enabled:
+        self._v229_op_enabled_during_di = True
+    else:
+      self._v229_di_engaged_since_frame = -1
+      self._v229_op_enabled_during_di = False
+
+    if (not self._v229_owner_now) or (self.frame % 2 != 0):
+      if not self._v229_owner_now:
+        self._v229_mode = "native"
+      return
+
+    v_ego = max(float(cs_out.vEgo), 0.0)
+    v_ego_kph = v_ego * CV.MS_TO_KPH
+    in_drive = cs_out.gearShifter == structs.CarState.GearShifter.drive
+    di_engaged_frames = (int(self.frame) - int(self._v229_di_engaged_since_frame)) if di_engaged else 0
+    unowned_di = di_engaged and (not op_enabled) and (
+      self._v229_op_enabled_during_di or di_engaged_frames >= _V229_UNOWNED_DI_GRACE_FRAMES)
+
+    accel = 0.0
+    if not in_drive:
+      mode = "not_drive"
+      acc_state, set_kph = _V229_ACC_STATE_CANCEL_GENERIC, 0.0
+      accel_min, accel_max = _V229_PRIME_ACCEL
+      jerk_min, jerk_max = _V229_PRIME_JERK
+    elif unowned_di:
+      mode = "cancel"
+      acc_state, set_kph = _V229_ACC_STATE_CANCEL_SILENT, v_ego_kph
+      accel_min, accel_max = 0.0, 0.0
+      jerk_min, jerk_max = _V229_ACTIVE_JERK
+    elif bool(CC.longActive):
+      mode = "active"
+      accel = float(np.clip(float(CC.actuators.accel), CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+      acc_state = _V229_ACC_STATE_ON
+      set_kph = min(max(v_ego + accel * _V229_ACCEL_TO_SPEED_S, 0.0) * CV.MS_TO_KPH, _V229_SET_SPEED_MAX_KPH)
+      accel_min, accel_max = (accel, 0.0) if accel < 0.0 else (0.0, accel)
+      jerk_min, jerk_max = _V229_ACTIVE_JERK
+    elif op_enabled:
+      mode = "neutral"
+      acc_state, set_kph = _V229_ACC_STATE_ON, v_ego_kph
+      accel_min, accel_max = 0.0, 0.0
+      jerk_min, jerk_max = _V229_ACTIVE_JERK
+    else:
+      mode = "priming"
+      acc_state, set_kph = _V229_ACC_STATE_ON, 0.0
+      accel_min, accel_max = _V229_PRIME_ACCEL
+      jerk_min, jerk_max = _V229_PRIME_JERK
+
+    counter = (int(self.frame) // 2) % 8
+    for powertrain in (False, True):
+      can_sends.append(self.tesla_can.create_das_control_template(
+        powertrain=powertrain, acc_state=acc_state, set_speed_kph=set_kph,
+        accel_min=accel_min, accel_max=accel_max, jerk_min=jerk_min, jerk_max=jerk_max,
+        counter=counter,
+      ))
+
+    if mode != self._v229_mode or (int(self.frame) - int(self._v229_last_diag_frame)) >= 100:
+      self._v229_last_diag_frame = int(self.frame)
+      stuck = (mode == "active") and (not di_engaged) and (v_ego < 0.5)
+      cloudlog.info(f'[XNOR_V229_STOPGO] mode={mode} prev={self._v229_mode} di={stock_state or "UNKNOWN"} '
+                    f'ccEnabled={int(op_enabled)} longActive={int(bool(CC.longActive))} '
+                    f'accel={accel:.2f} set_kph={set_kph:.1f} ego={v_ego:.2f} '
+                    f'di_frames={di_engaged_frames} di_not_armed_while_active={int(stuck)}')
+    self._v229_mode = mode
+
   def update(self, CC, CS, now_nanos):
 
 
@@ -958,6 +1110,7 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
+    self._v229_owner_now = self._v229_compute_owner(CS)
     native_alc_turn = self._native_alc_virtual_hold(CC, CS)
     # V223: direct longitudinal owner request follows OP's independent stalk latch,
     # not native TACC. Both pandas independently require fresh real pedal/brake/AP
@@ -970,7 +1123,8 @@ class CarController(CarControllerBase):
       not bool(getattr(CS.out, 'gasPressed', False))
     )
     self._emit_internal_0x659(CS, can_sends, native_alc_turn=native_alc_turn,
-                              v221_hil_request=v221_hil_request)
+                              v221_hil_request=v221_hil_request,
+                              v229_stopgo_owner=self._v229_owner_now)
     if self._v221_hil_selected and self.frame % 100 == 0:
       cloudlog.info(f'[XNOR_V221_HIL] request={int(v221_hil_request)} '
                     f'longActive={int(bool(CC.longActive))} '
@@ -1451,8 +1605,12 @@ class CarController(CarControllerBase):
     # bit6, before this 25 Hz TX block. Panda then releases the native AP carrier;
     # neither OP chassis templates nor the PT frame are sent without ownership.
     # The original continuous sender remains unchanged in non-Hybrid/legacy modes.
-    if self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
-      state = 13 if CC.cruiseControl.cancel else 4
+    # V229 replaces both legacy DAS_control senders below with Unity-style templates.
+    if (not self._v229_stopgo_selected) and self.CP.openpilotLongitudinalControl and (self.frame % 4 == 0):
+      # Only cancel when OP is NOT engaged. With pcmCruise=False (Autopilot-Disabled) controlsd sets
+      # cruiseControl.cancel for the whole engagement, which previously encoded ACC_CANCEL (13)
+      # into every DAS_control while OP was driving.
+      state = 13 if (CC.cruiseControl.cancel and not CC.enabled) else 4
       accel = float(np.clip(
         float(actuators.accel),
         CarControllerParams.ACCEL_MIN,
@@ -1535,7 +1693,8 @@ class CarController(CarControllerBase):
     # merges it onto the next genuine AP 0x2B9 while preserving the AP rolling counter/timing.
     # Send templates at 50 Hz so every ~40 Hz stock 0x2B9 has a fresh desired payload available.
     if (
-      ((not hybrid_native_ap) or v221_hil_request)
+      (not self._v229_stopgo_selected)
+      and ((not hybrid_native_ap) or v221_hil_request)
       and _UNITY_2B9_OVERLAY_TEMPLATE
       and self.CP.openpilotLongitudinalControl
       and (self.CP.carFingerprint in LEGACY_CARS)
@@ -1545,7 +1704,7 @@ class CarController(CarControllerBase):
       native_acc_overlay = bool(self._cached_enable_acc) or bool(getattr(CS, "enableACC", False))
       long_active_overlay = bool(CC.longActive) and ((not autopilot_disabled) or native_acc_overlay)
       if long_active_overlay and (native_acc_overlay or v221_hil_request):
-        overlay_state = 13 if CC.cruiseControl.cancel else 4
+        overlay_state = 13 if (CC.cruiseControl.cancel and not CC.enabled) else 4
         overlay_accel = float(np.clip(
           float(actuators.accel),
           CarControllerParams.ACCEL_MIN,
@@ -1560,6 +1719,10 @@ class CarController(CarControllerBase):
           float(CS.out.vEgo),
           True,
         ))
+
+    # V229 Unity-style stop-and-go DAS_control templates (both pandas).
+    if self._v229_stopgo_selected and self.CP.openpilotLongitudinalControl:
+      self._v229_stopgo_long(CC, CS, can_sends)
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = float(self.apply_angle_last)
