@@ -22,7 +22,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.tesla_0x659 import Tesla659Carrier
-from openpilot.selfdrive.car.tesla_can_tap import TeslaCanTap, ARM_FILE as V230_CAN_ARM
+from openpilot.selfdrive.car.tesla_can_tap import TeslaCanTap, ARM_FILE as V230_CAN_ARM, AUTO_ONCE_FILE as V230_AUTO_ONCE, DISABLE_FILE as V230_DISABLE
 from openpilot.selfdrive.car.tesla_longitudinal_shadow import LongitudinalShadow
 
 
@@ -197,13 +197,18 @@ class Car:
 
     self._tesla_659 = Tesla659Carrier() if getattr(self.CP, "carName", "") == "tesla" else None
     self._tesla_sl_raw = _TeslaSpeedLimitRaw() if getattr(self.CP, "carName", "") == "tesla" else None
-    # V230: one existing card CAN reader; optional passive bounded recorder, no new sockets.
+    # V230R1: passive observation uses the EXISTING card CAN feed, never a new subscriber.
+    # Always log a build-loaded marker: a missing marker in the uploaded rlog proves that
+    # this modified card was not executed (or the log was not collected).
     self._xnor_v230_tap = None
-    if getattr(self.CP, "carName", "") == "tesla" and os.path.isfile(V230_CAN_ARM) and not REPLAY:
-      try:
-        self._xnor_v230_tap = TeslaCanTap()
-      except Exception:
-        cloudlog.exception('XNOR_V230_INIT_ERROR: passive capture unavailable; controls unchanged')
+    self._xnor_v230_started = False
+    self._xnor_v230_probe_ns = 0
+    self._xnor_v230_status_ns = 0
+    self._xnor_v230_last_error = ''
+    cloudlog.warning('XNOR_V230R1_BUILD_LOADED carName=%s replay=%d arm=%d disable=%d autoOnceDone=%d',
+                     getattr(self.CP, 'carName', ''), int(REPLAY), int(os.path.isfile(V230_CAN_ARM)),
+                     int(os.path.isfile(V230_DISABLE)), int(os.path.isfile(V230_AUTO_ONCE)))
+    self._xnor_v230_start_if_armed()
 
     self.CP.alternativeExperience = 0
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
@@ -274,16 +279,51 @@ class Car:
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
+  def _xnor_v230_start_if_armed(self) -> None:
+    # Automatic one-shot for this diagnostic build, or explicit historical V230 arm.
+    # Creates manifest/CSV headers synchronously so the capture directory is observable
+    # before any background worker starts. Re-checks the flag if it was set post-init.
+    if self._xnor_v230_started or self._xnor_v230_tap is not None:
+      return
+    car_name = str(getattr(self.CP, 'carName', ''))
+    armed = os.path.isfile(V230_CAN_ARM)
+    auto_once = not os.path.isfile(V230_AUTO_ONCE)
+    disabled = os.path.isfile(V230_DISABLE)
+    if car_name != 'tesla' or REPLAY or disabled or not (armed or auto_once):
+      return
+    try:
+      tap = TeslaCanTap()
+      self._xnor_v230_tap = tap
+      self._xnor_v230_started = True
+      # Prevent unarmed, repeated recordings on every later card restart.
+      try:
+        from pathlib import Path
+        Path(V230_AUTO_ONCE).touch()
+      except OSError:
+        cloudlog.exception('XNOR_V230R1_ONCE_MARKER_ERROR: capture continues')
+      cloudlog.warning('XNOR_V230R1_STARTED path=%s mode=%s; no extra CAN subscription',
+                       str(tap.path), 'explicit' if armed else 'auto-once')
+    except Exception as exc:
+      self._xnor_v230_last_error = repr(exc)
+      self._xnor_v230_started = True  # latch failure; no repeated filesystem attempts in the control loop
+      cloudlog.exception('XNOR_V230R1_START_FAILED: capture unavailable; controls unchanged')
+
   def state_update(self) -> tuple[car.CarState, structs.RadarDataT | None]:
     """carState update loop, driven by can"""
 
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
+    # The check re-uses card's normal 100 Hz iteration; NO additional socket is created.
+    v230_now = time.monotonic_ns()
+    if v230_now - self._xnor_v230_probe_ns >= 1_000_000_000:
+      self._xnor_v230_probe_ns = v230_now
+      self._xnor_v230_start_if_armed()
     if self._xnor_v230_tap is not None:
       try:
         self._xnor_v230_tap.rx(can_list)  # exact existing subscription, before CI/659 mutations
       except Exception:
-        cloudlog.exception('XNOR_V230_RX_ERROR: disabling only optional recorder')
+        self._xnor_v230_last_error = 'RX callback exception (see logged traceback)'
+        cloudlog.exception('XNOR_V230R1_RX_ERROR: disabling only optional recorder')
         self._xnor_v230_tap.stop()
         self._xnor_v230_tap = None
 
@@ -317,6 +357,16 @@ class Car:
     RD: structs.RadarDataT | None = self.RI.update(can_list)
 
     self.sm.update(0)
+    if v230_now - self._xnor_v230_status_ns >= 5_000_000_000:
+      self._xnor_v230_status_ns = v230_now
+      if self._xnor_v230_tap is not None:
+        cloudlog.warning('XNOR_V230R1_STATUS %s', self._xnor_v230_tap.status_line())
+      elif self._xnor_v230_last_error:
+        cloudlog.warning('XNOR_V230R1_STATUS failed=%s', self._xnor_v230_last_error)
+      else:
+        cloudlog.warning('XNOR_V230R1_STATUS inactive carName=%s replay=%d arm=%d disable=%d once=%d',
+                         getattr(self.CP, 'carName', ''), int(REPLAY), int(os.path.isfile(V230_CAN_ARM)),
+                         int(os.path.isfile(V230_DISABLE)), int(os.path.isfile(V230_AUTO_ONCE)))
     if self._xnor_v230_tap is not None:
       try:
         self._xnor_v230_tap.state(self.CP, CS, self.sm['carControl'], self.sm['pandaStates'],
