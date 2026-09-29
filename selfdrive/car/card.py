@@ -22,6 +22,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.tesla_0x659 import Tesla659Carrier
+from openpilot.selfdrive.car.tesla_can_tap import TeslaCanTap, ARM_FILE as V230_CAN_ARM
 from openpilot.selfdrive.car.tesla_longitudinal_shadow import LongitudinalShadow
 
 
@@ -196,6 +197,13 @@ class Car:
 
     self._tesla_659 = Tesla659Carrier() if getattr(self.CP, "carName", "") == "tesla" else None
     self._tesla_sl_raw = _TeslaSpeedLimitRaw() if getattr(self.CP, "carName", "") == "tesla" else None
+    # V230: one existing card CAN reader; optional passive bounded recorder, no new sockets.
+    self._xnor_v230_tap = None
+    if getattr(self.CP, "carName", "") == "tesla" and os.path.isfile(V230_CAN_ARM) and not REPLAY:
+      try:
+        self._xnor_v230_tap = TeslaCanTap()
+      except Exception:
+        cloudlog.exception('XNOR_V230_INIT_ERROR: passive capture unavailable; controls unchanged')
 
     self.CP.alternativeExperience = 0
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
@@ -271,10 +279,19 @@ class Car:
 
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
+    if self._xnor_v230_tap is not None:
+      try:
+        self._xnor_v230_tap.rx(can_list)  # exact existing subscription, before CI/659 mutations
+      except Exception:
+        cloudlog.exception('XNOR_V230_RX_ERROR: disabling only optional recorder')
+        self._xnor_v230_tap.stop()
+        self._xnor_v230_tap = None
 
     if self._tesla_659 is not None:
       extra = self._tesla_659.tick(can_list)
       if extra:
+        if self._xnor_v230_tap is not None:
+          self._xnor_v230_tap.tx(extra)  # pre-sendcan, including 0x659 carrier
         self.pm.sock['sendcan'].send(can_list_to_can_capnp(extra, msgtype='sendcan'))
 
     if self._tesla_sl_raw is not None:
@@ -300,6 +317,13 @@ class Car:
     RD: structs.RadarDataT | None = self.RI.update(can_list)
 
     self.sm.update(0)
+    if self._xnor_v230_tap is not None:
+      try:
+        self._xnor_v230_tap.state(self.CP, CS, self.sm['carControl'], self.sm['pandaStates'],
+                                    str(getattr(self.CI.CS, 'stock_cruise_state', 'UNKNOWN')))
+      except Exception:
+        # Optional observer must not affect the control loop.
+        pass
     if self._xnor_v220_shadow is not None:
       try:
         self._xnor_v220_shadow.observe_rx(can_list)
@@ -421,6 +445,11 @@ class Car:
         except Exception:
           cloudlog.exception('XNOR_V220R1_SHADOW_TX_ERROR: disabling optional observer; preserving card')
           self._xnor_v220_shadow = None
+      if self._xnor_v230_tap is not None:
+        try:
+          self._xnor_v230_tap.tx(can_sends, now_nanos)
+        except Exception:
+          pass
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC
@@ -468,6 +497,8 @@ class Car:
         self.rk.monitor_time()
     finally:
       e.set()
+      if self._xnor_v230_tap is not None:
+        self._xnor_v230_tap.stop()
       t.join()
 
 
