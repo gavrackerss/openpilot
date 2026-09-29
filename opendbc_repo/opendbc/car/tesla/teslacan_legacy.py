@@ -96,6 +96,36 @@ class TeslaCANRaven:
     values["DAS_controlChecksum"] = self.checksum(0x2B9, data[:7])
     return self.packers[CANBUS.party].make_can_msg("DAS_control", CANBUS.party, values)
 
+  def create_das_control_template(self, *, powertrain: bool, acc_state: int, set_speed_kph: float,
+                                  accel_min: float, accel_max: float, jerk_min: float, jerk_max: float,
+                                  counter: int):
+    """V229 Unity-parity DAS_control TEMPLATE (tesla_legacy.h XNOR_V229_UNITY_STOPGO_OWNER).
+
+    powertrain=True  -> 0x2BF on CANBUS.powertrain (external panda)
+    powertrain=False -> 0x2B9 on CANBUS.party      (main panda)
+
+    Panda safety validates this payload and substitutes it onto the NEXT genuine AP DAS_control
+    frame (AP cadence + 3-bit counter preserved, checksum recomputed). It is never transmitted
+    directly, so there is never a second DAS_control sender on either bus. Encoding follows
+    Unity: accel limits are split (min <= 0 <= max) and set speed is a short look-ahead target.
+    """
+    bus = CANBUS.powertrain if powertrain else CANBUS.party
+    packer = self.packers[bus]
+    values = {
+      "DAS_setSpeed": min(max(float(set_speed_kph), 0.0), 200.0),
+      "DAS_accState": int(acc_state),
+      "DAS_aebEvent": 0,
+      "DAS_jerkMin": min(max(float(jerk_min), -15.0), 0.0),
+      "DAS_jerkMax": min(max(float(jerk_max), 0.0), 15.0),
+      "DAS_accelMin": min(max(float(accel_min), CarControllerParams.ACCEL_MIN), 0.0),
+      "DAS_accelMax": min(max(float(accel_max), 0.0), CarControllerParams.ACCEL_MAX),
+      "DAS_controlCounter": int(counter) % 8,
+    }
+    # Additive checksum always uses the chassis 0x2B9 seed (also for powertrain 0x2BF).
+    data = packer.make_can_msg("DAS_control", bus, values)[1]
+    values["DAS_controlChecksum"] = self.checksum(0x2B9, data[:7])
+    return packer.make_can_msg("DAS_control", bus, values)
+
   def create_steering_allowed(self, counter):
     values = {
       "APS_eacMonitorCounter": counter,
