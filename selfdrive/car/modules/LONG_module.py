@@ -63,14 +63,15 @@ def _mono_ms() -> int:
 
 def experimental_policy_cap_ms(*, base_ms: float, speed_limit_ms: Optional[float],
                                roadworks_ms: Optional[float], guarded_target_ms: float,
-                               source: str, has_lead: bool) -> tuple[Optional[float], str]:
-  """V218: independent LONG policy cap for the OP planner, not a second actuator.
+                               source: str, has_lead: bool,
+                               verified_curve_cap_ms: Optional[float] = None) -> tuple[Optional[float], str]:
+  """V228: only independent live geometry can lower the direct Experimental cap.
 
-  E2E/lead predictions already feed the planner's acceleration and stopping logic.
-  Feeding that trajectory back as vCruise would create a zero-speed/stale-lead loop.
-  A lower LONG curve target is eligible only in a vetted curve/CSA/roundabout
-  context with no lead; other caps are independent posted-limit/roadworks inputs.
-  If the driver base is uninitialised, leave the planner's own base untouched.
+  The LONG arbitration's guarded_target_ms can contain a historical SET value,
+  a planner/E2E lead prediction or a stale map curve. Source tags alone do NOT
+  qualify it as road curvature. Only fresh, independently computed CSA/map/
+  roundabout geometry may lower the target. The planner still owns all lead,
+  stop and acceleration decisions; valid posted limits/roadworks remain caps.
   """
   if not math.isfinite(base_ms) or base_ms <= 0.0:
     return None, 'base_uninitialised'
@@ -82,12 +83,13 @@ def experimental_policy_cap_ms(*, base_ms: float, speed_limit_ms: Optional[float
   if roadworks_ms is not None and math.isfinite(float(roadworks_ms)) and float(roadworks_ms) > 0.0:
     cap_ms = min(cap_ms, float(roadworks_ms))
     sources.append('roadworks')
-  source_lc = str(source).lower()
-  curve_context = any(tag in source_lc for tag in ('curve', 'csa', 'roundabout'))
-  if (curve_context and not has_lead and math.isfinite(float(guarded_target_ms))
-      and 0.0 < float(guarded_target_ms) < cap_ms):
-    cap_ms = float(guarded_target_ms)
-    sources.append('long_curve')
+  # Do not use guarded_target_ms or a textual `source` tag as geometry.
+  # The verified cap is independently generated from fresh CSA/map/roundabout.
+  if (not has_lead and verified_curve_cap_ms is not None
+      and math.isfinite(float(verified_curve_cap_ms))
+      and 0.0 < float(verified_curve_cap_ms) < cap_ms):
+    cap_ms = float(verified_curve_cap_ms)
+    sources.append('verified_curve')
   return max(0.0, cap_ms), '+'.join(sources) if sources else 'driver_base'
 
 
@@ -5768,6 +5770,37 @@ class LongController:
       if "roadworks_cap" not in src:
         src = f"{src}+roadworks_cap"
 
+    # V228: independently qualified geometry. Do not feed the entire LONG
+    # cruise-set arbitration back to the OP planner: its `desired_ms` may be a
+    # stale curve hold or its own near-zero lead/stop trajectory.
+    verified_curve_cap_ms = None
+    if direct_policy and not bool(self._lead_present or self._lp_has_lead):
+      independent_caps = []
+      direct_ref_ms = max(float(getattr(CS, '_xnor_op_base_set_speed_ms', 0.0) or 0.0),
+                          float(v_ego_ms), float(curve_reference_ms))
+      csa_cap, _ = self._csa_curve_target_ms(
+        reference_ms=float(direct_ref_ms), v_ego_ms=float(v_ego_ms))
+      if csa_cap is not None:
+        independent_caps.append(float(csa_cap))
+      roundabout_cap, _ = self._roundabout_curve_target_ms(
+        now_ns=int(now_ns), reference_ms=float(direct_ref_ms), v_ego_ms=float(v_ego_ms))
+      if roundabout_cap is not None:
+        independent_caps.append(float(roundabout_cap))
+      source_l = str(src).lower()
+      mapd_accepted = (
+        ('state[curve_' in source_l and 'curve_owner_mapd' in source_l)
+        or '+mapd_cap[' in source_l or '+mapd_pre_entry' in source_l
+      )
+      mapd_fresh = (self._mapd_last_ns > 0 and
+                     0 <= int(now_ns) - int(self._mapd_last_ns) <= int(self._MAPD_FRESH_NS))
+      # Map alone is not independent proof of a bend on a confirmed straight.
+      if (mapd_accepted and mapd_fresh and self._mapd_map_curve_ms is not None
+          and not self._csa_map_veto_flat(v_ego_ms=float(v_ego_ms))
+          and float(self._mapd_map_curve_ms) > 0.0):
+        independent_caps.append(float(self._mapd_map_curve_ms))
+      if independent_caps:
+        verified_curve_cap_ms = min(independent_caps)
+
     # V218: LONG is a policy advisor in Experimental DIRECT, never a second actuator.
     # The driver-selected OP speed is preserved in card.py. Only independently
     # validated posted-limit, roadworks and LONG's guarded curve/CSA decisions
@@ -5784,6 +5817,7 @@ class LongController:
         guarded_target_ms=desired_ms,
         source=src,
         has_lead=bool(self._lead_present or self._lp_has_lead),
+        verified_curve_cap_ms=verified_curve_cap_ms,
       )
       self.op_target_ms = cap_ms
       self.op_target_mono_ms = int(now) if cap_ms is not None else 0

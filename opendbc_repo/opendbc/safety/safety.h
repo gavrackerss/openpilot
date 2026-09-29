@@ -51,6 +51,7 @@ bool gas_pressed = false;
 bool gas_pressed_prev = false;
 bool brake_pressed = false;
 bool brake_pressed_prev = false;
+bool tesla_hybrid_brake_lateral_only = false;
 bool regen_braking = false;
 bool regen_braking_prev = false;
 bool steering_disengage;
@@ -351,15 +352,37 @@ static void relay_malfunction_set(void) {
 static void generic_rx_checks(void) {
   gas_pressed_prev = gas_pressed;
 
-  // exit controls on rising edge of brake press
-  if (brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
-    controls_allowed = false;
+  // V228: Tesla HW2 Hybrid uses one panda controls_allowed bit for both axes,
+  // while userspace intentionally treats physical brake as longitudinal-only
+  // override. Keep the existing independent-stalk lateral latch only with a
+  // fresh 0x659 heartbeat. NEVER apply this exception to other safety modes.
+  const uint32_t now = microsecond_timer_get();
+  const bool tesla_hybrid_brake_lateral_eligible =
+    current_safety_mode == SAFETY_TESLA_LEGACY &&
+    tesla_legacy_op_hybrid_native_ap && tesla_legacy_op_stalk_enable &&
+    tesla_legacy_has_ap_hw && !tesla_legacy_op_stalk_cancel_edge &&
+    tesla_legacy_v221_owner_request_us != 0U &&
+    safety_get_ts_elapsed(now, tesla_legacy_v221_owner_request_us) <= 150000U &&
+    controls_allowed && !tesla_legacy_stock_aeb;
+  tesla_hybrid_brake_lateral_only =
+    tesla_hybrid_brake_lateral_eligible && (brake_pressed || regen_braking);
+
+  // On every RX cycle, not just the rising edge, revoke lateral if the
+  // heartbeat expires while brake is held. This is also the stock behaviour
+  // for every other safety mode.
+  if (brake_pressed && (!brake_pressed_prev || vehicle_moving ||
+      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_legacy_op_hybrid_native_ap))) {
+    if (!tesla_hybrid_brake_lateral_only) {
+      controls_allowed = false;
+    }
   }
   brake_pressed_prev = brake_pressed;
 
-  // exit controls on rising edge of regen paddle
-  if (regen_braking && (!regen_braking_prev || vehicle_moving)) {
-    controls_allowed = false;
+  if (regen_braking && (!regen_braking_prev || vehicle_moving ||
+      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_legacy_op_hybrid_native_ap))) {
+    if (!tesla_hybrid_brake_lateral_only) {
+      controls_allowed = false;
+    }
   }
   regen_braking_prev = regen_braking;
 
@@ -434,6 +457,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   gas_pressed_prev = false;
   brake_pressed = false;
   brake_pressed_prev = false;
+  tesla_hybrid_brake_lateral_only = false;
   regen_braking = false;
   regen_braking_prev = false;
   steering_disengage = false;

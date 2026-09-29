@@ -1,4 +1,5 @@
 from cereal import car, log
+from openpilot.common.tesla_pcmfalse_test import pcmfalse_test_active
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.interfaces import MAX_CTRL_SPEED
@@ -15,6 +16,7 @@ NetworkLocation = structs.CarParams.NetworkLocation
 class CarSpecificEvents:
   def __init__(self, CP: structs.CarParams):
     self.CP = CP
+    self._xnor_pcmfalse_test = pcmfalse_test_active(CP)
 
     self.steering_unpressed = 0
     self.low_speed_alert = False
@@ -97,7 +99,7 @@ class CarSpecificEvents:
 
     CI = interfaces[self.CP.carFingerprint]
     # TODO: cleanup the honda-specific logic
-    pcm_enable = self.CP.pcmCruise and self.CP.brand != 'honda'
+    pcm_enable = (self.CP.pcmCruise or self._xnor_pcmfalse_test) and self.CP.brand != 'honda'
     # TODO: on some hyundai cars, the cancel button is also the pause/resume button,
     # so only use it for cancel when running openpilot longitudinal
     allow_button_cancel = self.CP.brand != 'hyundai'

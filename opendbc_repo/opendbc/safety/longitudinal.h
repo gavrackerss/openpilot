@@ -1,7 +1,10 @@
 #include "opendbc/safety/declarations.h"
 
 bool get_longitudinal_allowed(void) {
-  return controls_allowed && !gas_pressed_prev;
+  // The shared controls_allowed bit may remain high for Tesla lateral-only
+  // steering during a physical brake override. It must NOT authorise ANY
+  // acceleration/braking TX on that basis.
+  return controls_allowed && !gas_pressed_prev && !tesla_hybrid_brake_lateral_only;
 }
 
 // Safety checks for longitudinal actuation

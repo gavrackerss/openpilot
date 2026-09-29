@@ -10,6 +10,7 @@ from msgq.visionipc import VisionIpcClient, VisionStreamType
 
 
 from openpilot.common.params import Params
+from openpilot.common.tesla_pcmfalse_test import pcmfalse_test_active
 from openpilot.common.realtime import config_realtime_process, Priority, Ratekeeper, DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
@@ -58,6 +59,7 @@ class SelfdriveD:
       self.CP = CP
 
     self.car_events = CarSpecificEvents(self.CP)
+    self._xnor_pcmfalse_test = pcmfalse_test_active(self.CP, self.params)
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -179,7 +181,7 @@ class SelfdriveD:
 
     # Block resume if cruise never previously enabled
     resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
-    if not self.CP.pcmCruise and CS.vCruise > 250 and resume_pressed:
+    if not self.CP.pcmCruise and not self._xnor_pcmfalse_test and CS.vCruise > 250 and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
     if not self.CP.notCar:
@@ -277,6 +279,12 @@ class SelfdriveD:
       if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
          (CS.rightBlindspot and direction == LaneChangeDirection.right):
         self.events.add(EventName.laneChangeBlocked)
+      elif bool(getattr(CS, "hybridLaneChangeRequiresNative", False)) and (
+          not bool(getattr(CS, "stockLaneChangeValid", False)) or
+          not bool(getattr(CS, "stockLkas", False)) or
+          not bool(getattr(CS, "stockEpasActive", False)) or
+          int(getattr(CS, "stockLaneChangeState", 31)) != (9 if direction == LaneChangeDirection.left else 10)):
+        self.events.add(EventName.hybridLaneChangeWaiting)
       else:
         if direction == LaneChangeDirection.left:
           self.events.add(EventName.preLaneChangeLeft)
@@ -371,7 +379,10 @@ class SelfdriveD:
 
     if not REPLAY:
       # Check for mismatch between openpilot and car's PCM
-      cruise_mismatch = CS.cruiseState.enabled and (not self.enabled or not self.CP.pcmCruise)
+      # V229: virtual cruiseState is OP MAIN latch, not physical TACC.
+      # Still detect a stale virtual latch while selfdrive is disabled.
+      cruise_mismatch = ((CS.cruiseState.enabled and not self.enabled) if self._xnor_pcmfalse_test
+                         else CS.cruiseState.enabled and (not self.enabled or not self.CP.pcmCruise))
       self.cruise_mismatch_counter = self.cruise_mismatch_counter + 1 if cruise_mismatch else 0
       if self.cruise_mismatch_counter > int(6. / DT_CTRL):
         self.events.add(EventName.cruiseMismatch)

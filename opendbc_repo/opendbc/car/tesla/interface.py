@@ -5,6 +5,7 @@ from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, TeslaFlags, CANBUS, CAR, DBC, FSD_14_FW, Ecu, TeslaLegacyParams, LEGACY_CARS
 from opendbc.car.tesla.radar_interface import RadarInterface, RADAR_START_ADDR
 from openpilot.common.params import Params
+from openpilot.common.tesla_pcmfalse_test import pcmfalse_test_requested
 import cereal.messaging as messaging
 
 
@@ -147,7 +148,10 @@ class CarInterface(CarInterfaceBase):
     # only vCruise ownership onto OP's original non-PCM logic; this flag is not changed to achieve
     # set-speed ownership and therefore cannot regress the engagement edge again.
     ret.openpilotLongitudinalControl = True
-    ret.pcmCruise = hybrid_native_ap
+    # V229: independently armed, startup-latched Experimental-only PCM-off test.
+    pcmfalse_test = bool(candidate == CAR.TESLA_MODEL_S_HW2 and hybrid_native_ap
+                         and pcmfalse_test_requested(params))
+    ret.pcmCruise = bool(hybrid_native_ap and not pcmfalse_test)
 
     # Apply LONG_CONTROL to EVERY safety config. HW2 has a main panda for the established
     # non-Hybrid 0x2B9 path and an external panda that transmits OP's 0x2BF. Hybrid does not

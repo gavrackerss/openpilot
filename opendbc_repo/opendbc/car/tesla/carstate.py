@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.tesla_pcmfalse_test import pcmfalse_test_active
 from openpilot.selfdrive.car.modules.CFG_module import load_bool_param, load_float_param
 from openpilot.selfdrive.car.modules.BLNK_module import BLNKController
 from openpilot.selfdrive.car.modules.ALC_module import ALCController
@@ -41,6 +42,10 @@ class CarState(CarStateBase):
   def update_button_enable(self, button_events: list[structs.CarState.ButtonEvent]):
     # Non-PCM modes retain their established falling-edge behaviour. Hybrid is deliberately PCM
     # here and engages through V198's cruiseState rising edge, not through buttonEnable.
+    # V229: Hybrid still engages via the V198 independent MAIN rising edge.
+    # Avoid duplicate buttonEnable from MAIN or speed-detent release.
+    if self.hybrid_native_ap:
+      return False
     if not self.CP.pcmCruise:
       for event in button_events:
         if event.type == ButtonType.resumeCruise and not event.pressed:
@@ -49,6 +54,7 @@ class CarState(CarStateBase):
 
   def __init__(self, CP):
     super().__init__(CP)
+    self._xnor_pcmfalse_test = pcmfalse_test_active(CP)
     self.msg_stw_actn_req = None
     self.stw_actn_bus = int(CANBUS.party)
     # Follow-distance (DTR_Dist_Rq) can be intermittently missing/SNA; keep last valid.
@@ -1189,7 +1195,12 @@ class CarState(CarStateBase):
       # latch while native Tesla TACC owns longitudinal. Native AP status only selects the proven
       # steering carrier/recovery lifecycle.
       if self.cruise_buttons == 2:  # MAIN
-        self.cruiseEnabled = True
+        # V229 test only: fresh physical edge required, and never initiate
+        # while the driver brake/regen is applied. Existing OP stays latched.
+        fresh_unbraked_main = (int(self._prev_cruise_buttons) != 2 and
+                              not ret.brakePressed and not ret.regenBraking)
+        if not self._xnor_pcmfalse_test or fresh_unbraked_main:
+          self.cruiseEnabled = True
       if self.cruise_buttons == 1:  # CANCEL
         self.cruiseEnabled = False
 

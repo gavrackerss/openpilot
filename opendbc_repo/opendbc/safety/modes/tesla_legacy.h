@@ -63,6 +63,7 @@ static const char *const xnor_v200_marker __attribute__((unused)) =
 static const char tesla_v222_owner_firmware_marker[] __attribute__((used)) = "XNOR_V222_EXCLUSIVE_OWNER_SOURCE";
 static const char tesla_v223_independent_owner_marker[] __attribute__((used)) = "XNOR_V223_RX_STALK_OWNER";
 static const char tesla_v227_neutral_owner_marker[] __attribute__((used)) = "XNOR_V227_NEUTRAL_OWNER_CONTINUITY";
+static const char tesla_v228_brake_lateral_marker[] __attribute__((used)) = "XNOR_V228_BRAKE_LATERAL_ONLY";
 static const char tesla_v224_aeb_state_marker[] __attribute__((used)) = "XNOR_V224_AEB_ACTIVE_ONLY_OWNER";
 
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
@@ -807,7 +808,10 @@ static void tesla_legacy_rx_hook(const CANPacket_t *msg) {
     if (tesla_legacy_op_hybrid_native_ap || (!tesla_legacy_has_ap_hw) || tesla_legacy_op_autopilot_disabled) {
       const int ap_lever_position = (int)(msg->data[0] & 0x3F);
       if (ap_lever_position == 2) {
-        pcm_cruise_check(true);
+        // An existing Hybrid steering session survives braking; never initiate a NEW one.
+        if (!(tesla_legacy_op_hybrid_native_ap && (brake_pressed || regen_braking))) {
+          pcm_cruise_check(true);
+        }
       } else if (ap_lever_position == 1) {
         pcm_cruise_check(false);
         tesla_legacy_last_hybrid_direct_steer_us = 0U;
@@ -1055,7 +1059,10 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     if (tesla_legacy_op_stalk_enable &&
         (tesla_legacy_op_hybrid_native_ap || !tesla_legacy_has_ap_hw || tesla_legacy_op_autopilot_disabled)) {
       if (tesla_legacy_op_stalk_main_edge) {
-        pcm_cruise_check(true);
+        // 0x659 MAIN observes the same physical brake/regen engagement interlock.
+        if (!(tesla_legacy_op_hybrid_native_ap && (brake_pressed || regen_braking))) {
+          pcm_cruise_check(true);
+        }
       }
       if (tesla_legacy_op_stalk_cancel_edge) {
         pcm_cruise_check(false);

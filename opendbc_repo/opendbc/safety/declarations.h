@@ -257,6 +257,8 @@ extern bool gas_pressed;
 extern bool gas_pressed_prev;
 extern bool brake_pressed;
 extern bool brake_pressed_prev;
+// Tesla hybrid lateral-only brake override: never grants longitudinal actuation.
+extern bool tesla_hybrid_brake_lateral_only;
 extern bool regen_braking;
 extern bool regen_braking_prev;
 extern bool steering_disengage;
