@@ -22,7 +22,6 @@ import numpy as np
 import time
 
 from openpilot.common.params import Params
-from openpilot.common.tesla_pcmfalse_test import pcmfalse_test_active
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.modules.LONG_module import LongController
 
@@ -109,8 +108,6 @@ class CarController(CarControllerBase):
     self.frame = 0
 
     self.params = Params()
-    self._xnor_pcmfalse_test = pcmfalse_test_active(CP, self.params)
-    self._v229_native_nonstandby_latched = False
     self._long_module = LongController()
     self._cached_autopilot_disabled = False
     # Hybrid mode is latched at CarController startup. UI changes apply next drive/restart so
@@ -972,23 +969,6 @@ class CarController(CarControllerBase):
       not bool(getattr(CS.out, 'brakePressed', False)) and
       not bool(getattr(CS.out, 'gasPressed', False))
     )
-    # V229: A PCM-off acceptance sample is only valid while raw native DI is STANDBY.
-    # If native TACC becomes active during an OP engagement, withdraw direct ownership
-    # for that entire session; never auto-resume when DI later falls to STANDBY.
-    if self._xnor_pcmfalse_test:
-      raw_di = str(getattr(CS, 'stock_cruise_state', 'UNKNOWN'))
-      if not bool(CC.enabled):
-        self._v229_native_nonstandby_latched = False
-      elif raw_di != 'STANDBY':
-        self._v229_native_nonstandby_latched = True
-      v221_hil_request = bool(v221_hil_request and raw_di == 'STANDBY'
-                              and not self._v229_native_nonstandby_latched)
-      if self.frame % 100 == 0:
-        cloudlog.info(f'[XNOR_V229_PCMFALSE] cpPcm={int(bool(self.CP.pcmCruise))} '
-                      f'expArm=1 rawDI={raw_di} opEnabled={int(bool(CC.enabled))} '
-                      f'longActive={int(bool(CC.longActive))} owner={int(v221_hil_request)} '
-                      f'diLockout={int(self._v229_native_nonstandby_latched)} '
-                      'stage=TX_NOT_ECU_ACK')
     self._emit_internal_0x659(CS, can_sends, native_alc_turn=native_alc_turn,
                               v221_hil_request=v221_hil_request)
     if self._v221_hil_selected and self.frame % 100 == 0:

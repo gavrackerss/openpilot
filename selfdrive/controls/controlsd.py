@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import math
-from openpilot.common.tesla_pcmfalse_test import pcmfalse_test_active, pcmfalse_test_requested
 from numbers import Number
 
 from cereal import car, log
@@ -54,9 +53,6 @@ class Controls:
     # re-arms it; neither physical brake nor its release changes lateral enable.
     # PCM is the V198 Hybrid engagement presentation contract, not LONG ownership.
     self._xnor_hybrid_brake_long_cancelled = False
-    self._xnor_pcmfalse_test = pcmfalse_test_active(self.CP, self.params)
-    self._xnor_pcmfalse_test_aborted = False
-    self._xnor_pcmfalse_mode_poll = 0
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -106,7 +102,7 @@ class Controls:
     # V207 independent Tesla Hybrid longitudinal latch. A physical brake press
     # must NOT disable CC.enabled/latActive, and releasing the pedal must NOT
     # silently restart ACC or original LONG's virtual-stalk speed adjustment.
-    hybrid_brake_latch = (self.CP.brand == 'tesla' and (bool(self.CP.pcmCruise) or self._xnor_pcmfalse_test)
+    hybrid_brake_latch = (self.CP.brand == 'tesla' and bool(self.CP.pcmCruise)
                           and bool(self.CP.openpilotLongitudinalControl))
     if hybrid_brake_latch:
       if not CC.enabled:
@@ -126,18 +122,10 @@ class Controls:
     # a brake press cancels long until a fresh physical MAIN/RES. Do not infer
     # ECU acceptance from CC.longActive; the outgoing 0x2BF must be checked too.
     overriding_events = [e for e in self.sm['onroadEvents'] if e.overrideLongitudinal]
-    # V229: lose any startup precondition -> lock out longitudinal until restart.
-    if self._xnor_pcmfalse_test:
-      self._xnor_pcmfalse_mode_poll += 1
-      if self._xnor_pcmfalse_mode_poll % 10 == 0 and not pcmfalse_test_requested(self.params):
-        if not self._xnor_pcmfalse_test_aborted:
-          cloudlog.warning('[XNOR_V229_PCMFALSE] mode/arm lost: longitudinal locked out until restart')
-        self._xnor_pcmfalse_test_aborted = True
     CC.longActive = (CC.enabled and self.CP.openpilotLongitudinalControl
                      and not overriding_events
                      and not CS.brakePressed and not CS.regenBraking
-                     and not self._xnor_hybrid_brake_long_cancelled
-                     and not self._xnor_pcmfalse_test_aborted)
+                     and not self._xnor_hybrid_brake_long_cancelled)
     # Sample unmodified planning and all independent gating conditions even
     # when LoC is reset; V218's LONG cached planner fields were misleading then.
     self._xnor_long_diag_count = getattr(self, '_xnor_long_diag_count', 0) + 1
@@ -210,9 +198,7 @@ class Controls:
       CC.angularVelocity = self.calibrated_pose.angular_velocity.xyz.tolist()
 
     CC.cruiseControl.override = CC.enabled and not CC.longActive and self.CP.openpilotLongitudinalControl
-    # V229: virtual OP MAIN latch is not a native TACC enable.
-    CC.cruiseControl.cancel = ((CS.cruiseState.enabled and not CC.enabled) if self._xnor_pcmfalse_test
-                               else CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise))
+    CC.cruiseControl.cancel = CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise)
     CC.cruiseControl.resume = CC.enabled and CS.cruiseState.standstill and not self.sm['longitudinalPlan'].shouldStop
 
     hudControl = CC.hudControl
