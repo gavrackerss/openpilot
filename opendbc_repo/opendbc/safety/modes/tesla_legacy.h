@@ -62,6 +62,7 @@ static const char *const xnor_v200_marker __attribute__((unused)) =
 #define TESLA_LEGACY_V221_HIL_CUTOVER 1
 static const char tesla_v222_owner_firmware_marker[] __attribute__((used)) = "XNOR_V222_EXCLUSIVE_OWNER_SOURCE";
 static const char tesla_v223_independent_owner_marker[] __attribute__((used)) = "XNOR_V223_RX_STALK_OWNER";
+static const char tesla_v227_neutral_owner_marker[] __attribute__((used)) = "XNOR_V227_NEUTRAL_OWNER_CONTINUITY";
 static const char tesla_v224_aeb_state_marker[] __attribute__((used)) = "XNOR_V224_AEB_ACTIVE_ONLY_OWNER";
 
 // --- Config-override experiment: rewrite GTW_carConfig (0x398) autopilot tier in transit --------
@@ -1261,9 +1262,24 @@ static bool tesla_legacy_tx_hook(const CANPacket_t *msg) {
     }
 
 #if TESLA_LEGACY_V221_HIL_CUTOVER
-    // A fresh, accepted active OP 0x2BF is a necessary but insufficient
-    // cutover condition. Never count inactive frames or a source before safety.
-    if (long_active && tesla_legacy_v221_hil_base_allowed()) {
+    // V227: ACC_ON + raw 375/375 is a VALID neutral OP command, not loss of
+    // longitudinal ownership. V226 counted only nonzero acceleration as a
+    // heartbeat; at zero it expired the 75 ms OP timer and forwarded native
+    // 0x2BF alongside OP's 25 Hz packets, producing duplicate command owners.
+    //
+    // Do not turn neutral packets into authority of their own. Only refresh the
+    // counter after the full, fresh independent-stalk/pedal/brake/native-AP
+    // safety envelope is satisfied; a stale or released request fails closed.
+    // All acceleration bounds and real AEB checks above still apply to EVERY
+    // packet (including neutral), and two distinct accepted samples are needed
+    // before the genuine native carrier can be suppressed.
+    const bool op_owner_eligible = tesla_legacy_v221_hil_base_allowed();
+    if (tesla_legacy_op_hybrid_native_ap && !op_owner_eligible) {
+      tesla_legacy_v221_op_pt_tx_count = 0U;
+      tesla_legacy_v221_op_pt_tx_us = 0U;
+      return false;  // Never emit a late neutral/ACC_ON frame after owner release.
+    }
+    if (op_owner_eligible) {
       const uint32_t now = microsecond_timer_get();
       // Do not carry the two-frame qualification across an interrupted OP stream.
       if (tesla_legacy_v221_op_pt_tx_us != 0U &&
