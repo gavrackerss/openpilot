@@ -26,6 +26,121 @@ MIN_ALLOW_THROTTLE_SPEED = 2.5
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
 
+
+# XNOR V230 DEC: compact port of sunnypilot Dynamic Experimental Control.
+# Keep the existing XNOR MPC/E2E planners; only decide when the E2E candidate is allowed
+# to participate in the final acceleration arbitration.
+_DEC_SLOW_DOWN_BP_KPH = [0., 10., 20., 30., 40., 50., 55., 60.]
+_DEC_SLOW_DOWN_DIST_M = [32., 46., 64., 86., 108., 130., 145., 165.]
+_DEC_ENTER_URGENCY = 0.24
+_DEC_EXIT_URGENCY = 0.12
+_DEC_CLEAR_FRAMES = 10
+_DEC_STANDSTILL_FRAMES = 3
+
+
+class XnorDynamicExperimentalControl:
+  """Small compatibility port of sunnypilot DEC for the XNOR 0.11.x planner.
+
+  ACC mode: the existing MPC owns acceleration/following/cruise recovery.
+  Blended mode: the existing XNOR Experimental arbitration is retained, so the
+  lower of E2E and MPC wins and E2E can stop for model-predicted controls.
+
+  No Tesla sender, panda, cruise state, limits, AEB or stop/go ownership code is
+  changed here.
+  """
+
+  def __init__(self, CP):
+    self.CP = CP
+    self.mode = "acc"
+    self.reason = "init"
+    self.urgency = 0.0
+    self.endpoint_x = float('inf')
+    self.expected_distance = 0.0
+    self.trajectory_valid = False
+    self.standstill_count = 0
+    self.clear_count = 0
+    self.frame = 0
+    self._last_logged_mode = None
+
+  def enabled(self):
+    # Default-on for Tesla Experimental mode. A file switch provides an immediate
+    # rollback to the previous min(E2E, MPC) behaviour without touching the sender.
+    forced = os.path.exists('/data/xnor_enable_dec')
+    disabled = os.path.exists('/data/xnor_disable_dec')
+    return (forced or getattr(self.CP, 'brand', '') == 'tesla') and not disabled
+
+  @staticmethod
+  def _model_slowdown_urgency(model_msg, v_ego_kph):
+    endpoint_x = float('inf')
+    expected_distance = float(np.interp(v_ego_kph, _DEC_SLOW_DOWN_BP_KPH, _DEC_SLOW_DOWN_DIST_M))
+    trajectory_valid = len(model_msg.position.x) == ModelConstants.IDX_N
+    if not trajectory_valid or expected_distance <= 0.1:
+      return 0.0, endpoint_x, expected_distance, trajectory_valid
+
+    endpoint_x = float(model_msg.position.x[-1])
+    urgency = 0.0
+    if endpoint_x < expected_distance:
+      shortage_ratio = max(0.0, (expected_distance - endpoint_x) / expected_distance)
+      urgency = min(1.0, shortage_ratio * 2.0)
+      if endpoint_x < (expected_distance * 0.3):
+        urgency = min(1.0, urgency * 2.0)
+      if v_ego_kph > 25.0:
+        urgency = min(1.0, urgency * (1.0 + (v_ego_kph - 25.0) / 80.0))
+    return urgency, endpoint_x, expected_distance, trajectory_valid
+
+  def update(self, sm, fcw, e2e_should_stop):
+    self.frame += 1
+    experimental = bool(sm['selfdriveState'].experimentalMode)
+    active = experimental and self.enabled()
+
+    if sm['carState'].standstill:
+      self.standstill_count = min(20, self.standstill_count + 1)
+    else:
+      self.standstill_count = max(0, self.standstill_count - 1)
+
+    raw_urgency, self.endpoint_x, self.expected_distance, self.trajectory_valid = self._model_slowdown_urgency(
+      sm['modelV2'], float(sm['carState'].vEgo) * 3.6)
+    # Similar intent to sunnypilot's filtered slowdown signal, but use a compact
+    # asymmetric low-pass: stops enter quickly, clear more slowly.
+    alpha = 0.45 if raw_urgency > self.urgency else 0.18
+    self.urgency += alpha * (raw_urgency - self.urgency)
+
+    if not active:
+      self.mode = "blended" if experimental else "acc"
+      self.reason = "dec_disabled" if experimental else "experimental_off"
+      self.clear_count = 0
+      return self.mode
+
+    # Explicit model stop and FCW are immediate E2E/blended conditions.
+    if bool(fcw):
+      requested_mode, reason = "blended", "fcw"
+    elif bool(e2e_should_stop):
+      requested_mode, reason = "blended", "model_should_stop"
+    elif self.standstill_count > _DEC_STANDSTILL_FRAMES:
+      requested_mode, reason = "blended", "standstill"
+    elif self.urgency >= _DEC_ENTER_URGENCY:
+      requested_mode, reason = "blended", "model_slowdown"
+    elif self.mode == "blended" and self.urgency > _DEC_EXIT_URGENCY:
+      requested_mode, reason = "blended", "slowdown_hysteresis"
+    else:
+      requested_mode, reason = "acc", "cruise_recovery"
+
+    if requested_mode == "acc" and self.mode == "blended":
+      self.clear_count += 1
+      if self.clear_count < _DEC_CLEAR_FRAMES:
+        requested_mode, reason = "blended", "clear_hysteresis"
+    else:
+      self.clear_count = 0
+
+    old_mode = self.mode
+    self.mode = requested_mode
+    self.reason = reason
+    if self.mode != old_mode:
+      cloudlog.info(f'[XNOR_V230_DEC] transition={old_mode}->{self.mode} reason={self.reason} '
+                    f'urgency={self.urgency:.3f} endpoint={self.endpoint_x:.1f} expected={self.expected_distance:.1f} '
+                    f'ego_kph={float(sm["carState"].vEgo) * 3.6:.1f} lead={int(bool(sm["radarState"].leadOne.status))}')
+    return self.mode
+
 def get_max_accel(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
 
@@ -65,6 +180,9 @@ class LongitudinalPlanner:
                             and os.path.exists('/data/xnor_enable_long_owner_shadow_bench')
                             and not os.path.exists('/data/xnor_disable_long_owner_shadow_bench'))
     self._xnor_v220_diag_frames = 0
+    # V230: DEC only changes planner arbitration. Tesla stop/go sender and panda are untouched.
+    self._xnor_dec = XnorDynamicExperimentalControl(CP)
+    self._xnor_dec_diag_frames = 0
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -159,12 +277,19 @@ class LongitudinalPlanner:
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
-    if sm['selfdriveState'].experimentalMode:
+    experimental_mode = bool(sm['selfdriveState'].experimentalMode)
+    dec_mode = self._xnor_dec.update(sm, self.fcw, output_should_stop_e2e) if experimental_mode else "acc"
+
+    if experimental_mode and (not self._xnor_dec.enabled() or dec_mode == "blended"):
+      # Original XNOR Experimental behaviour: the most conservative candidate wins.
       output_a_target = min(output_a_target_e2e, output_a_target_mpc)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
       if output_a_target < output_a_target_mpc:
         self.mpc.source = LongitudinalPlanSource.e2e
     else:
+      # DEC ACC mode: do not let a near-zero E2E acceleration veto normal cruise
+      # recovery or lead following. MPC still obeys vCruise, leads, acceleration
+      # limits and XNOR's existing curve/speed-limit target.
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 
@@ -172,6 +297,17 @@ class LongitudinalPlanner:
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
+
+    if experimental_mode and self._xnor_dec.enabled():
+      self._xnor_dec_diag_frames += 1
+      if self._xnor_dec_diag_frames % 20 == 0:
+        cloudlog.info(f'[XNOR_V230_DEC] mode={self._xnor_dec.mode} reason={self._xnor_dec.reason} '
+                      f'lead={int(bool(sm["radarState"].leadOne.status))} ego={v_ego:.2f} cruiseCap={v_cruise:.2f} '
+                      f'urgency={self._xnor_dec.urgency:.3f} endpoint={self._xnor_dec.endpoint_x:.1f} '
+                      f'expected={self._xnor_dec.expected_distance:.1f} '
+                      f'e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} '
+                      f'final_a={float(self.output_a_target):.3f} e2e_stop={int(bool(output_should_stop_e2e))} '
+                      f'mpc_stop={int(bool(output_should_stop_mpc))} final_stop={int(bool(self.output_should_stop))}')
 
     if self._xnor_v220_diag:
       self._xnor_v220_diag_frames += 1
