@@ -37,6 +37,17 @@ _DEC_EXIT_URGENCY = 0.12
 _DEC_CLEAR_FRAMES = 10
 _DEC_STANDSTILL_FRAMES = 3
 
+# XNOR V232: gentle visual-stop release assist. This never exceeds the existing
+# MPC acceleration request; it only prevents the lingering blended/E2E candidate
+# from holding the first ~0.8 s of a verified no-lead release near zero.
+_RELEASE_STOP_MIN_FRAMES = 5
+_RELEASE_BOOST_FRAMES = 16
+_RELEASE_BOOST_FLOOR_MS2 = 0.45
+_RELEASE_MAX_EGO_MS = 2.5
+_RELEASE_MIN_MODEL_3S_MS = 1.0
+_RELEASE_MIN_MODEL_GAIN_MS = 0.5
+_RELEASE_MIN_CRUISE_MARGIN_MS = 1.0
+
 
 class XnorDynamicExperimentalControl:
   """Small compatibility port of sunnypilot DEC for the XNOR 0.11.x planner.
@@ -183,6 +194,11 @@ class LongitudinalPlanner:
     # V230: DEC only changes planner arbitration. Tesla stop/go sender and panda are untouched.
     self._xnor_dec = XnorDynamicExperimentalControl(CP)
     self._xnor_dec_diag_frames = 0
+    # V232 visual-stop release assist state.
+    self._xnor_release_prev_e2e_stop = False
+    self._xnor_release_stop_frames = 0
+    self._xnor_release_boost_frames = 0
+    self._xnor_release_diag_frames = 0
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -292,6 +308,68 @@ class LongitudinalPlanner:
       # limits and XNOR's existing curve/speed-limit target.
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
+
+    # V232: a sustained visual stop can clear one model cycle before DEC's blended
+    # hysteresis has returned to ACC. On that falling edge, allow a small launch
+    # floor for a short window, but NEVER above MPC's already-computed request.
+    # The assist is deliberately restricted to a no-lead, brake-off, low-speed
+    # release with a forward-expanding model trajectory. Any renewed stop, lead,
+    # FCW or driver pedal input cancels it immediately.
+    model_x, model_v, _, _, _ = self.parse_model(sm['modelV2'])
+    model_3s_v = float(np.interp(3.0, T_IDXS_MPC, model_v))
+    prev_e2e_stop = bool(self._xnor_release_prev_e2e_stop)
+    stop_dwell_frames = int(self._xnor_release_stop_frames)
+    release_edge = bool(prev_e2e_stop and not bool(output_should_stop_e2e)
+                        and stop_dwell_frames >= int(_RELEASE_STOP_MIN_FRAMES))
+
+    if bool(output_should_stop_e2e):
+      self._xnor_release_stop_frames = min(10000, stop_dwell_frames + 1)
+    else:
+      self._xnor_release_stop_frames = 0
+    self._xnor_release_prev_e2e_stop = bool(output_should_stop_e2e)
+
+    brake_pressed = bool(getattr(sm['carState'], 'brakePressed', False))
+    gas_pressed = bool(getattr(sm['carState'], 'gasPressed', False))
+    lead_present = bool(sm['radarState'].leadOne.status)
+    release_forward = bool(model_3s_v >= max(float(_RELEASE_MIN_MODEL_3S_MS),
+                                             float(v_ego) + float(_RELEASE_MIN_MODEL_GAIN_MS)))
+    release_room = bool(float(v_cruise) >= float(v_ego) + float(_RELEASE_MIN_CRUISE_MARGIN_MS))
+
+    if (release_edge and experimental_mode and self._xnor_dec.enabled()
+        and float(v_ego) <= float(_RELEASE_MAX_EGO_MS)
+        and not lead_present and not bool(self.fcw)
+        and not brake_pressed and not gas_pressed and not bool(force_slow_decel)
+        and not bool(output_should_stop_mpc) and release_forward and release_room):
+      self._xnor_release_boost_frames = int(_RELEASE_BOOST_FRAMES)
+      cloudlog.info(f'[XNOR_V232_RELEASE] edge=1 action=arm dwell={stop_dwell_frames} '
+                    f'ego={v_ego:.2f} model3s_v={model_3s_v:.2f} cruise={v_cruise:.2f} '
+                    f'e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f}')
+
+    release_cancel = bool(
+      bool(output_should_stop_e2e) or bool(output_should_stop_mpc) or lead_present or bool(self.fcw)
+      or brake_pressed or gas_pressed or bool(force_slow_decel)
+      or float(v_ego) > float(_RELEASE_MAX_EGO_MS) or not release_room
+    )
+    if self._xnor_release_boost_frames > 0:
+      if release_cancel:
+        cloudlog.info(f'[XNOR_V232_RELEASE] action=cancel remaining={self._xnor_release_boost_frames} '
+                      f'e2e_stop={int(bool(output_should_stop_e2e))} mpc_stop={int(bool(output_should_stop_mpc))} '
+                      f'lead={int(lead_present)} brake={int(brake_pressed)} gas={int(gas_pressed)} fcw={int(bool(self.fcw))}')
+        self._xnor_release_boost_frames = 0
+      else:
+        mpc_positive = max(0.0, float(output_a_target_mpc))
+        release_floor = min(float(_RELEASE_BOOST_FLOOR_MS2), mpc_positive)
+        if release_floor > float(output_a_target):
+          output_a_target = float(release_floor)
+          self._xnor_release_diag_frames += 1
+          if self._xnor_release_diag_frames == 1 or self._xnor_release_diag_frames % 5 == 0:
+            cloudlog.info(f'[XNOR_V232_RELEASE] action=boost remaining={self._xnor_release_boost_frames} '
+                          f'ego={v_ego:.2f} model3s_v={model_3s_v:.2f} '
+                          f'e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} '
+                          f'boosted_a={float(output_a_target):.3f}')
+        self._xnor_release_boost_frames -= 1
+    else:
+      self._xnor_release_diag_frames = 0
 
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
