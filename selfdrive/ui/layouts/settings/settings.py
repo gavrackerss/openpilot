@@ -6,6 +6,7 @@ from openpilot.selfdrive.ui.layouts.settings.developer import DeveloperLayout
 from openpilot.selfdrive.ui.layouts.settings.device import DeviceLayout
 from openpilot.selfdrive.ui.layouts.settings.firehose import FirehoseLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
+from openpilot.selfdrive.ui.layouts.settings.models import ModelsLayout
 from openpilot.selfdrive.ui.layouts.settings.tesla import TeslaLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
 from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos
@@ -19,7 +20,7 @@ from openpilot.system.ui.widgets.network import NetworkUI
 SIDEBAR_WIDTH = 500
 CLOSE_BTN_SIZE = 200
 CLOSE_ICON_SIZE = 70
-NAV_BTN_HEIGHT = 110
+NAV_BTN_HEIGHT = 95
 PANEL_MARGIN = 50
 
 # Colors
@@ -39,6 +40,7 @@ class PanelType(IntEnum):
   FIREHOSE = 4
   DEVELOPER = 5
   TESLA = 6
+  MODELS = 7
 
 
 @dataclass
@@ -64,6 +66,7 @@ class SettingsLayout(Widget):
       PanelType.SOFTWARE: PanelInfo(tr_noop("Software"), SoftwareLayout()),
       PanelType.FIREHOSE: PanelInfo(tr_noop("Firehose"), FirehoseLayout()),
       PanelType.TESLA: PanelInfo(tr_noop("Tesla"), TeslaLayout()),
+      PanelType.MODELS: PanelInfo(tr_noop("Models"), ModelsLayout()),
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
     }
 

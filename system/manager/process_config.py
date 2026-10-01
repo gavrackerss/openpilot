@@ -2,10 +2,11 @@ import os
 import operator
 import platform
 
-from cereal import car
+from cereal import car, custom
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.sunnypilot.models.helpers import get_active_model_runner
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
@@ -55,6 +56,12 @@ def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
+def is_tinygrad_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return get_active_model_runner(params, force_check=not started) == custom.ModelManagerSP.Runner.tinygrad
+
+def is_stock_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return get_active_model_runner(params, force_check=not started) == custom.ModelManagerSP.Runner.stock
+
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
 
@@ -76,7 +83,7 @@ procs = [
   PythonProcess("micd", "system.micd", iscar),
   PythonProcess("timed", "system.timed", always_run, enabled=not PC),
 
-  PythonProcess("modeld", "selfdrive.modeld.modeld", only_onroad),
+  PythonProcess("modeld", "selfdrive.modeld.modeld", and_(only_onroad, is_stock_model)),
   PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "system.sensord.sensord", only_onroad, enabled=not PC),
@@ -114,6 +121,12 @@ procs = [
   PythonProcess("webrtcd", "system.webrtc.webrtcd", notcar),
   PythonProcess("webjoystick", "tools.bodyteleop.web", notcar),
   PythonProcess("joystick", "tools.joystick.joystick_control", and_(joystick, iscar)),
+]
+
+# XNOR Sunnypilot model selector port
+procs += [
+  PythonProcess("models_manager", "sunnypilot.models.manager", only_offroad),
+  NativeProcess("modeld_tinygrad", "sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model)),
 ]
 
 managed_processes = {p.name: p for p in procs}

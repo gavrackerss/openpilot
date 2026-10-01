@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -u
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+ROOT="$(cd "$DIR/../.." >/dev/null && pwd)"
+export PYTHONPATH="$ROOT/sunnypilot/third_party/tinygrad_repo:$ROOT/tinygrad_repo:$ROOT:${PYTHONPATH:-}"
+python3 "$DIR/modeld.py" "$@"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "XNOR_MODEL_SELECTOR: custom modeld failed (rc=$rc); reverting active bundle and falling back to stock modeld" >&2
+  python3 - <<'PY2'
+from openpilot.common.params import Params
+p = Params()
+p.remove("ModelManager_ActiveBundle")
+p.remove("ModelRunnerTypeCache")
+PY2
+  exec python3 "$ROOT/selfdrive/modeld/modeld.py" "$@"
+fi
+exit 0

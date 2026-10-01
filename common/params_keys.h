@@ -137,8 +137,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TinklaAdjustAccWithSpeedLimit", {PERSISTENT, BOOL, "1"}},
     {"TinklaAlcDelay", {PERSISTENT, FLOAT, "2.0"}},
     {"TinklaAutopilotDisabled", {PERSISTENT, BOOL, "0"}},
-    {"TinklaHybridNativeAP", {PERSISTENT, BOOL, "0"}},
-    {"TinklaAutosteer247Test", {PERSISTENT, BOOL, "0"}},
     {"TinklaDisablePromptSounds", {PERSISTENT, BOOL, "0"}},
     {"TinklaDisableStartStopSounds", {PERSISTENT, BOOL, "0"}},
     {"TinklaEnableACC", {PERSISTENT, BOOL, "1"}},
@@ -155,6 +153,14 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TinklaTeslaRadarIgnoreSGUError", {PERSISTENT, BOOL, "0"}},
     {"TinklaUseTeslaRadarUpsideDown", {PERSISTENT, BOOL, "0"}},
     {"PedalEnabled", {PERSISTENT, BOOL, "0"}},
+    // Sunnypilot driving model selector (XNOR port)
+    {"ModelManager_ActiveBundle", {PERSISTENT, JSON}},
+    {"ModelManager_ClearCache", {CLEAR_ON_MANAGER_START, BOOL}},
+    {"ModelManager_DownloadIndex", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT}},
+    {"ModelManager_Favs", {PERSISTENT, STRING}},
+    {"ModelManager_LastSyncTime", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT, "0"}},
+    {"ModelManager_ModelsCache", {PERSISTENT, JSON}},
+    {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
     {"Version", {PERSISTENT, STRING}},
     {"MapdSettings", {PERSISTENT, JSON}},
 };
