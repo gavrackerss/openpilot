@@ -135,6 +135,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"XnorForceFingerprint", {PERSISTENT, STRING}},
     {"XnorTeslaVirtualTorqueBlending", {PERSISTENT, BOOL, "0"}},
     {"TinklaAdjustAccWithSpeedLimit", {PERSISTENT, BOOL, "1"}},
+    {"TinklaAutoResumeACC", {PERSISTENT, BOOL, "1"}},
     {"TinklaAlcDelay", {PERSISTENT, FLOAT, "2.0"}},
     {"TinklaAutopilotDisabled", {PERSISTENT, BOOL, "0"}},
     {"TinklaDisablePromptSounds", {PERSISTENT, BOOL, "0"}},

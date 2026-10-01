@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from numbers import Number
 
 from cereal import car, log
@@ -53,6 +54,14 @@ class Controls:
     # re-arms it; neither physical brake nor its release changes lateral enable.
     # PCM is the V198 Hybrid engagement presentation contract, not LONG ownership.
     self._xnor_hybrid_brake_long_cancelled = False
+    # V234: Unity-compatible brake auto-resume for Experimental/OP-longitudinal.
+    # TinklaAutoResumeACC defaults on, but is only consumed here while ExperimentalMode is on.
+    # A brake press still cancels LONG immediately; release is guarded for 1s before the latch
+    # can clear. Physical MAIN/RES remains an immediate manual re-arm path.
+    self._xnor_hybrid_brake_last_press_ms = 0
+    self._xnor_param_refresh_frame = 0
+    self._xnor_auto_resume_acc = self.params.get_bool("TinklaAutoResumeACC")
+    self._xnor_experimental_mode = self.params.get_bool("ExperimentalMode")
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -100,23 +109,61 @@ class Controls:
     CC.latActive = self.sm['selfdriveState'].active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
                    (not standstill or self.CP.steerAtStandstill)
     # V207 independent Tesla Hybrid longitudinal latch. A physical brake press
-    # must NOT disable CC.enabled/latActive, and releasing the pedal must NOT
-    # silently restart ACC or original LONG's virtual-stalk speed adjustment.
+    # cancels LONG only and never drops lateral. V234 optionally restores Unity's
+    # Auto Resume ACC behaviour in Experimental mode: after the brake/regen path
+    # is fully released, wait one second, then allow OP longitudinal to re-arm.
+    # Physical MAIN/RES remains an immediate manual re-arm path in every mode.
     hybrid_brake_latch = (self.CP.brand == 'tesla' and bool(self.CP.pcmCruise)
                           and bool(self.CP.openpilotLongitudinalControl))
+    self._xnor_param_refresh_frame += 1
+    if self._xnor_param_refresh_frame >= 100:
+      self._xnor_param_refresh_frame = 0
+      try:
+        self._xnor_auto_resume_acc = self.params.get_bool("TinklaAutoResumeACC")
+        self._xnor_experimental_mode = self.params.get_bool("ExperimentalMode")
+      except Exception:
+        pass
+
     if hybrid_brake_latch:
+      now_ms = int(time.monotonic_ns() // 1_000_000)
       if not CC.enabled:
         self._xnor_hybrid_brake_long_cancelled = False
+        self._xnor_hybrid_brake_last_press_ms = 0
       elif CS.brakePressed:
+        if not self._xnor_hybrid_brake_long_cancelled:
+          cloudlog.info('[XNOR_V234_AUTORESUME] action=brake_cancel')
         self._xnor_hybrid_brake_long_cancelled = True
-      elif self._xnor_hybrid_brake_long_cancelled and not CS.regenBraking:
+        # Refresh while held, matching Unity's continuously-updated brake timestamp.
+        self._xnor_hybrid_brake_last_press_ms = now_ms
+      elif self._xnor_hybrid_brake_long_cancelled:
+        if CS.regenBraking:
+          # Do not create a brake latch from regen alone, but once a real brake press
+          # has cancelled LONG, require a full second after regen has also cleared.
+          self._xnor_hybrid_brake_last_press_ms = now_ms
         # MAIN/RES is emitted from the physical stalk by Tesla CarState.
         # Automated LONG/ACC speed detents are intentionally not re-arm inputs.
-        if any(be.pressed and be.type == car.CarState.ButtonEvent.Type.resumeCruise
-               for be in CS.buttonEvents):
-          self._xnor_hybrid_brake_long_cancelled = False
+        if not CS.regenBraking:
+          physical_resume = any(be.pressed and be.type == car.CarState.ButtonEvent.Type.resumeCruise
+                                for be in CS.buttonEvents)
+          if physical_resume:
+            self._xnor_hybrid_brake_long_cancelled = False
+            cloudlog.info('[XNOR_V234_AUTORESUME] action=manual_resume')
+          else:
+            auto_resume_ready = bool(
+              self._xnor_auto_resume_acc
+              and self._xnor_experimental_mode
+              and not CS.gasPressed
+              and not CS.brakePressed
+              and not bool(getattr(CS, 'accFaulted', False))
+              and self._xnor_hybrid_brake_last_press_ms > 0
+              and (now_ms - self._xnor_hybrid_brake_last_press_ms) >= 1000
+            )
+            if auto_resume_ready:
+              self._xnor_hybrid_brake_long_cancelled = False
+              cloudlog.info(f'[XNOR_V234_AUTORESUME] action=auto_resume delay_ms={now_ms - self._xnor_hybrid_brake_last_press_ms}')
     else:
       self._xnor_hybrid_brake_long_cancelled = False
+      self._xnor_hybrid_brake_last_press_ms = 0
     # V219: OP-longitudinal eligibility is sourced from OP engagement and driver
     # override, NOT from native DI_cruiseState. Keep the physical brake latch:
     # a brake press cancels long until a fresh physical MAIN/RES. Do not infer
@@ -140,6 +187,7 @@ class Controls:
                     f'cruiseLatch={int(bool(CS.cruiseState.enabled))} buttons={buttons} '
                     f'brake={int(bool(CS.brakePressed))} regen={int(bool(CS.regenBraking))} '
                     f'gas={int(bool(CS.gasPressed))} brakeLatch={int(self._xnor_hybrid_brake_long_cancelled)} '
+                    f'autoResume={int(bool(self._xnor_auto_resume_acc))} exp={int(bool(self._xnor_experimental_mode))} '
                     f'override={overrides} planner_a={float(long_plan.aTarget):.3f} '
                     f'planner_stop={int(bool(long_plan.shouldStop))} '
                     f'model_a={float(model_v2.action.desiredAcceleration):.3f} '

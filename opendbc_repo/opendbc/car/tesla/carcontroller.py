@@ -630,19 +630,20 @@ class CarController(CarControllerBase):
       )
       self._stw_release_frame = -1
 
-    # Legacy HW2 physical blinker hold follows STW_ACTN_RQ TurnIndLvr_Stat at a stock-like comfort cadence.
-    # Mirror the existing internal Unity-style blinker ownership already exposed via CS.out,
-    # and send one explicit release when that ownership ends.
+    # Legacy HW2 virtual ALC turn hold must mimic a physically-held Tesla stalk, not the
+    # lamp's flash period. Unity simply reads the real STW_ACTN_RQ at ~10 Hz and lets the
+    # BCM own the normal on/off indicator cadence. Refresh our synthetic TurnIndLvr_Stat at
+    # that same ~10 Hz cadence; re-triggering only every 0.5 s can visibly slow the lamps.
+    # Send one explicit release when virtual ownership ends.
     if self.CP.carFingerprint in LEGACY_CARS:
       prev_hold_turn = int(getattr(self, "_virtual_turn_prev", 0) or 0)
       last_send_frame = int(getattr(self, "_virtual_turn_last_send_frame", -100000) or -100000)
 
       send_turn = None
       if hold_turn in (1, 2):
-        # Align the virtual held-stalk cadence to the moment ownership starts, so the
-        # physical lamp continues with a stock-like comfort-blink rhythm from the
-        # initial tap instead of being refreshed at a rapid hold cadence.
-        if hold_turn != prev_hold_turn or (int(self.frame) - last_send_frame) >= 50:
+        # Native STW_ACTN_RQ is ~10 Hz on this HW2 wiring. Holding the lever state at
+        # the message cadence lets Tesla's BCM generate the standard lamp sequence.
+        if hold_turn != prev_hold_turn or (int(self.frame) - last_send_frame) >= 10:
           send_turn = int(hold_turn)
       elif prev_hold_turn in (1, 2):
         # Release immediately when the owned lane change ends.
