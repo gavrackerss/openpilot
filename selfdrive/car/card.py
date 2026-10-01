@@ -354,11 +354,32 @@ class Car:
         now_ms = time.monotonic_ns() // 1_000_000
         target_ms = getattr(long_module, "op_target_ms", None)
         target_ms_time = int(getattr(long_module, "op_target_mono_ms", 0) or 0)
-        if target_ms is not None and 0 <= now_ms - target_ms_time <= 700:
-          # Never interpret an uninitialised/stale value as a target or feed the
-          # effective cap back as the driver base. LONG independently guards
-          # speed-limit/roadworks/curve policy while OP planner owns lead/E2E.
-          # This adapter may reduce the OP target, never silently raise it.
+        target_src = str(getattr(long_module, "op_target_source", "none") or "none")
+        setsync_ms = getattr(long_module, "v231_setsync_target_ms", None)
+        setsync_time = int(getattr(long_module, "v231_setsync_mono_ms", 0) or 0)
+
+        if v229_owner and setsync_ms is not None and 0 <= now_ms - setsync_time <= 700:
+          # V231: in Unity-style stop/go ownership the posted speed target is the
+          # automatic cruise ceiling, not merely a cap below a stale manual base.
+          # This is what permits 30->40->50->60->70 transitions. Temporary curve,
+          # lead and E2E stop speeds remain planner/actuator constraints below it.
+          setsync_ms = float(setsync_ms)
+          if math.isfinite(setsync_ms) and setsync_ms > 0.0:
+            effective_kph = max(0.0, setsync_ms * CV.MS_TO_KPH)
+            # Only independently verified curve geometry may temporarily lower
+            # this automatic ceiling. A V218 `posted_limit` policy also contains
+            # the stale manual base, so applying it here would recreate the ~62 mph
+            # cap on a 70 mph road. Roadworks is already folded into setsync_ms.
+            if ("verified_curve" in target_src and target_ms is not None
+                and 0 <= now_ms - target_ms_time <= 700):
+              target_ms = float(target_ms)
+              if math.isfinite(target_ms) and target_ms > 0.0:
+                effective_kph = min(effective_kph, target_ms * CV.MS_TO_KPH)
+            CS.vCruise = min(145.0, max(0.0, effective_kph))
+            CS.vCruiseCluster = CS.vCruise
+        elif target_ms is not None and 0 <= now_ms - target_ms_time <= 700:
+          # Legacy V218 direct mode remains cap-only: it may reduce the driver's
+          # selected OP speed but never raises it.
           target_ms = float(target_ms)
           if math.isfinite(target_ms):
             effective_kph = min(base_kph, max(0.0, target_ms * CV.MS_TO_KPH))

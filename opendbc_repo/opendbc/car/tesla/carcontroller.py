@@ -159,6 +159,10 @@ class CarController(CarControllerBase):
     self._v229_op_enabled_during_di = False
     self._v229_mode = "init"
     self._v229_last_diag_frame = -100000
+    # V231: Unity-style native cruise SET synchronisation while V229 owns
+    # DAS_control. This is deliberately independent of acceleration authority.
+    self._v231_setsync_last_button_ms = 0
+    self._v231_setsync_last_target_ms = None
     cloudlog.info(f'[XNOR_V229_STOPGO] selected={int(self._v229_stopgo_selected)} '
                   f'hybrid={int(self._cached_hybrid_native_ap)} ap_disabled={int(_v229_ap_disabled_init)} '
                   f'enable_acc={int(_v229_enable_acc_init)} '
@@ -387,9 +391,15 @@ class CarController(CarControllerBase):
     btn = int(getattr(CS, 'cruise_buttons', BTN_IDLE) or BTN_IDLE)
     prev_btn = int(getattr(self, '_prev_cruise_buttons', BTN_IDLE) or BTN_IDLE)
     self._maybe_handle_roadworks_triple_pull(CS)
-    # Unity: throttle automation on any button other than MAIN/IDLE
-    if (btn not in (BTN_MAIN, BTN_IDLE)) and (btn != prev_btn):
-      self._human_cruise_action_time_ms = self._now_ms()
+    # Unity: throttle automation on any *physical* button other than MAIN/IDLE.
+    # V231: do not mistake our own short SET/RES echo for a human action, otherwise
+    # the first automatic detent suppresses the remaining speed-limit sync pulses.
+    now_ms = int(self._now_ms())
+    virtual_btn = int(getattr(CS, '_xnor_last_virtual_btn', BTN_IDLE) or BTN_IDLE)
+    virtual_ms = int(getattr(CS, '_xnor_last_virtual_ms', 0) or 0)
+    virtual_echo = btn == virtual_btn and 0 <= now_ms - virtual_ms <= 250
+    if (not virtual_echo and btn not in (BTN_MAIN, BTN_IDLE)) and (btn != prev_btn):
+      self._human_cruise_action_time_ms = now_ms
     self._prev_cruise_buttons = btn
 
   @staticmethod
@@ -913,30 +923,83 @@ class CarController(CarControllerBase):
 
   def _speed_limit_sync(self, CC, CS, can_sends) -> None:
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
-    # V218: one selected Experimental longitudinal authority. LONG still runs
-    # and publishes an advisory cap to the next carState for the OP planner,
-    # but MUST NOT send SET, RES or CANCEL while OP owns direct acceleration.
-    # Stalk input from the driver is not modified by this branch.
-    # V229: while OP owns DAS_control (stop-and-go owner) LONG is advisory only, exactly like the
-    # V218 direct path: it caps vCruise via card.py and never presses SET/RES/CANCEL.
-    if bool(getattr(CS, '_xnor_experimental_direct_active', False)) or bool(self._v229_owner_now):
+    # V218 direct remains advisory-only. V229 is different: its Unity-style
+    # DAS_control owner also needs the native Tesla SET value synchronised to the
+    # stable posted speed target. Temporary lead/curve/E2E slowdowns remain direct
+    # accel/decel only and never rewrite DI_cruiseSet.
+    direct_policy = bool(getattr(CS, '_xnor_experimental_direct_active', False))
+    if direct_policy or bool(self._v229_owner_now):
       policy_enabled = bool(getattr(CC, 'longActive', False)) and bool(enabled)
       cs_out = getattr(CS, 'out', None)
-      if (bool(getattr(cs_out, 'brakePressed', False)) or
-          bool(getattr(cs_out, 'regenBraking', False))):
+      brake = bool(getattr(cs_out, 'brakePressed', False))
+      regen = bool(getattr(cs_out, 'regenBraking', False))
+      if brake or regen:
         policy_enabled = False
       decision = self._long_module.update(CS, enabled=policy_enabled,
                                           frame=int(self.frame), now_ms=int(self._now_ms()))
+
+      setsync_btn = None
+      setsync_reason = 'inactive'
+      if bool(self._v229_owner_now) and bool(getattr(CC, 'enabled', False)) and not brake and not regen:
+        now_ms = int(self._now_ms())
+        target_ms = getattr(self._long_module, 'v231_setsync_target_ms', None)
+        target_time_ms = int(getattr(self._long_module, 'v231_setsync_mono_ms', 0) or 0)
+        target_src = str(getattr(self._long_module, 'v231_setsync_source', 'none') or 'none')
+        stock_state = str(getattr(CS, 'stock_cruise_state', '') or '').upper()
+        current_set_ms = float(getattr(CS, 'stock_cruise_set_speed_ms', 0.0) or 0.0)
+        speed_units = str(getattr(CS, 'speed_units', 'MPH') or 'MPH').upper()
+        cruise_buttons = int(getattr(CS, 'cruise_buttons', BTN_IDLE) or BTN_IDLE)
+        hold_turn = int(getattr(self, '_virtual_turn_prev', 0) or 0)
+        human_quiet = (now_ms - int(self._human_cruise_action_time_ms)) >= 900
+        cooldown_ok = (now_ms - int(self._v231_setsync_last_button_ms)) >= 400
+        target_fresh = target_ms is not None and 0 <= now_ms - target_time_ms <= 700
+        state_ok = stock_state in ('ENABLED', 'OVERRIDE')
+        pulse_free = int(self._stw_release_frame) < 0 and hold_turn not in (1, 2)
+        if target_fresh and state_ok and pulse_free and human_quiet and cooldown_ok and cruise_buttons == BTN_IDLE:
+          target_ms = float(target_ms)
+          if math.isfinite(target_ms) and target_ms > 0.1:
+            ms_to_u = CV.MS_TO_MPH if speed_units == 'MPH' else CV.MS_TO_KPH
+            target_u = max(0.0, target_ms * ms_to_u)
+            current_u = max(0.0, current_set_ms * ms_to_u)
+            tol_u = 0.7 if speed_units == 'MPH' else 1.0
+            full_step_u = 5.0
+            offset_u = target_u - current_u
+            if offset_u >= (full_step_u - tol_u):
+              setsync_btn = int(CruiseButtons.RES_ACCEL_2ND)
+            elif offset_u >= tol_u:
+              setsync_btn = int(CruiseButtons.RES_ACCEL)
+            elif offset_u <= -(full_step_u - tol_u):
+              setsync_btn = int(CruiseButtons.DECEL_2ND)
+            elif offset_u <= -tol_u:
+              setsync_btn = int(CruiseButtons.DECEL_SET)
+            else:
+              setsync_reason = f'no-op src={target_src} tgt={target_u:.1f} cur={current_u:.1f}'
+            if setsync_btn is not None:
+              if self._queue_stalk_pulse(CS, can_sends, int(setsync_btn)):
+                self._v231_setsync_last_button_ms = now_ms
+                self._v231_setsync_last_target_ms = target_ms
+                self._automated_cruise_action_time_ms = now_ms
+                setsync_reason = f'pulse src={target_src} tgt={target_u:.1f} cur={current_u:.1f} btn={int(setsync_btn)}'
+                cloudlog.info(f'[XNOR_V231_SETSYNC] {setsync_reason}')
+              else:
+                setsync_reason = 'queue_blocked'
+        elif bool(self._v229_owner_now):
+          setsync_reason = (f'gate fresh={int(bool(target_fresh))} state={stock_state or "UNKNOWN"} '
+                            f'pulse_free={int(bool(pulse_free))} human_quiet={int(bool(human_quiet))} '
+                            f'cooldown={int(bool(cooldown_ok))} physical_btn={cruise_buttons}')
+
       if self.frame % 100 == 0:
         cloudlog.info(f'[XNOR_V218_DIRECT] v229={int(bool(self._v229_owner_now))} ccEnabled={int(bool(getattr(CC,"enabled",False)))} latActive={int(bool(getattr(CC,"latActive",False)))} longActive={int(bool(getattr(CC,"longActive",False)))} '
                       f'policy={getattr(self._long_module,"op_target_ms",None)} '
                       f'policy_src={getattr(self._long_module,"op_target_source","none")} '
+                      f'setsync={getattr(self._long_module,"v231_setsync_target_ms",None)} '
+                      f'setsync_src={getattr(self._long_module,"v231_setsync_source","none")} '
                       f'native_tacc={str(getattr(CS,"stock_cruise_state","unknown"))} '
                       f'planner_stop={int(bool(getattr(self._long_module,"_lp_should_stop",False)))} '
                       f'planner_a={float(getattr(self._long_module,"_lp_a_target",0.0)):.2f} '
                       f'ego={float(getattr(cs_out,"vEgo",0.0)):.2f} '
                       f'accel_cmd={float(getattr(CC.actuators,"accel",0.0)):.2f} '
-                      f'virtual_stalk=0 decision={decision.log}')
+                      f'virtual_stalk={int(setsync_btn or 0)} setsync_reason={setsync_reason} decision={decision.log}')
       return
     hybrid_original_long = bool(
       self._cached_hybrid_native_ap and not self._cached_autopilot_disabled

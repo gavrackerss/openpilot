@@ -639,6 +639,12 @@ class LongController:
     self.op_target_ms: Optional[float] = None
     self.op_target_mono_ms: int = 0
     self.op_target_source: str = 'none'
+    # V231 stop/go owner: publish only the posted-limit-class SET target for
+    # native DI_cruiseSet synchronisation. Lead, curve and E2E stop targets must
+    # never be reflected into the displayed/native cruise set speed.
+    self.v231_setsync_target_ms: Optional[float] = None
+    self.v231_setsync_mono_ms: int = 0
+    self.v231_setsync_source: str = 'none'
     self._native_tacc_last_button_ms = 0
     self._native_standstill_resume_sent = False
     self._unconfirmed_set_target_mph = None
@@ -3330,6 +3336,9 @@ class LongController:
     self.op_target_ms = None
     self.op_target_mono_ms = 0
     self.op_target_source = 'reset'
+    self.v231_setsync_target_ms = None
+    self.v231_setsync_mono_ms = 0
+    self.v231_setsync_source = 'reset'
     """Q3: hard flush of every cached/stored value on an on-road<->off-road / ignition
     transition. Fail-safe by construction -- it only ever CLEARS caps and latches (never adds
     a slowdown), so a spurious call just costs one clean cycle. Fixes the 'stale / dead after
@@ -5036,6 +5045,9 @@ class LongController:
       self._curve_limit_guard_release_candidate_since_ms = 0
       self.op_target_ms = None
       self.op_target_mono_ms = 0
+      self.v231_setsync_target_ms = None
+      self.v231_setsync_mono_ms = 0
+      self.v231_setsync_source = 'gated'
       return LongDecision(None, "gated: not enabled/adaptive")
 
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "")
@@ -5194,6 +5206,21 @@ class LongController:
         else min(float(acc_speed_limit_target_ms), float(roadworks_cap_ms))
       )
       acc_set_speed_limit_active = True
+
+    # V231: the stop/go owner needs the same Unity-style native SET/RES sync that
+    # the old LONG path had. Publish only the stable posted-limit/roadworks target.
+    # Do not publish planner, lead, curve, roundabout or E2E stop speeds here.
+    if acc_set_speed_limit_active and acc_speed_limit_target_ms is not None and math.isfinite(float(acc_speed_limit_target_ms)) and float(acc_speed_limit_target_ms) > 0.1:
+      self.v231_setsync_target_ms = float(acc_speed_limit_target_ms)
+      self.v231_setsync_mono_ms = int(now)
+      src_parts = [str(ceiling_src or 'speed_limit')]
+      if roadworks_cap_ms is not None and 'roadworks' not in src_parts[0]:
+        src_parts.append(str(roadworks_cap_src or 'roadworks_cap'))
+      self.v231_setsync_source = '+'.join(src_parts)
+    else:
+      self.v231_setsync_target_ms = None
+      self.v231_setsync_mono_ms = 0
+      self.v231_setsync_source = 'none'
 
     if set_speed_limit_active and speed_limit_target_ms is not None:
       base_target_ms = float(speed_limit_target_ms)
