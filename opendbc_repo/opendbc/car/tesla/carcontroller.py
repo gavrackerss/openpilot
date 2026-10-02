@@ -160,6 +160,15 @@ class CarController(CarControllerBase):
     self._v229_op_enabled_during_di = False
     self._v229_mode = "init"
     self._v229_last_diag_frame = -100000
+    # V241: Unity-style brake auto-resume must re-arm the real Tesla cruise state,
+    # not merely clear controlsd's longitudinal brake latch. Track one bounded
+    # RES_ACCEL sequence per real brake cycle while OP remains engaged.
+    self._v241_autoresume_brake_seen = False
+    self._v241_autoresume_attempts = 0
+    self._v241_autoresume_last_attempt_frame = -100000
+    self._v241_autoresume_failed_reported = False
+    self._cached_auto_resume_acc = bool(self.params.get_bool("TinklaAutoResumeACC"))
+    self._cached_experimental_mode = bool(self.params.get_bool("ExperimentalMode"))
     # V231: Unity-style native cruise SET synchronisation while V229 owns
     # DAS_control. This is deliberately independent of acceleration authority.
     self._v231_setsync_last_button_ms = 0
@@ -300,6 +309,8 @@ class CarController(CarControllerBase):
     # stock-cruise dependency and no 17.1 mph engage floor. Cached here so the longitudinal
     # gate below can keep long_active true in that mode.
     self._cached_enable_acc = bool(self.params.get_bool("TinklaEnableACC"))
+    self._cached_auto_resume_acc = bool(self.params.get_bool("TinklaAutoResumeACC"))
+    self._cached_experimental_mode = bool(self.params.get_bool("ExperimentalMode"))
     self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
     self._cached_pedal_enabled = bool(
       self.params.get_bool("TinklaPedalEnabled") or
@@ -607,6 +618,93 @@ class CarController(CarControllerBase):
     self._stw_release_frame = int(self.frame) + 1
     self._stw_release_bus = int(self._stw_seed_bus)
     return True
+
+  def _v241_auto_resume_stalk(self, CC, CS, can_sends, *, native_lkas: bool) -> bool:
+    """Re-arm native Tesla TACC after V234 clears the brake-only LONG latch.
+
+    Unity's Auto Resume ACC path sends RES_ACCEL once cruise is back in STANDBY.
+    V234 only restored CC.longActive, which leaves DI/TACC in STANDBY after a real
+    brake press. Keep the V229 DAS_control owner unchanged and emit a bounded
+    Unity-style RES pulse sequence only for a brake cycle observed while OP stayed
+    engaged. Returns True on a frame where a RES pulse was queued so SET-sync does
+    not compete for the same stalk frame.
+    """
+    if not (self._v229_stopgo_selected and self._cached_hybrid_native_ap):
+      self._v241_autoresume_brake_seen = False
+      self._v241_autoresume_attempts = 0
+      self._v241_autoresume_failed_reported = False
+      return False
+
+    cs_out = getattr(CS, "out", None)
+    enabled = bool(getattr(CC, "enabled", False))
+    long_active = bool(getattr(CC, "longActive", False))
+    brake = bool(getattr(cs_out, "brakePressed", False)) if cs_out is not None else False
+    regen = bool(getattr(cs_out, "regenBraking", False)) if cs_out is not None else False
+    gas = bool(getattr(cs_out, "gasPressed", False)) if cs_out is not None else False
+    stock_state = str(getattr(CS, "stock_cruise_state", "") or "").upper()
+
+    if not enabled:
+      self._v241_autoresume_brake_seen = False
+      self._v241_autoresume_attempts = 0
+      self._v241_autoresume_failed_reported = False
+      return False
+
+    if brake:
+      self._v241_autoresume_brake_seen = True
+      self._v241_autoresume_attempts = 0
+      self._v241_autoresume_last_attempt_frame = -100000
+      self._v241_autoresume_failed_reported = False
+      return False
+
+    if stock_state in _V229_DI_ENGAGED_STATES:
+      if self._v241_autoresume_brake_seen and self._v241_autoresume_attempts > 0:
+        cloudlog.info(f'[XNOR_V241_AUTORESUME_STALK] action=di_rearmed state={stock_state} attempts={self._v241_autoresume_attempts}')
+      self._v241_autoresume_brake_seen = False
+      self._v241_autoresume_attempts = 0
+      self._v241_autoresume_failed_reported = False
+      return False
+
+    if not self._v241_autoresume_brake_seen:
+      return False
+
+    # controlsd V234 owns the one-second brake/regen guard. Its longActive rising
+    # state is the permission to attempt the native re-arm; do not duplicate that timer here.
+    eligible = bool(
+      self._cached_auto_resume_acc
+      and self._cached_experimental_mode
+      and long_active
+      and stock_state == "STANDBY"
+      and not brake and not regen and not gas
+      and not native_lkas
+      and not bool(getattr(CS, "human_control", False))
+      and int(getattr(CS, "cruise_buttons", BTN_IDLE) or BTN_IDLE) == BTN_IDLE
+      and int(getattr(self, "_virtual_turn_prev", 0) or 0) == 0
+    )
+    if not eligible:
+      return False
+
+    # Bounded Unity-style retry: one press/release pulse every 0.5 s, maximum three.
+    # A successfully re-armed DI clears this latch above on the next observed state.
+    if self._v241_autoresume_attempts >= 3:
+      if (not self._v241_autoresume_failed_reported and
+          int(self.frame) - int(self._v241_autoresume_last_attempt_frame) >= 50):
+        cloudlog.warning('[XNOR_V241_AUTORESUME_STALK] action=failed state=STANDBY attempts=3')
+        self._v241_autoresume_failed_reported = True
+        self._v241_autoresume_brake_seen = False
+      return False
+
+    if int(self.frame) - int(self._v241_autoresume_last_attempt_frame) < 50:
+      return False
+
+    if self._queue_stalk_pulse(CS, can_sends, BTN_UP1):
+      self._v241_autoresume_attempts += 1
+      self._v241_autoresume_last_attempt_frame = int(self.frame)
+      self._automated_cruise_action_time_ms = int(self._now_ms())
+      cloudlog.info(f'[XNOR_V241_AUTORESUME_STALK] action=res_accel attempt={self._v241_autoresume_attempts} state={stock_state}')
+      return True
+
+    return False
+
 
   def _process_stalk_actions(self, CS, can_sends) -> None:
     hold_turn = 0
@@ -1339,9 +1437,14 @@ class CarController(CarControllerBase):
       # When native LKAS is ON, the existing AP-facing native tap bridge remains
       # the sole virtual indicator owner. Never author competing synthetic stalk.
       raw_native_lkas = bool(getattr(cs_out, 'stockLkas', False)) if cs_out is not None else False
+      autoresume_stalk_sent = False
       if op_enabled and not raw_native_lkas:
         self._process_stalk_actions(CS, can_sends)
+        autoresume_stalk_sent = self._v241_auto_resume_stalk(CC, CS, can_sends, native_lkas=raw_native_lkas)
       else:
+        # Still observe/reset the brake-cycle latch even when native Tesla LKAS owns
+        # the stalk lifecycle; never emit a competing synthetic RES in that state.
+        self._v241_auto_resume_stalk(CC, CS, can_sends, native_lkas=raw_native_lkas)
         # On OP disengagement (native still idle), release our own virtual
         # hold explicitly. On native takeover do not send a competing release:
         # native Tesla now owns the AP-side stalk/indicator lifecycle.
@@ -1352,7 +1455,8 @@ class CarController(CarControllerBase):
         if int(self._stw_release_frame) == int(self.frame):
           self._send_stw(CS, can_sends, BTN_IDLE, bus=int(self._stw_release_bus))
           self._stw_release_frame = -1
-      self._speed_limit_sync(CC, CS, can_sends)
+      if not autoresume_stalk_sent:
+        self._speed_limit_sync(CC, CS, can_sends)
 
     # Normal xnor: OP owns lateral directly only in Autopilot Disabled mode.
     # V180 Hybrid uses the genuine AP 0x488 stream as a carrier whether Tesla Autosteer is idle
