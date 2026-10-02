@@ -115,7 +115,7 @@ def validate_active_bundle(params: Params, available_bundles: list[custom.ModelM
   if active_bundle is None or _bundle_needs_reset(active_bundle, available_bundles):
     cloudlog.warning("Active model bundle invalid; resetting to default")
     params.remove("ModelManager_ActiveBundle")
-    params.put("ModelRunnerTypeCache", int(custom.ModelManagerSP.Runner.stock), block=True)
+    params.put("ModelRunnerTypeCache", int(custom.ModelManagerSP.Runner.stock))
     _LAST_VALIDATED_RAW = None
   else:
     _LAST_VALIDATED_RAW = raw_bundle
@@ -142,7 +142,7 @@ def get_active_model_runner(params: Params | None = None, force_check: bool = Fa
     runner_type = active_bundle.runner.raw
 
   if cached_runner_type != runner_type:
-    params.put("ModelRunnerTypeCache", int(runner_type), block=True)
+    params.put("ModelRunnerTypeCache", int(runner_type))
 
   return runner_type
 

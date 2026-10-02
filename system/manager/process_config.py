@@ -68,11 +68,40 @@ def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
+_XNOR_MODEL_SELECTOR_RUNTIME_FAILED = False
+_XNOR_MODEL_SELECTOR_RUNTIME_ERROR = ""
+
+def _safe_active_model_runner(started: bool, params: Params):
+  """Never allow the optional model selector to take manager down.
+
+  V236: V235 protected only the initial import.  The selector is also called from
+  process should_run predicates, so an API/runtime mismatch there must fail closed
+  to the stock model rather than escaping through ensure_running().
+  """
+  global _XNOR_MODEL_SELECTOR_RUNTIME_FAILED, _XNOR_MODEL_SELECTOR_RUNTIME_ERROR
+  if not XNOR_MODEL_SELECTOR_AVAILABLE or _XNOR_MODEL_SELECTOR_RUNTIME_FAILED:
+    return custom.ModelManagerSP.Runner.stock
+
+  try:
+    return get_active_model_runner(params, force_check=not started)
+  except Exception as e:
+    _XNOR_MODEL_SELECTOR_RUNTIME_FAILED = True
+    _XNOR_MODEL_SELECTOR_RUNTIME_ERROR = repr(e)
+    print(f"XNOR_MODEL_SELECTOR: runtime failure; forcing stock model for this boot: {_XNOR_MODEL_SELECTOR_RUNTIME_ERROR}")
+    try:
+      params.remove("ModelRunnerTypeCache")
+    except Exception:
+      pass
+    return custom.ModelManagerSP.Runner.stock
+
+def model_selector_healthy(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return XNOR_MODEL_SELECTOR_AVAILABLE and not _XNOR_MODEL_SELECTOR_RUNTIME_FAILED
+
 def is_tinygrad_model(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return get_active_model_runner(params, force_check=not started) == custom.ModelManagerSP.Runner.tinygrad
+  return _safe_active_model_runner(started, params) == custom.ModelManagerSP.Runner.tinygrad
 
 def is_stock_model(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return get_active_model_runner(params, force_check=not started) == custom.ModelManagerSP.Runner.stock
+  return _safe_active_model_runner(started, params) == custom.ModelManagerSP.Runner.stock
 
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
@@ -137,7 +166,7 @@ procs = [
 
 # XNOR Sunnypilot model selector port
 procs += [
-  PythonProcess("models_manager", "sunnypilot.models.manager", only_offroad, enabled=XNOR_MODEL_SELECTOR_AVAILABLE),
+  PythonProcess("models_manager", "sunnypilot.models.manager", and_(only_offroad, model_selector_healthy), enabled=XNOR_MODEL_SELECTOR_AVAILABLE),
   NativeProcess("modeld_tinygrad", "sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model), enabled=XNOR_MODEL_SELECTOR_AVAILABLE),
 ]
 
