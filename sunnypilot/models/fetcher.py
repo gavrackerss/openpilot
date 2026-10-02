@@ -101,7 +101,6 @@ class ModelCache:
     try:
       cached_data = self.params.get(self._CACHE_KEY)
       if not cached_data:
-        cloudlog.warning("No cached model data available")
         return {}, True
       return cached_data, self._is_expired()
     except Exception as e:
@@ -115,37 +114,82 @@ class ModelCache:
 
 
 class ModelFetcher:
-  """Handles fetching and caching of model data from remote source"""
+  """Handles fetching and caching of model data from remote source.
+
+  XNOR V238: network refreshes are clock-aware and backed off so early boot cannot
+  hammer GitHub while DNS/TLS/time are still coming up. Cached data remains usable
+  immediately, and an explicit UI refresh bypasses retry backoff once the wall clock
+  is valid.
+  """
   MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v17.json"
+  # This branch is a 2026 build. A wall clock older than 2026-01-01 cannot be trusted
+  # for HTTPS certificate validation. The upper bound catches obviously-corrupt RTCs.
+  MIN_VALID_UNIX_TIME = 1767225600.0  # 2026-01-01T00:00:00Z
+  MAX_VALID_UNIX_TIME = 4102444800.0  # 2100-01-01T00:00:00Z
+  RETRY_BACKOFF_S = (10.0, 30.0, 60.0, 300.0)
+  CLOCK_LOG_INTERVAL_S = 60.0
 
   def __init__(self, params: Params):
     self.params = params
     self.model_cache = ModelCache(params)
     self.model_parser = ModelParser()
+    self.catalog_available = False
+    self._pending_force_refresh = False
+    self._retry_index = 0
+    self._next_retry_mono = 0.0
+    self._last_clock_log_mono = -1e9
+
+  def _wall_clock_valid(self) -> bool:
+    now = time.time()
+    return self.MIN_VALID_UNIX_TIME <= now <= self.MAX_VALID_UNIX_TIME
+
+  def _consume_force_refresh(self) -> bool:
+    """UI writes -1 to ModelManager_LastSyncTime to request an immediate refresh."""
+    try:
+      requested = int(self.params.get("ModelManager_LastSyncTime") or 0) < 0
+    except Exception:
+      requested = False
+    if requested:
+      # Consume the sentinel once. If the clock is not ready yet, _pending_force_refresh
+      # keeps the request alive in memory until HTTPS can be attempted safely.
+      self.params.put("ModelManager_LastSyncTime", 0)
+      self._pending_force_refresh = True
+    return requested
+
+  def _log_clock_deferred(self) -> None:
+    now = time.monotonic()
+    if now - self._last_clock_log_mono >= self.CLOCK_LOG_INTERVAL_S:
+      cloudlog.warning("Model manifest refresh deferred until system clock is valid")
+      self._last_clock_log_mono = now
+
+  def _schedule_retry(self) -> None:
+    delay = self.RETRY_BACKOFF_S[min(self._retry_index, len(self.RETRY_BACKOFF_S) - 1)]
+    self._next_retry_mono = time.monotonic() + delay
+    self._retry_index = min(self._retry_index + 1, len(self.RETRY_BACKOFF_S) - 1)
+    cloudlog.warning(f"Model manifest refresh failed; next retry in {int(delay)}s")
+
+  def _reset_retry(self) -> None:
+    self._retry_index = 0
+    self._next_retry_mono = 0.0
 
   def _fetch_and_cache_models(self) -> list[custom.ModelManagerSP.ModelBundle] | None:
-    """Fetches fresh model data from remote and updates cache.
-    Returns None on transport errors. Raises on 404 and other fatal HTTP errors.
-    """
+    """Fetch fresh model data and update cache. None means the remote fetch failed."""
     try:
       response = requests.get(self.MODEL_URL, timeout=10)
 
-      # Explicitly handle 404 differently
       if response.status_code == 404:
         cloudlog.error(f"Models URL returned 404 Not Found: {self.MODEL_URL}")
         raise HTTPError(f"404 Not Found: {self.MODEL_URL}", response=response)
 
-      # Raise for any other 4xx/5xx
       response.raise_for_status()
-
       json_data = response.json()
       self.model_cache.set(json_data)
-      cloudlog.debug("Successfully updated models cache")
+      cloudlog.info("Successfully updated driving-model manifest cache")
       return self.model_parser.parse_models(json_data)
 
-    except ConnectionError as e:
-      cloudlog.warning(f"DNS/connection error while fetching models: {e}")
     except SSLError as e:
+      # Never disable TLS verification. A not-yet-valid certificate during boot is
+      # normally the RTC/NTP settling; retry through the normal backoff path.
       cloudlog.warning(f"SSL error while fetching models: {e}")
     except RequestException as e:
       cloudlog.warning(f"Request transport error while fetching models: {e}")
@@ -155,21 +199,36 @@ class ModelFetcher:
     return None
 
   def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
-    """Gets the list of available models, with smart cache handling"""
+    """Return cached bundles immediately and refresh remotely only when appropriate."""
+    self._consume_force_refresh()
     cached_data, is_expired = self.model_cache.get()
+    self.catalog_available = bool(cached_data)
 
-    if cached_data and not is_expired:
-      cloudlog.debug("Using valid cached models data")
+    if cached_data and not is_expired and not self._pending_force_refresh:
       return self.model_parser.parse_models(cached_data)
 
+    # Do not attempt HTTPS while the wall clock is known-bad. Keep an explicit
+    # refresh request pending so it fires on the first loop after time becomes sane.
+    if not self._wall_clock_valid():
+      self._log_clock_deferred()
+      return self.model_parser.parse_models(cached_data)
+
+    now = time.monotonic()
+    if now < self._next_retry_mono and not self._pending_force_refresh:
+      return self.model_parser.parse_models(cached_data)
+
+    # A user refresh bypasses any existing backoff exactly once. If it fails,
+    # subsequent automatic retries return to the normal backoff schedule.
+    self._pending_force_refresh = False
     fetched_bundles = self._fetch_and_cache_models()
     if fetched_bundles is not None:
+      self.catalog_available = True
+      self._reset_retry()
       return fetched_bundles
 
+    self._schedule_retry()
     if not cached_data:
-      cloudlog.warning("Failed to fetch fresh data and no cache available")
-
-    cloudlog.warning("Failed to fetch fresh data. Using expired cache as fallback")
+      cloudlog.warning("No cached model manifest available; custom model list will remain empty until refresh succeeds")
     return self.model_parser.parse_models(cached_data)
 
 if __name__ == "__main__":

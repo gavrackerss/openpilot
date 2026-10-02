@@ -239,7 +239,11 @@ class ModelManagerSP:
     while True:
       try:
         self.available_models = self.model_fetcher.get_available_bundles()
-        validate_active_bundle(self.params, self.available_models)
+        # V238: if networking/clock prevented loading the catalogue, validate only
+        # the active bundle's local artifacts. An empty unavailable catalogue must
+        # never silently reset a previously-downloaded valid custom model to stock.
+        available_for_validation = self.available_models if self.model_fetcher.catalog_available else None
+        validate_active_bundle(self.params, available_for_validation)
         self.active_bundle = get_active_bundle(self.params)
 
         if (index_to_download := self.params.get("ModelManager_DownloadIndex")) is not None:

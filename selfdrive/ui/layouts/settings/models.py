@@ -79,7 +79,9 @@ class ModelsLayout(Widget):
       return "0.0 MB"
 
   def _refresh_models(self):
-    self.params.put("ModelManager_LastSyncTime", 0)
+    # V238: -1 is an explicit refresh request. The model fetcher consumes it and
+    # bypasses retry backoff once the wall clock is safe for HTTPS.
+    self.params.put("ModelManager_LastSyncTime", -1)
 
   def _clear_cache(self):
     def cb(result):
