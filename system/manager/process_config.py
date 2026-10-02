@@ -6,7 +6,19 @@ from cereal import car, custom
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
-from openpilot.sunnypilot.models.helpers import get_active_model_runner
+# V235: the model selector is optional. Never let a selector import regression
+# prevent manager from starting the stock openpilot process set.
+try:
+  from openpilot.sunnypilot.models.helpers import get_active_model_runner
+  XNOR_MODEL_SELECTOR_AVAILABLE = True
+  XNOR_MODEL_SELECTOR_IMPORT_ERROR = ""
+except Exception as e:
+  XNOR_MODEL_SELECTOR_AVAILABLE = False
+  XNOR_MODEL_SELECTOR_IMPORT_ERROR = repr(e)
+  print(f"XNOR_MODEL_SELECTOR: disabled for this boot: {XNOR_MODEL_SELECTOR_IMPORT_ERROR}")
+
+  def get_active_model_runner(params: Params | None = None, force_check: bool = False):
+    return custom.ModelManagerSP.Runner.stock
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
@@ -125,8 +137,8 @@ procs = [
 
 # XNOR Sunnypilot model selector port
 procs += [
-  PythonProcess("models_manager", "sunnypilot.models.manager", only_offroad),
-  NativeProcess("modeld_tinygrad", "sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model)),
+  PythonProcess("models_manager", "sunnypilot.models.manager", only_offroad, enabled=XNOR_MODEL_SELECTOR_AVAILABLE),
+  NativeProcess("modeld_tinygrad", "sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model), enabled=XNOR_MODEL_SELECTOR_AVAILABLE),
 ]
 
 managed_processes = {p.name: p for p in procs}
