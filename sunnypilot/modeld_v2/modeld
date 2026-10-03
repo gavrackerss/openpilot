@@ -3,8 +3,48 @@ set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 ROOT="$(cd "$DIR/../.." >/dev/null && pwd)"
 export PYTHONPATH="$ROOT/sunnypilot/third_party/tinygrad_repo:$ROOT/tinygrad_repo:$ROOT:${PYTHONPATH:-}"
-python3 "$DIR/modeld.py" "$@"
-rc=$?
+# XNOR: supervise modeld so manager signals are forwarded to the Python child.
+# Without this, manager can stop this bash wrapper while modeld.py survives,
+# leaving an orphaned ~450 MB modeld_tinygrad process owned by PID 1.
+child_pid=""
+stopping=0
+
+forward_stop() {
+  stopping=1
+  sig="$1"
+
+  if [ -n "${child_pid:-}" ] && kill -0 "$child_pid" 2>/dev/null; then
+    echo "XNOR_MODEL_SELECTOR: forwarding SIG${sig} to modeld child PID ${child_pid}" >&2
+    kill -s "$sig" "$child_pid" 2>/dev/null || true
+  fi
+}
+
+trap 'forward_stop INT' INT
+trap 'forward_stop TERM' TERM
+
+python3 "$DIR/modeld.py" "$@" &
+child_pid=$!
+
+# wait(1) can itself be interrupted by the signal caught above. Keep waiting
+# until the model process has actually exited so it cannot become orphaned.
+while true; do
+  wait "$child_pid"
+  rc=$?
+
+  if ! kill -0 "$child_pid" 2>/dev/null; then
+    break
+  fi
+done
+
+child_pid=""
+trap - INT TERM
+
+# An intentional manager shutdown is not a model failure and must not trigger
+# bundle rollback or the stock-model fallback.
+if [ "$stopping" -ne 0 ]; then
+  exit 0
+fi
+
 if [ "$rc" -ne 0 ]; then
   echo "XNOR_MODEL_SELECTOR: custom modeld failed (rc=$rc); reverting active bundle and falling back to stock modeld" >&2
   python3 - <<'PY2'
