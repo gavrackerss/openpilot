@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pyray as rl
 
+from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr
@@ -54,6 +55,9 @@ class TeslaLayout(Widget):
       param_toggle_item("Match Speed to Speed Limit", "Automatically sets cruise speed to the detected speed limit with an offset.", self._params, "TinklaAdjustAccWithSpeedLimit"),
       param_toggle_item("Offset is Percentage", "If enabled, offset is a percentage of the speed limit. Otherwise it is an absolute mph/kph offset.", self._params, "TinklaSpeedLimitUseRelative"),
       button_item("Speed Limit Offset", self._speed_limit_offset_text, self._speed_limit_offset_desc, callback=self._show_speed_limit_offset),
+      param_toggle_item("Vision Speed Limit (UK V1)", "Uses the road camera to recognise UK 20/30/40/50/60/70 mph red-circle signs. V1 applies only confirmed lower limits and never raises speed automatically.", self._params, "TinklaVisionSpeedLimitEnabled"),
+      button_item("Vision Speed Limit Status", self._vision_speed_limit_action_text, self._vision_speed_limit_status_desc,
+                  callback=self._clear_vision_speed_limit, enabled=self._vision_speed_limit_clear_enabled),
       param_toggle_item("Auto Lane Change", "Automatically starts lane changes after a short indicator tap, if clear.", self._params, "TinklaEnableALC"),
       button_item("Auto Lane Change Delay", self._alc_delay_text, self._alc_delay_desc, callback=self._show_alc_delay),
       param_toggle_item("Radar Upside Down", "Use if your Tesla radar is mounted upside down.", self._params, "TinklaUseTeslaRadarUpsideDown"),
@@ -111,6 +115,45 @@ class TeslaLayout(Widget):
     units = "kph" if is_metric else "mph"
     value = max(min_v, min(max_v, self._get_float("TinklaSpeedLimitOffset", 0.0)))
     return f"{value:.1f} {units}"
+
+  def _vision_speed_limit_value_ms(self) -> float:
+    try:
+      return float(self._params.get("VisionSpeedLimit", return_default=True) or 0.0)
+    except Exception:
+      return 0.0
+
+  def _vision_speed_limit_action_text(self) -> str:
+    if not self._params.get_bool("TinklaVisionSpeedLimitEnabled"):
+      return tr("OFF")
+    if self._vision_speed_limit_value_ms() > 0.0:
+      return tr("CLEAR")
+    return tr("STATUS")
+
+  def _vision_speed_limit_clear_enabled(self) -> bool:
+    return self._params.get_bool("TinklaVisionSpeedLimitEnabled") and self._vision_speed_limit_value_ms() > 0.0
+
+  def _vision_speed_limit_status_desc(self) -> str:
+    if not self._params.get_bool("TinklaVisionSpeedLimitEnabled"):
+      return tr("Disabled. Enable Vision Speed Limit above while offroad to prepare the UK V1 model/runtime.")
+    try:
+      status = str(self._params.get("VisionSpeedLimitStatus", return_default=True) or "Waiting for vision service")
+    except Exception:
+      status = "Waiting for vision service"
+    limit_ms = self._vision_speed_limit_value_ms()
+    if limit_ms > 0.0:
+      return f"{status} - {limit_ms * CV.MS_TO_MPH:.0f} mph cap active. Tap CLEAR to release it."
+    return status
+
+  def _clear_vision_speed_limit(self):
+    try:
+      self._params.put("VisionSpeedLimit", 0.0)
+      self._params.put("VisionSpeedLimitConfidence", 0.0)
+      self._params.put("VisionSpeedLimitSupportCount", 0)
+      self._params.put("VisionSpeedLimitSupportSpeed", 0.0)
+      self._params.put_bool("VisionSpeedLimitReset", True)
+      self._params.put("VisionSpeedLimitStatus", "Cleared manually - scanning")
+    except Exception:
+      pass
 
   def _alc_delay_text(self) -> str:
     return f"{max(0.0, min(10.0, self._get_float('TinklaAlcDelay', 2.0))):.1f} s"
