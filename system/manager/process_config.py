@@ -6,6 +6,7 @@ from cereal import car, custom
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.selfdrive.vision_speed_limit_common import vision_model_ready, vision_cv2_ready
 # V235: the model selector is optional. Never let a selector import regression
 # prevent manager from starting the stock openpilot process set.
 try:
@@ -67,6 +68,21 @@ def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
+
+def vision_speed_limit_enabled(params: Params) -> bool:
+  try:
+    return params.get_bool("TinklaVisionSpeedLimitEnabled")
+  except Exception:
+    return False
+
+def vision_speed_limit_model_manager(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # On a cold boot CarParams may not identify Tesla until the first drive, so
+  # model/runtime preparation is keyed only from the explicit user toggle.
+  return (not started) and vision_speed_limit_enabled(params) and not (vision_model_ready() and vision_cv2_ready())
+
+def vision_speed_limit_runtime(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return (started and getattr(CP, "brand", "") == "tesla" and
+          vision_speed_limit_enabled(params) and vision_model_ready() and vision_cv2_ready())
 
 _XNOR_MODEL_SELECTOR_RUNTIME_FAILED = False
 _XNOR_MODEL_SELECTOR_RUNTIME_ERROR = ""
@@ -132,6 +148,8 @@ procs = [
   PythonProcess("soundd", "selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),
   NativeProcess("mapd", "selfdrive", ["./mapd"], always_run),
+  PythonProcess("vision_speed_limit_model_manager", "selfdrive.vision_speed_limit_model_manager", vision_speed_limit_model_manager),
+  PythonProcess("vision_speed_limit", "selfdrive.vision_speed_limit", vision_speed_limit_runtime),
   NativeProcess("_pandad", "selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", only_onroad),
   PythonProcess("torqued", "selfdrive.locationd.torqued", only_onroad),
