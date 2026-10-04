@@ -56,6 +56,7 @@ class UIState:
         "carControl",
         "liveParameters",
         "rawAudioData",
+        "mapdExtendedOut",
       ]
     )
 

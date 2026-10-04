@@ -7,6 +7,7 @@ from openpilot.selfdrive.ui.layouts.settings.device import DeviceLayout
 from openpilot.selfdrive.ui.layouts.settings.firehose import FirehoseLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
 from openpilot.selfdrive.ui.layouts.settings.models import ModelsLayout
+from openpilot.selfdrive.ui.layouts.settings.osm import OSMLayout
 from openpilot.selfdrive.ui.layouts.settings.tesla import TeslaLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
 from openpilot.system.ui.lib.application import gui_app, FontWeight, MousePos
@@ -41,6 +42,7 @@ class PanelType(IntEnum):
   DEVELOPER = 5
   TESLA = 6
   MODELS = 7
+  OSM = 8
 
 
 @dataclass
@@ -67,6 +69,7 @@ class SettingsLayout(Widget):
       PanelType.FIREHOSE: PanelInfo(tr_noop("Firehose"), FirehoseLayout()),
       PanelType.TESLA: PanelInfo(tr_noop("Tesla"), TeslaLayout()),
       PanelType.MODELS: PanelInfo(tr_noop("Models"), ModelsLayout()),
+      PanelType.OSM: PanelInfo(tr_noop("OSM"), OSMLayout()),
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
     }
 
