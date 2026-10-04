@@ -7,6 +7,7 @@ import cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
@@ -47,6 +48,10 @@ _RELEASE_MAX_EGO_MS = 2.5
 _RELEASE_MIN_MODEL_3S_MS = 1.0
 _RELEASE_MIN_MODEL_GAIN_MS = 0.5
 _RELEASE_MIN_CRUISE_MARGIN_MS = 1.0
+
+_XNOR_VISION_SL_REFRESH_FRAMES = 10
+_XNOR_VISION_SL_MIN_SUPPORT = 2
+_XNOR_VISION_SL_MIN_CONFIDENCE = 0.20
 
 
 class XnorDynamicExperimentalControl:
@@ -200,9 +205,72 @@ class LongitudinalPlanner:
     self._xnor_release_boost_frames = 0
     self._xnor_release_diag_frames = 0
 
+    self._xnor_vision_sl_params = Params()
+    self._xnor_vision_sl_frame = 0
+    self._xnor_vision_sl_enabled = False
+    self._xnor_vision_sl_raw_ms = 0.0
+    self._xnor_vision_sl_confidence = 0.0
+    self._xnor_vision_sl_support = 0
+    self._xnor_vision_sl_effective_ms = 0.0
+    self._xnor_vision_sl_last_logged_ms = -1.0
+
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
     self.j_desired_trajectory = np.zeros(CONTROL_N)
+
+  def _xnor_apply_vision_speed_limit(self, v_cruise: float) -> float:
+    """Return a lower cruise ceiling when UK vision has a confirmed limit."""
+    if getattr(self.CP, "brand", "") != "tesla":
+      return v_cruise
+
+    self._xnor_vision_sl_frame += 1
+    if self._xnor_vision_sl_frame == 1 or self._xnor_vision_sl_frame % _XNOR_VISION_SL_REFRESH_FRAMES == 0:
+      try:
+        p = self._xnor_vision_sl_params
+        self._xnor_vision_sl_enabled = bool(p.get_bool("TinklaVisionSpeedLimitEnabled"))
+        self._xnor_vision_sl_raw_ms = float(p.get("VisionSpeedLimit", return_default=True) or 0.0)
+        self._xnor_vision_sl_confidence = float(p.get("VisionSpeedLimitConfidence", return_default=True) or 0.0)
+        self._xnor_vision_sl_support = int(p.get("VisionSpeedLimitSupportCount", return_default=True) or 0)
+
+        effective = self._xnor_vision_sl_raw_ms
+        if self._xnor_vision_sl_enabled and effective > 0.0:
+          offset = float(p.get("TinklaSpeedLimitOffset", return_default=True) or 0.0)
+          if p.get_bool("TinklaSpeedLimitUseRelative"):
+            effective *= max(0.0, 1.0 + offset / 100.0)
+          else:
+            scale = CV.KPH_TO_MS if p.get_bool("IsMetric") else CV.MPH_TO_MS
+            effective = max(0.0, effective + offset * scale)
+        self._xnor_vision_sl_effective_ms = float(effective)
+      except Exception as exc:
+        self._xnor_vision_sl_enabled = False
+        self._xnor_vision_sl_raw_ms = 0.0
+        self._xnor_vision_sl_effective_ms = 0.0
+        cloudlog.warning(f"[XNOR_VISION_SL_V1] params read failed: {exc!r}")
+
+    valid = (
+      self._xnor_vision_sl_enabled
+      and self._xnor_vision_sl_raw_ms > 0.0
+      and self._xnor_vision_sl_effective_ms > 0.0
+      and self._xnor_vision_sl_confidence >= _XNOR_VISION_SL_MIN_CONFIDENCE
+      and self._xnor_vision_sl_support >= _XNOR_VISION_SL_MIN_SUPPORT
+    )
+    if not valid:
+      if self._xnor_vision_sl_last_logged_ms > 0.0:
+        cloudlog.info("[XNOR_VISION_SL_V1] cap cleared")
+        self._xnor_vision_sl_last_logged_ms = 0.0
+      return v_cruise
+
+    cap = float(self._xnor_vision_sl_effective_ms)
+    if abs(cap - self._xnor_vision_sl_last_logged_ms) > 0.05:
+      cloudlog.info(
+        f"[XNOR_VISION_SL_V1] posted_mph={self._xnor_vision_sl_raw_ms * CV.MS_TO_MPH:.0f} "
+        f"effective_mph={cap * CV.MS_TO_MPH:.1f} confidence={self._xnor_vision_sl_confidence:.3f} "
+        f"support={self._xnor_vision_sl_support} cruise_before_mph={v_cruise * CV.MS_TO_MPH:.1f}"
+      )
+      self._xnor_vision_sl_last_logged_ms = cap
+
+    # V1 is deliberately one-way: it can only reduce the existing planner target.
+    return min(float(v_cruise), cap)
 
   @staticmethod
   def parse_model(model_msg):
@@ -265,6 +333,9 @@ class LongitudinalPlanner:
       clipped_accel_coast = max(accel_coast, accel_clip[0])
       clipped_accel_coast_interp = np.interp(v_ego, [MIN_ALLOW_THROTTLE_SPEED, MIN_ALLOW_THROTTLE_SPEED*2], [accel_clip[1], clipped_accel_coast])
       accel_clip[1] = min(accel_clip[1], clipped_accel_coast_interp)
+
+    # UK vision V1 is a cap only; it never raises v_cruise.
+    v_cruise = self._xnor_apply_vision_speed_limit(v_cruise)
 
     if force_slow_decel:
       v_cruise = 0.0
