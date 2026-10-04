@@ -165,5 +165,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ModelManager_ModelsCache", {PERSISTENT, JSON}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
     {"Version", {PERSISTENT, STRING}},
+    // XNOR V1-UK camera speed-limit recognition
+    {"VisionSpeedLimitDetection", {PERSISTENT, BOOL, "1"}},
+    {"VisionSpeedLimit", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
+    {"VisionSpeedLimitConfidence", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
+    {"VisionSpeedLimitTimestamp", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
+    {"VisionSpeedLimitStatus", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, STRING, ""}},
     {"MapdSettings", {PERSISTENT, JSON}},
 };

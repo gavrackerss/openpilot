@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.params import Params
 from openpilot.selfdrive.car.modules.CFG_module import load_bool_param, load_float_param
 from openpilot.selfdrive.car.modules.BLNK_module import BLNKController
 from openpilot.selfdrive.car.modules.ALC_module import ALCController
@@ -27,6 +28,7 @@ class _TinklaConfig:
   adjust_acc_with_speed_limit: bool = True
   speed_limit_offset: float = 0.0
   speed_limit_use_relative: bool = False
+  vision_speed_limit: bool = True
   enable_alc: bool = True
   alc_delay: float = 0.75
   enable_hso: bool = True
@@ -121,6 +123,13 @@ class CarState(CarStateBase):
     self.speed_limit_ms_das = 0.0
     self.baseMapSpeedLimitMPS = 0.0
     self.lastValidMapSpeedLimitMPS = 0.0
+    # XNOR V1-UK camera speed-limit cache. Params are sampled at 5 Hz, not on
+    # every 100 Hz CarState update.
+    self._vision_params = Params()
+    self._vision_speed_limit_ms = 0.0
+    self._vision_speed_limit_confidence = 0.0
+    self._vision_speed_limit_timestamp = 0.0
+    self._vision_speed_limit_last_read_frame = -100000
     # Tesla UI speed-limit offset (if present on CAN)
     self.ui_speed_limit_offset_uom = 0.0
     self.ui_speed_limit_offset_units = ""  # "MPH" or "KPH"
@@ -180,6 +189,7 @@ class CarState(CarStateBase):
     self._tinkla.adjust_acc_with_speed_limit = load_bool_param("TinklaAdjustAccWithSpeedLimit", False)
     self._tinkla.speed_limit_offset = load_float_param("TinklaSpeedLimitOffset", 0.0)
     self._tinkla.speed_limit_use_relative = load_bool_param("TinklaSpeedLimitUseRelative", False)
+    self._tinkla.vision_speed_limit = load_bool_param("VisionSpeedLimitDetection", True)
     self._tinkla.enable_alc = load_bool_param("TinklaEnableALC", True)
     self._tinkla.alc_delay = load_float_param("TinklaAlcDelay", 0.75)
     self._tinkla.enable_hso = load_bool_param("TinklaEnableHSO", True)
@@ -513,6 +523,44 @@ class CarState(CarStateBase):
     self._cruise_set_src = str(src)
 
 
+  def _get_vision_speed_limit_ms(self) -> float:
+    """Return a fresh confirmed V1-UK camera limit in m/s.
+
+    The daemon writes Params only when a sign is confirmed. Read them at 5 Hz
+    here to avoid adding synchronous Params I/O to every 100 Hz CarState frame.
+    """
+    if not bool(getattr(self._tinkla, "vision_speed_limit", True)):
+      self._vision_speed_limit_ms = 0.0
+      return 0.0
+
+    if (int(self._param_frame) - int(self._vision_speed_limit_last_read_frame)) < 20:
+      return float(self._vision_speed_limit_ms)
+
+    self._vision_speed_limit_last_read_frame = int(self._param_frame)
+    try:
+      limit_ms = float(self._vision_params.get("VisionSpeedLimit") or 0.0)
+      confidence = float(self._vision_params.get("VisionSpeedLimitConfidence") or 0.0)
+      timestamp = float(self._vision_params.get("VisionSpeedLimitTimestamp") or 0.0)
+    except Exception:
+      limit_ms = 0.0
+      confidence = 0.0
+      timestamp = 0.0
+
+    age_s = time.monotonic() - timestamp if timestamp > 0.0 else 1e9
+    min_ms = 15.0 * CV.MPH_TO_MS
+    max_ms = 75.0 * CV.MPH_TO_MS
+    valid = (
+      min_ms <= limit_ms <= max_ms and
+      confidence >= 0.18 and
+      0.0 <= age_s <= 310.0
+    )
+
+    self._vision_speed_limit_ms = float(limit_ms) if valid else 0.0
+    self._vision_speed_limit_confidence = float(confidence) if valid else 0.0
+    self._vision_speed_limit_timestamp = float(timestamp) if valid else 0.0
+    return float(self._vision_speed_limit_ms)
+
+
   def _update_speed_limit(self, can_parsers) -> None:
     """Unity-parity speed limit parsing (map/sign + DAS fallback) into m/s."""
     speed_limit_ms = 0.0
@@ -606,7 +654,21 @@ class CarState(CarStateBase):
     # Empirically on HW2, DAS_accSpeedLimit can stick at a low default (e.g. 15mph) while map/sign shows the real limit.
     # Use DAS as fallback only, never as a cap.
     chosen = speed_limit_ms if speed_limit_ms > 0.0 else speed_limit_ms_das
+
+    # XNOR Vision Speed Limit V1-UK:
+    # - A confirmed camera sign may LOWER the Tesla/map source.
+    # - Vision never raises above a valid Tesla/map source.
+    # - If no other source is available, a confirmed vision sign is usable.
+    # - A confirmed higher sign is handled by the vision daemon by releasing
+    #   its lower override, returning authority to Tesla/map data.
+    vision_ms = float(self._get_vision_speed_limit_ms())
+    vision_applied = False
+    if vision_ms > 0.0 and (chosen <= 0.0 or vision_ms < chosen):
+      chosen = float(vision_ms)
+      vision_applied = True
+
     self.speed_limit_ms = float(chosen)
+    self._xnor_speed_limit_source = "vision_uk" if vision_applied else ("tesla_map" if speed_limit_ms > 0.0 else ("das_fallback" if speed_limit_ms_das > 0.0 else "none"))
 
     if self._tinkla.adjust_acc_with_speed_limit and (self._param_frame % 100 == 0):
       try:
@@ -619,6 +681,9 @@ class CarState(CarStateBase):
           f"stockState={str(getattr(self, 'stock_cruise_state', '') or '')} "
           f"hold={str(getattr(self, '_cruise_set_hold_src', '') or '')} "
           f"speedLimit={float(getattr(self, 'speed_limit_ms', 0.0))*conv:.1f} das={float(getattr(self, 'speed_limit_ms_das', 0.0))*conv:.1f} "
+          f"vision={float(getattr(self, '_vision_speed_limit_ms', 0.0))*conv:.1f} "
+          f"visionConf={float(getattr(self, '_vision_speed_limit_confidence', 0.0)):.2f} "
+          f"slSrc={str(getattr(self, '_xnor_speed_limit_source', 'none'))} "
           f"raw(gps_u={gps_units}, gps_mpp={gps_mpp}, rd_sign={rd_sign}, rd_base_mps={rd_base_mps}, map_type={map_type}, das_mph={das_mph})"
         )
       except Exception:
