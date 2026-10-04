@@ -3,44 +3,54 @@ set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 ROOT="$(cd "$DIR/../.." >/dev/null && pwd)"
 export PYTHONPATH="$ROOT/sunnypilot/third_party/tinygrad_repo:$ROOT/tinygrad_repo:$ROOT:${PYTHONPATH:-}"
-# XNOR: supervise modeld so manager signals are forwarded to the Python child.
-# Without this, manager can stop this bash wrapper while modeld.py survives,
-# leaving an orphaned ~450 MB modeld_tinygrad process owned by PID 1.
+
+# XNOR: supervise modeld so the manager-owned wrapper cannot leave a Tinygrad
+# Python child behind when transitioning offroad. A background child can inherit
+# SIGINT ignored from bash, so always terminate it with SIGTERM instead of
+# forwarding manager's SIGINT verbatim.
 child_pid=""
 stopping=0
 
-forward_stop() {
+shutdown_child() {
   stopping=1
-  sig="$1"
 
   if [ -n "${child_pid:-}" ] && kill -0 "$child_pid" 2>/dev/null; then
-    echo "XNOR_MODEL_SELECTOR: forwarding SIG${sig} to modeld child PID ${child_pid}" >&2
-    kill -s "$sig" "$child_pid" 2>/dev/null || true
+    echo "XNOR_MODEL_SELECTOR: stopping modeld child PID ${child_pid}" >&2
+    kill -TERM "$child_pid" 2>/dev/null || true
+
+    # Stay inside manager's 5 second shutdown window while allowing Python to
+    # unwind normally first.
+    deadline=$((SECONDS + 2))
+    while kill -0 "$child_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.1
+    done
+
+    # Never permit modeld_tinygrad to survive as a PPID 1 orphan.
+    if kill -0 "$child_pid" 2>/dev/null; then
+      echo "XNOR_MODEL_SELECTOR: child PID ${child_pid} did not exit; sending SIGKILL" >&2
+      kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+
+    wait "$child_pid" 2>/dev/null || true
   fi
+
+  child_pid=""
+  exit 0
 }
 
-trap 'forward_stop INT' INT
-trap 'forward_stop TERM' TERM
+trap shutdown_child INT TERM
 
 python3 "$DIR/modeld.py" "$@" &
 child_pid=$!
 
-# wait(1) can itself be interrupted by the signal caught above. Keep waiting
-# until the model process has actually exited so it cannot become orphaned.
-while true; do
-  wait "$child_pid"
-  rc=$?
-
-  if ! kill -0 "$child_pid" 2>/dev/null; then
-    break
-  fi
-done
-
+# A natural child exit means either a clean model exit or a real failure.
+# Intentional manager shutdown never reaches this path because shutdown_child
+# exits after reaping the child.
+wait "$child_pid"
+rc=$?
 child_pid=""
 trap - INT TERM
 
-# An intentional manager shutdown is not a model failure and must not trigger
-# bundle rollback or the stock-model fallback.
 if [ "$stopping" -ne 0 ]; then
   exit 0
 fi
@@ -55,4 +65,5 @@ p.remove("ModelRunnerTypeCache")
 PY2
   exec python3 "$ROOT/selfdrive/modeld/modeld.py" "$@"
 fi
+
 exit 0
