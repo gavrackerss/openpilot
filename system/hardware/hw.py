@@ -69,3 +69,11 @@ class Paths:
     if PC:
       return str(Path(Paths.comma_home()) / "media" / "0" / "models")
     return "/data/media/0/models"
+
+  @staticmethod
+  def mapd_root() -> str:
+    # pfeiferj/mapd uses this root on comma devices. Offline tiles live in
+    # mapd_root()/offline; keep PC layout equivalent for development.
+    if PC:
+      return str(Path(Paths.comma_home()) / "media" / "0" / "osm")
+    return "/data/media/0/osm"

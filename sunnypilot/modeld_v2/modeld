@@ -3,49 +3,71 @@ set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 ROOT="$(cd "$DIR/../.." >/dev/null && pwd)"
 export PYTHONPATH="$ROOT/sunnypilot/third_party/tinygrad_repo:$ROOT/tinygrad_repo:$ROOT:${PYTHONPATH:-}"
-# XNOR: supervise modeld so manager signals are forwarded to the Python child.
-# Without this, manager can stop this bash wrapper while modeld.py survives,
-# leaving an orphaned ~450 MB modeld_tinygrad process owned by PID 1.
+
+# XNOR: supervise modeld so manager never leaves the Python Tinygrad child
+# behind on an onroad -> offroad transition. Background jobs can inherit
+# SIGINT ignored, so manager's SIGINT must be translated to SIGTERM here.
 child_pid=""
 stopping=0
 
-forward_stop() {
-  stopping=1
-  sig="$1"
+child_running() {
+  [ -n "${child_pid:-}" ] || return 1
+  kill -0 "$child_pid" 2>/dev/null || return 1
 
-  if [ -n "${child_pid:-}" ] && kill -0 "$child_pid" 2>/dev/null; then
-    echo "XNOR_MODEL_SELECTOR: forwarding SIG${sig} to modeld child PID ${child_pid}" >&2
-    kill -s "$sig" "$child_pid" 2>/dev/null || true
+  # A zombie is already dead and only needs to be reaped. kill -0 can still
+  # succeed for zombies, so explicitly treat Z as not running.
+  if [ -r "/proc/$child_pid/stat" ]; then
+    local _pid _comm state _rest
+    read -r _pid _comm state _rest < "/proc/$child_pid/stat" || return 1
+    [ "$state" != "Z" ] || return 1
   fi
+  return 0
 }
 
-trap 'forward_stop INT' INT
-trap 'forward_stop TERM' TERM
+shutdown_child() {
+  stopping=1
+
+  if child_running; then
+    echo "XNOR_MODEL_SELECTOR: stopping modeld child PID ${child_pid}" >&2
+    kill -TERM "$child_pid" 2>/dev/null || true
+
+    # Stay well inside manager's 5 second shutdown grace period.
+    for _ in $(seq 1 20); do
+      child_running || break
+      sleep 0.1
+    done
+
+    # Never permit a Tinygrad child to survive after the wrapper is stopped.
+    if child_running; then
+      echo "XNOR_MODEL_SELECTOR: modeld child PID ${child_pid} did not exit after SIGTERM; sending SIGKILL" >&2
+      kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+  fi
+
+  # Reap the child if it has exited/zombied. Ignore its status because this is
+  # an intentional manager shutdown, not a model failure.
+  if [ -n "${child_pid:-}" ]; then
+    wait "$child_pid" 2>/dev/null || true
+  fi
+
+  child_pid=""
+  exit 0
+}
+
+trap shutdown_child INT TERM
 
 python3 "$DIR/modeld.py" "$@" &
 child_pid=$!
 
-# wait(1) can itself be interrupted by the signal caught above. Keep waiting
-# until the model process has actually exited so it cannot become orphaned.
-while true; do
-  wait "$child_pid"
-  rc=$?
-
-  if ! kill -0 "$child_pid" 2>/dev/null; then
-    break
-  fi
-done
-
+# Normal runtime: wait for a genuine model exit. SIGINT/SIGTERM invokes the
+# trap above, which terminates and reaps the child before this shell exits.
+wait "$child_pid"
+rc=$?
 child_pid=""
 trap - INT TERM
 
-# An intentional manager shutdown is not a model failure and must not trigger
-# bundle rollback or the stock-model fallback.
-if [ "$stopping" -ne 0 ]; then
-  exit 0
-fi
-
-if [ "$rc" -ne 0 ]; then
+# A genuine custom-model failure still falls back to stock modeld.
+if [ "$stopping" -eq 0 ] && [ "$rc" -ne 0 ]; then
   echo "XNOR_MODEL_SELECTOR: custom modeld failed (rc=$rc); reverting active bundle and falling back to stock modeld" >&2
   python3 - <<'PY2'
 from openpilot.common.params import Params
@@ -55,4 +77,5 @@ p.remove("ModelRunnerTypeCache")
 PY2
   exec python3 "$ROOT/selfdrive/modeld/modeld.py" "$@"
 fi
+
 exit 0

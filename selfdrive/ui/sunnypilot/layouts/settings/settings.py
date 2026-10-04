@@ -11,6 +11,7 @@ from openpilot.selfdrive.ui.layouts.settings.developer import DeveloperLayout
 from openpilot.selfdrive.ui.layouts.settings.device import DeviceLayout
 from openpilot.selfdrive.ui.layouts.settings.firehose import FirehoseLayout
 from openpilot.selfdrive.ui.layouts.settings.models import ModelsLayout
+from openpilot.selfdrive.ui.layouts.settings.osm import OSMLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
 from openpilot.selfdrive.ui.layouts.settings.tesla import TeslaLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
@@ -23,7 +24,6 @@ from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.network import NetworkUI
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 
-# Match Sunnypilot's darker settings panel while retaining XNOR's panel bodies.
 OP.PANEL_COLOR = rl.Color(10, 10, 10, 255)
 ICON_SIZE = 70
 
@@ -78,6 +78,7 @@ class SettingsLayoutSP(OP.SettingsLayout):
       OP.PanelType.TOGGLES: PanelInfo(tr_noop("Toggles"), TogglesLayout(), icon="sunnypilot/offroad/icon_toggle.png"),
       OP.PanelType.SOFTWARE: PanelInfo(tr_noop("Software"), SoftwareLayout(), icon="sunnypilot/offroad/icon_software.png"),
       OP.PanelType.MODELS: PanelInfo(tr_noop("Models"), ModelsLayout(), icon="sunnypilot/offroad/icon_models.png"),
+      OP.PanelType.OSM: PanelInfo(tr_noop("OSM"), OSMLayout(), icon="icons/road.png"),
       OP.PanelType.TESLA: PanelInfo(tr_noop("Tesla"), TeslaLayout(), icon="sunnypilot/offroad/icon_vehicle.png"),
       OP.PanelType.FIREHOSE: PanelInfo(tr_noop("Firehose"), FirehoseLayout(), icon="sunnypilot/offroad/icon_firehose.png"),
       OP.PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout(), icon="icons/shell.png"),

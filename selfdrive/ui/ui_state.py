@@ -56,6 +56,7 @@ class UIState:
         "carControl",
         "liveParameters",
         "rawAudioData",
+        "mapdExtendedOut",
       ]
     )
 
@@ -203,7 +204,6 @@ class Device:
     return self._awake
 
   def set_override_interactive_timeout(self, timeout: int | None) -> None:
-    # Override the interactive timeout duration temporarily
     self._override_interactive_timeout = timeout
     self._reset_interactive_timeout()
 
@@ -222,7 +222,6 @@ class Device:
     self._interactive_timeout_callbacks.append(callback)
 
   def update(self):
-    # do initial reset
     if self._interaction_time <= 0:
       self._reset_interactive_timeout()
 
@@ -240,7 +239,6 @@ class Device:
     if ui_state.started and ui_state.light_sensor >= 0:
       clipped_brightness = ui_state.light_sensor
 
-      # CIE 1931 - https://www.photonstophotos.net/GeneralTopics/Exposure/Psychometric_Lightness_and_Gamma.htm
       if clipped_brightness <= 8:
         clipped_brightness = clipped_brightness / 903.3
       else:
@@ -259,7 +257,6 @@ class Device:
         self._last_brightness = brightness
 
   def _update_wakefulness(self):
-    # Handle interactive timeout
     ignition_just_turned_off = not ui_state.ignition and self._ignition
     self._ignition = ui_state.ignition
 
@@ -282,6 +279,5 @@ class Device:
       gui_app.set_should_render(on)
 
 
-# Global instance
 ui_state = UIState()
 device = Device()
