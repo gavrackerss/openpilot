@@ -23,16 +23,23 @@ MAPD_CANCEL_DOWNLOAD = 27
 
 MAP_ROOT = Path(Paths.mapd_root())
 OFFLINE_MAP_PATH = MAP_ROOT / "offline"
+TMP_MAP_PATH = MAP_ROOT / "tmp"
 SELECTION_PATH = MAP_ROOT / "ui_selection.json"
 DOWNLOAD_MENU_PATH = Path(__file__).with_name("osm_download_menu.json")
 
 
 class OSMLayout(Widget):
-  """Offline OSM map management UI for XNOR's existing pfeiferj/mapd."""
+  """Offline OSM map management UI for XNOR's existing pfeiferj/mapd.
+
+  Deliberately does not subscribe to mapdExtendedOut. The mapd binary bundled
+  with this XNOR build can emit a frame that the current Python msgq client
+  treats as zero-length, which aborts the entire UI process in native code.
+  Downloads still use mapdIn; status is derived from mapd's tmp/offline files.
+  """
 
   def __init__(self):
     super().__init__()
-    self._pm = messaging.PubMaster(["mapdIn"])
+    self._pm = None
     self._dialog = None
     self._dialog_kind = None
     self._option_to_code = {}
@@ -43,10 +50,17 @@ class OSMLayout(Widget):
     self._load_selection()
 
     self._request_pending = False
+    self._cancel_pending = False
     self._request_time = 0.0
-    self._was_downloading = False
+    self._request_base_bytes = 0
+    self._request_base_mtime = 0.0
+    self._saw_tmp_activity = False
+    self._last_tmp_activity_time = 0.0
+
     self._installed_bytes = 0
     self._legacy_bytes = 0
+    self._tmp_bytes = 0
+    self._tmp_files = 0
     self._latest_map_mtime = 0.0
     self._last_storage_refresh = 0.0
 
@@ -74,7 +88,7 @@ class OSMLayout(Widget):
     self._status = text_item(
       lambda: tr("Download Status"),
       self._download_status,
-      lambda: tr("Progress is read directly from mapdExtendedOut from the mapd process already running on this device."),
+      lambda: tr("Download state is detected from /data/media/0/osm/tmp and /data/media/0/osm/offline. The UI does not subscribe to mapdExtendedOut."),
     )
     self._storage = text_item(
       lambda: tr("Downloaded Maps"),
@@ -252,98 +266,98 @@ class OSMLayout(Widget):
     msg = tr("Download or update offline OSM data for") + f" {location}?"
     gui_app.push_widget(ConfirmDialog(msg, tr("Download"), callback=cb))
 
+  def _send_mapd(self, msg_type, value=""):
+    # Create the publisher only when an action is requested. Merely opening
+    # Settings therefore adds no mapd messaging sockets to the UI process.
+    if self._pm is None:
+      self._pm = messaging.PubMaster(["mapdIn"])
+    msg = messaging.new_message("mapdIn")
+    msg.mapdIn.type = msg_type
+    if value:
+      msg.mapdIn.str = value
+    self._pm.send("mapdIn", msg)
+
   def _start_download(self):
     location = self._download_location()
     if not location:
       return
-    msg = messaging.new_message("mapdIn")
-    msg.mapdIn.type = MAPD_DOWNLOAD
-    msg.mapdIn.str = location
-    self._pm.send("mapdIn", msg)
+
+    self._refresh_storage(force=True)
+    self._request_base_bytes = self._installed_bytes
+    self._request_base_mtime = self._latest_map_mtime
+    self._saw_tmp_activity = False
+    self._last_tmp_activity_time = 0.0
+    self._cancel_pending = False
+
+    self._send_mapd(MAPD_DOWNLOAD, location)
     self._request_pending = True
     self._request_time = time.monotonic()
 
   def _cancel_download(self):
-    msg = messaging.new_message("mapdIn")
-    msg.mapdIn.type = MAPD_CANCEL_DOWNLOAD
-    self._pm.send("mapdIn", msg)
-    self._request_pending = False
-
-  def _progress(self):
-    try:
-      return ui_state.sm["mapdExtendedOut"].downloadProgress
-    except Exception:
-      return None
+    self._send_mapd(MAPD_CANCEL_DOWNLOAD)
+    self._cancel_pending = True
 
   def _is_downloading(self):
-    progress = self._progress()
-    active = bool(progress.active) if progress is not None else False
-    if active:
+    if self._tmp_files > 0:
       return True
-    return self._request_pending and (time.monotonic() - self._request_time) < 10.0
+    if self._request_pending:
+      # Keep controls locked while mapd has a chance to create its first .part
+      # file. If no activity occurs, _update_state clears this after 30 s.
+      return True
+    return False
 
   def _download_status(self):
-    progress = self._progress()
-    if progress is None:
-      return tr("Waiting for mapd")
+    if self._cancel_pending:
+      return tr("Cancelling") if self._is_downloading() else tr("Cancelled")
 
-    if progress.active:
-      total = int(progress.totalFiles)
-      done = int(progress.downloadedFiles)
-      if total > 0:
-        pct = min(100.0, 100.0 * done / total)
-        return f"{tr('Downloading')} {done}/{total} ({pct:.0f}%)"
-      return tr("Downloading")
+    if self._tmp_files > 0:
+      return f"{tr('Downloading / Updating')} ({self._format_bytes(self._tmp_bytes)})"
 
-    if self._request_pending and (time.monotonic() - self._request_time) < 10.0:
+    if self._request_pending:
       return tr("Starting")
 
-    if progress.cancelled:
-      return tr("Cancelled")
     return tr("Ready")
 
   @staticmethod
-  def _path_size(path):
+  def _path_state(path):
+    total = 0
+    latest = 0.0
+    files = 0
     try:
       if path.is_file() or path.is_symlink():
-        return path.stat().st_size
+        st = path.stat()
+        return st.st_size, st.st_mtime, 1
     except OSError:
-      return 0
+      return 0, 0.0, 0
 
-    total = 0
     if path.is_dir():
-      for root, _, files in os.walk(path):
-        for name in files:
+      for root, _, names in os.walk(path):
+        for name in names:
           try:
-            total += os.path.getsize(os.path.join(root, name))
+            st = os.stat(os.path.join(root, name))
+            total += st.st_size
+            latest = max(latest, st.st_mtime)
+            files += 1
           except OSError:
             pass
-    return total
-
-  @staticmethod
-  def _latest_mtime(path):
-    latest = 0.0
-    if not path.exists():
-      return latest
-    for root, _, files in os.walk(path):
-      for name in files:
-        try:
-          latest = max(latest, os.path.getmtime(os.path.join(root, name)))
-        except OSError:
-          pass
-    return latest
+    return total, latest, files
 
   def _refresh_storage(self, force=False):
     now = time.monotonic()
-    if not force and now - self._last_storage_refresh < 5.0:
+    if not force and now - self._last_storage_refresh < 2.0:
       return
 
-    offline_bytes = self._path_size(OFFLINE_MAP_PATH)
+    offline_bytes, offline_mtime, _ = self._path_state(OFFLINE_MAP_PATH)
+    tmp_bytes, _, tmp_files = self._path_state(TMP_MAP_PATH)
+
     legacy_paths = [MAP_ROOT / "db"] + [Path(p) for p in glob.glob(str(MAP_ROOT / "v*"))]
-    legacy_bytes = sum(self._path_size(path) for path in legacy_paths)
+    legacy_bytes = sum(self._path_state(path)[0] for path in legacy_paths)
+
     self._installed_bytes = offline_bytes + legacy_bytes
     self._legacy_bytes = legacy_bytes
-    self._latest_map_mtime = self._latest_mtime(OFFLINE_MAP_PATH)
+    self._tmp_bytes = tmp_bytes
+    self._tmp_files = tmp_files
+    self._latest_map_mtime = offline_mtime
     self._last_storage_refresh = now
 
   @staticmethod
@@ -381,7 +395,7 @@ class OSMLayout(Widget):
     )
 
   def _delete_maps(self):
-    targets = [OFFLINE_MAP_PATH, MAP_ROOT / "tmp", MAP_ROOT / "db"]
+    targets = [OFFLINE_MAP_PATH, TMP_MAP_PATH, MAP_ROOT / "db"]
     targets.extend(Path(p) for p in glob.glob(str(MAP_ROOT / "v*")))
 
     for path in targets:
@@ -397,22 +411,41 @@ class OSMLayout(Widget):
       OFFLINE_MAP_PATH.mkdir(parents=True, exist_ok=True)
     except OSError:
       pass
+
+    self._request_pending = False
+    self._cancel_pending = False
+    self._saw_tmp_activity = False
+    self._last_tmp_activity_time = 0.0
     self._refresh_storage(force=True)
 
   def _update_state(self):
-    progress = self._progress()
-    active = bool(progress.active) if progress is not None else False
+    self._refresh_storage()
+    tmp_active = self._tmp_files > 0
 
-    if active:
-      self._request_pending = False
+    if self._request_pending:
+      elapsed = time.monotonic() - self._request_time
 
-    if self._was_downloading and not active:
-      self._request_pending = False
-      self._refresh_storage(force=True)
-    else:
-      self._refresh_storage()
+      if tmp_active:
+        self._saw_tmp_activity = True
+        self._last_tmp_activity_time = time.monotonic()
+      else:
+        storage_changed = (
+          self._installed_bytes != self._request_base_bytes or
+          self._latest_map_mtime > self._request_base_mtime
+        )
 
-    self._was_downloading = active
+        # mapd removes /tmp after a location completes. Seeing tmp activity
+        # followed by no tmp files is the strongest filesystem completion cue.
+        tmp_quiet = self._saw_tmp_activity and (time.monotonic() - self._last_tmp_activity_time) > 4.0
+        if tmp_quiet or (storage_changed and elapsed > 4.0 and not self._saw_tmp_activity) or elapsed > 30.0:
+          self._request_pending = False
+          self._cancel_pending = False
+          self._saw_tmp_activity = False
+          self._last_tmp_activity_time = 0.0
+          self._refresh_storage(force=True)
+
+    elif self._cancel_pending and not tmp_active:
+      self._cancel_pending = False
 
   def _render(self, rect):
     self._scroller.render(rect)
