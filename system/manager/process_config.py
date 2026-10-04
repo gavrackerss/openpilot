@@ -68,6 +68,13 @@ def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
+def tesla_vision_speed_limit(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """Run the optional V1-UK sign recogniser only for Tesla while onroad."""
+  try:
+    return bool(started and getattr(CP, "brand", "") == "tesla" and params.get_bool("VisionSpeedLimitDetection"))
+  except Exception:
+    return False
+
 _XNOR_MODEL_SELECTOR_RUNTIME_FAILED = False
 _XNOR_MODEL_SELECTOR_RUNTIME_ERROR = ""
 
@@ -132,6 +139,7 @@ procs = [
   PythonProcess("soundd", "selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),
   NativeProcess("mapd", "selfdrive", ["./mapd"], always_run),
+  PythonProcess("speedlimitvisiond", "selfdrive.speed_limit_vision_uk", tesla_vision_speed_limit),
   NativeProcess("_pandad", "selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", only_onroad),
   PythonProcess("torqued", "selfdrive.locationd.torqued", only_onroad),

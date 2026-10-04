@@ -52,6 +52,7 @@ class TeslaLayout(Widget):
       button_item("Hands-on Threshold", self._hands_on_text, self._hands_on_desc, callback=self._show_hands_on_level),
       button_item("Radar Offset", self._radar_offset_text, self._radar_offset_desc, callback=self._show_radar_offset),
       param_toggle_item("Match Speed to Speed Limit", "Automatically sets cruise speed to the detected speed limit with an offset.", self._params, "TinklaAdjustAccWithSpeedLimit"),
+      param_toggle_item("Vision Speed Limit (UK)", "Uses the road camera to recognise UK red-circle 20/30/40/50/60/70 mph signs. Confirmed vision limits can lower speed-limit matching but never raise above the Tesla/map limit. Higher signs only release the vision override.", self._params, "VisionSpeedLimitDetection"),
       param_toggle_item("Offset is Percentage", "If enabled, offset is a percentage of the speed limit. Otherwise it is an absolute mph/kph offset.", self._params, "TinklaSpeedLimitUseRelative"),
       button_item("Speed Limit Offset", self._speed_limit_offset_text, self._speed_limit_offset_desc, callback=self._show_speed_limit_offset),
       param_toggle_item("Auto Lane Change", "Automatically starts lane changes after a short indicator tap, if clear.", self._params, "TinklaEnableALC"),
