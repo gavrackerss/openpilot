@@ -64,6 +64,9 @@ SPEED_LIMIT_CLASSES = {
 class Detection:
   speed_limit_mph: int
   confidence: float
+  model_confidence: float = 0.0
+  ring_score: float = 0.0
+  bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass
@@ -91,6 +94,8 @@ class SpeedLimitVisionUK:
     self.last_inference_at = -1e9
     self.followup_until = 0.0
     self.last_status = ""
+    self._last_raw_log_signature = None
+    self._last_raw_log_at = 0.0
 
     self.sm = None
     self.runtime_error = ""
@@ -103,6 +108,39 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitStatus", text[:160])
     except Exception:
       pass
+
+  def _log_raw_proposal(self, decision: str, speed_limit_mph: int, model_confidence: float,
+                        ring_score: float, combined_confidence: float = 0.0,
+                        bbox: tuple[int, int, int, int] | None = None) -> None:
+    """Log detector/ring-gate state without flooding rlogs with identical frames."""
+    now = time.monotonic()
+    signature = (
+      str(decision),
+      int(speed_limit_mph),
+      round(float(model_confidence), 2),
+      round(float(ring_score), 2),
+      round(float(combined_confidence), 2),
+    )
+    # Rejected raw proposals can repeat every inference. Log a changed proposal
+    # immediately, otherwise at most once per second.
+    if signature == self._last_raw_log_signature and (now - self._last_raw_log_at) < 1.0:
+      return
+    self._last_raw_log_signature = signature
+    self._last_raw_log_at = now
+    bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+    cloudlog.info(
+      f"[XNOR_VSL_V1UK] proposal={int(speed_limit_mph)} "
+      f"model={float(model_confidence):.3f} ring={float(ring_score):.3f} "
+      f"combined={float(combined_confidence):.3f} decision={decision} bbox={bbox_text}"
+    )
+
+  def _log_temporal_candidate(self, detection: Detection, count: int, required: int, decision: str) -> None:
+    cloudlog.info(
+      f"[XNOR_VSL_V1UK] candidate={int(detection.speed_limit_mph)} "
+      f"model={float(detection.model_confidence):.3f} ring={float(detection.ring_score):.3f} "
+      f"combined={float(detection.confidence):.3f} count={int(count)}/{int(required)} "
+      f"decision={decision}"
+    )
 
   def _publish(self, speed_limit_mph: int, confidence: float) -> None:
     now = time.monotonic()
@@ -346,6 +384,7 @@ class SpeedLimitVisionUK:
 
     max_area = frame_w * frame_h * MAX_BOX_AREA_RATIO
     candidates = []
+    raw_supported = []
 
     for prediction in predictions:
       if len(prediction) <= 4:
@@ -379,17 +418,31 @@ class SpeedLimitVisionUK:
 
       crop = frame_bgr[y1:y2, x1:x2]
       uk_score = self._uk_red_ring_score(crop)
+      bbox = (x1, y1, x2, y2)
+      raw_supported.append((model_conf, speed_mph, uk_score, bbox))
       if uk_score <= 0.0:
         continue
 
       confidence = float(np.clip(model_conf * 0.72 + uk_score * 0.28, 0.0, 0.99))
-      candidates.append(Detection(speed_mph, confidence))
+      candidates.append(Detection(speed_mph, confidence, model_conf, uk_score, bbox))
 
     if not candidates:
+      if raw_supported:
+        model_conf, speed_mph, uk_score, bbox = max(raw_supported, key=lambda item: item[0])
+        self._log_raw_proposal("ring_reject", speed_mph, model_conf, uk_score, 0.0, bbox)
       return None
 
     candidates.sort(key=lambda d: d.confidence, reverse=True)
-    return candidates[0]
+    best = candidates[0]
+    self._log_raw_proposal(
+      "ring_accept",
+      best.speed_limit_mph,
+      best.model_confidence,
+      best.ring_score,
+      best.confidence,
+      best.bbox,
+    )
+    return best
 
   def _prune_history(self, now: float) -> None:
     while self.history and now - self.history[0].created_at > HISTORY_SECONDS:
@@ -406,26 +459,32 @@ class SpeedLimitVisionUK:
     confs = [x.confidence for x in self.history if x.speed_limit_mph == detection.speed_limit_mph]
     best_conf = max(confs) if confs else 0.0
     if best_conf < MIN_CONFIRMED_CONFIDENCE:
+      self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "confidence_reject")
       self._set_status(f"UK candidate: {detection.speed_limit_mph} mph")
       return
 
     current = self.published_speed_limit_mph
     if current <= 0:
       if count >= INITIAL_REQUIRED_READS:
+        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "publish")
         self._publish(detection.speed_limit_mph, best_conf)
       else:
+        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "waiting")
         self._set_status(f"UK candidate: {detection.speed_limit_mph} mph ({count}/{INITIAL_REQUIRED_READS})")
       return
 
     if detection.speed_limit_mph == current:
+      self._log_temporal_candidate(detection, count, 1, "refresh")
       self._refresh_publish_timestamp()
       self._set_status(f"UK vision: {current} mph ({best_conf * 100.0:.0f}%)")
       return
 
     if detection.speed_limit_mph < current:
       if count >= CHANGE_REQUIRED_READS:
+        self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "publish_lower")
         self._publish(detection.speed_limit_mph, best_conf)
       else:
+        self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "waiting_lower")
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{CHANGE_REQUIRED_READS})")
       return
 
@@ -433,9 +492,12 @@ class SpeedLimitVisionUK:
     # confirmed higher sign only releases the existing lower vision override;
     # Tesla/map speed-limit logic then becomes authoritative again.
     if count >= HIGHER_RELEASE_REQUIRED_READS and best_conf >= HIGHER_RELEASE_CONFIDENCE:
+      self._log_temporal_candidate(detection, count, HIGHER_RELEASE_REQUIRED_READS, "release_higher")
       self._clear_publish(f"confirmed higher sign {detection.speed_limit_mph} mph")
       self.followup_until = now + 1.0
     else:
+      decision = "waiting_higher" if best_conf >= HIGHER_RELEASE_CONFIDENCE else "higher_confidence_reject"
+      self._log_temporal_candidate(detection, count, HIGHER_RELEASE_REQUIRED_READS, decision)
       self._set_status(
         f"UK higher candidate: {detection.speed_limit_mph} mph "
         f"({count}/{HIGHER_RELEASE_REQUIRED_READS})"
