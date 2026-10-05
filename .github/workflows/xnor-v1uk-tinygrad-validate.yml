@@ -18,6 +18,9 @@ jobs:
       - name: Syntax check
         run: python -m py_compile selfdrive/speed_limit_vision_uk.py
 
+      - name: Install validation dependency
+        run: python -m pip install -q numpy
+
       - name: Tinygrad ONNX zero-frame inference
         env:
           PYTHONPATH: tinygrad_repo
