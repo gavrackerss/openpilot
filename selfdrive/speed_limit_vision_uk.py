@@ -260,7 +260,11 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitTimestamp", 0.0)
     except Exception:
       pass
-    self._clear_lower_candidate(reason)
+    # A newly-seen lower candidate may be fresher than an older confirmed
+    # publish that is expiring. Only an explicitly confirmed higher sign is
+    # allowed to release the conservative provisional lower cap immediately.
+    if str(reason).startswith("confirmed higher sign"):
+      self._clear_lower_candidate(reason)
     self._set_status(f"UK vision: scanning ({reason})")
     if old > 0:
       cloudlog.info(f"[XNOR_VSL_V12UK] clear previous={old}mph reason={reason}")
