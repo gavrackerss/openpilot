@@ -1,0 +1,106 @@
+name: XNOR V1.2 UK validation
+
+on:
+  push:
+    branches:
+      - xnor-v1-2-uk-tracking-national
+    paths:
+      - .github/workflows/xnor-v12uk-validate.yml
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: xnor-v1-2-uk-tracking-national
+
+      - name: Python syntax
+        run: |
+          python -m py_compile \
+            selfdrive/speed_limit_uk_reader.py \
+            selfdrive/speed_limit_vision_uk.py \
+            opendbc_repo/opendbc/car/tesla/carstate.py
+
+      - name: Install reader test dependencies
+        run: python -m pip install -q numpy opencv-python-headless==4.13.0.92 pillow
+
+      - name: Test numeric and national UK readers
+        run: |
+          PYTHONPATH=. python - <<'PY'
+          import cv2
+          import numpy as np
+          from PIL import Image, ImageDraw, ImageFont, ImageFilter
+          from selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
+
+          value_reader = UKSpeedValueReader(cv2)
+          national_reader = UKNationalSpeedLimitReader(cv2)
+          font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+          def numeric_sign(value, size=240):
+            im = Image.new("RGB", (size, size), "white")
+            d = ImageDraw.Draw(im)
+            margin = int(size * 0.07)
+            ring = max(int(size * 0.075), 8)
+            d.ellipse((margin, margin, size-margin, size-margin), outline=(210, 0, 0), width=ring)
+            font = ImageFont.truetype(font_path, int(size * 0.43))
+            box = d.textbbox((0, 0), str(value), font=font)
+            tw, th = box[2]-box[0], box[3]-box[1]
+            d.text(((size-tw)/2, (size-th)/2 - int(size*0.035)), str(value), font=font, fill="black")
+            return cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
+
+          def national_sign(size=240, angle=0.0, blur=0.0):
+            im = Image.new("RGB", (size, size), (175, 175, 175))
+            d = ImageDraw.Draw(im)
+            margin = int(size * 0.08)
+            d.ellipse((margin, margin, size-margin, size-margin), fill="white", outline=(35,35,35), width=max(int(size*0.025),2))
+            # Official-style black diagonal band, lower-left to upper-right.
+            width = max(int(size * 0.105), 7)
+            d.line((int(size*0.22), int(size*0.78), int(size*0.78), int(size*0.22)), fill="black", width=width)
+            if angle:
+              im = im.rotate(angle, resample=Image.Resampling.BICUBIC, fillcolor=(175,175,175))
+            if blur:
+              im = im.filter(ImageFilter.GaussianBlur(blur))
+            return cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
+
+          for value in (20,30,40,50,60,70):
+            r = value_reader.read(numeric_sign(value, 180))
+            assert r is not None and r.speed_limit_mph == value, (value, r)
+            assert national_reader.read(numeric_sign(value, 180)) is None, f"numeric {value} misread as national"
+
+          for size, angle, blur in ((240,0,0),(180,3,0.4),(140,-4,0.7),(110,2,0.5)):
+            r = national_reader.read(national_sign(size, angle, blur))
+            print("national", size, angle, blur, r)
+            assert r is not None and r.confidence >= national_reader.MIN_CONFIDENCE, (size, angle, blur, r)
+          PY
+
+      - name: Validate lower-candidate Params
+        run: |
+          grep -F '"VisionSpeedLimitCandidate"' common/params_keys.h
+          grep -F '"VisionSpeedLimitCandidateConfidence"' common/params_keys.h
+          grep -F '"VisionSpeedLimitCandidateTimestamp"' common/params_keys.h
+
+      - name: Package changed-files overlay
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/xnor-v12
+          mkdir -p /tmp/xnor-v12
+          files=(
+            common/params_keys.h
+            opendbc_repo/opendbc/car/tesla/carstate.py
+            selfdrive/speed_limit_uk_reader.py
+            selfdrive/speed_limit_vision_uk.py
+          )
+          for f in "${files[@]}"; do
+            mkdir -p "/tmp/xnor-v12/$(dirname "$f")"
+            cp "$f" "/tmp/xnor-v12/$f"
+          done
+          cd /tmp/xnor-v12
+          zip -r "$GITHUB_WORKSPACE/xnor-v1.2-uk-tracking-national-changed-files.zip" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xnor-v1.2-uk-tracking-national-changed-files
+          path: xnor-v1.2-uk-tracking-national-changed-files.zip
+          if-no-files-found: error
+          retention-days: 7
