@@ -133,6 +133,13 @@ class CarState(CarStateBase):
     self._vision_speed_limit_ms = 0.0
     self._vision_speed_limit_confidence = 0.0
     self._vision_speed_limit_timestamp = 0.0
+    self._vision_speed_limit_candidate_ms = 0.0
+    self._vision_speed_limit_candidate_confidence = 0.0
+    self._vision_speed_limit_candidate_timestamp = 0.0
+    self._vision_candidate_last_processed_timestamp = 0.0
+    self._vision_lower_latched_ms = 0.0
+    self._vision_lower_latched_confidence = 0.0
+    self._vision_lower_latched_until = 0.0
     self._vision_speed_limit_last_read_frame = -100000
     # Tesla UI speed-limit offset (if present on CAN)
     self.ui_speed_limit_offset_uom = 0.0
@@ -580,13 +587,16 @@ class CarState(CarStateBase):
 
 
   def _get_vision_speed_limit_ms(self) -> float:
-    """Return a fresh confirmed V1-UK camera limit in m/s.
+    """Return a fresh confirmed V1.2-UK camera limit in m/s.
 
-    The daemon writes Params only when a sign is confirmed. Read them at 5 Hz
-    here to avoid adding synchronous Params I/O to every 100 Hz CarState frame.
+    V1.2 also samples a provisional lower candidate. That candidate is never
+    allowed to raise speed: CarState only latches it when it is already below
+    the current trusted Tesla/map limit at the moment it is first observed.
     """
     if not bool(getattr(self._tinkla, "vision_speed_limit", True)):
       self._vision_speed_limit_ms = 0.0
+      self._vision_speed_limit_candidate_ms = 0.0
+      self._vision_lower_latched_ms = 0.0
       return 0.0
 
     if (int(self._param_frame) - int(self._vision_speed_limit_last_read_frame)) < 20:
@@ -597,12 +607,19 @@ class CarState(CarStateBase):
       limit_ms = float(self._vision_params.get("VisionSpeedLimit") or 0.0)
       confidence = float(self._vision_params.get("VisionSpeedLimitConfidence") or 0.0)
       timestamp = float(self._vision_params.get("VisionSpeedLimitTimestamp") or 0.0)
+      candidate_ms = float(self._vision_params.get("VisionSpeedLimitCandidate") or 0.0)
+      candidate_conf = float(self._vision_params.get("VisionSpeedLimitCandidateConfidence") or 0.0)
+      candidate_ts = float(self._vision_params.get("VisionSpeedLimitCandidateTimestamp") or 0.0)
     except Exception:
       limit_ms = 0.0
       confidence = 0.0
       timestamp = 0.0
+      candidate_ms = 0.0
+      candidate_conf = 0.0
+      candidate_ts = 0.0
 
-    age_s = time.monotonic() - timestamp if timestamp > 0.0 else 1e9
+    now = time.monotonic()
+    age_s = now - timestamp if timestamp > 0.0 else 1e9
     min_ms = 15.0 * CV.MPH_TO_MS
     max_ms = 75.0 * CV.MPH_TO_MS
     valid = (
@@ -611,10 +628,62 @@ class CarState(CarStateBase):
       0.0 <= age_s <= 310.0
     )
 
+    candidate_age_s = now - candidate_ts if candidate_ts > 0.0 else 1e9
+    candidate_valid = (
+      min_ms <= candidate_ms <= max_ms and
+      candidate_conf >= 0.18 and
+      0.0 <= candidate_age_s <= 310.0
+    )
+
     self._vision_speed_limit_ms = float(limit_ms) if valid else 0.0
     self._vision_speed_limit_confidence = float(confidence) if valid else 0.0
     self._vision_speed_limit_timestamp = float(timestamp) if valid else 0.0
+    self._vision_speed_limit_candidate_ms = float(candidate_ms) if candidate_valid else 0.0
+    self._vision_speed_limit_candidate_confidence = float(candidate_conf) if candidate_valid else 0.0
+    self._vision_speed_limit_candidate_timestamp = float(candidate_ts) if candidate_valid else 0.0
+
+    # An explicit daemon clear (0 timestamp/value) cancels any provisional cap.
+    if candidate_ms <= 0.0 or candidate_ts <= 0.0:
+      self._vision_lower_latched_ms = 0.0
+      self._vision_lower_latched_confidence = 0.0
+      self._vision_lower_latched_until = 0.0
+      self._vision_candidate_last_processed_timestamp = 0.0
+
     return float(self._vision_speed_limit_ms)
+
+  def _get_latched_vision_lower_candidate_ms(self, current_limit_ms: float) -> float:
+    """Latch a newly-seen camera candidate only when it lowers a trusted limit.
+
+    Once latched, the conservative lower cap is held for the same 300 s window
+    as a confirmed vision limit. This protects the common UK case where a single
+    terminal sign is followed by a long gap before any repeater.
+    """
+    now = time.monotonic()
+    candidate_ms = float(getattr(self, "_vision_speed_limit_candidate_ms", 0.0) or 0.0)
+    candidate_conf = float(getattr(self, "_vision_speed_limit_candidate_confidence", 0.0) or 0.0)
+    candidate_ts = float(getattr(self, "_vision_speed_limit_candidate_timestamp", 0.0) or 0.0)
+
+    if candidate_ts > 0.0 and candidate_ts != float(self._vision_candidate_last_processed_timestamp):
+      self._vision_candidate_last_processed_timestamp = candidate_ts
+      if current_limit_ms > 0.0 and candidate_ms > 0.0 and candidate_ms < current_limit_ms:
+        self._vision_lower_latched_ms = float(candidate_ms)
+        self._vision_lower_latched_confidence = float(candidate_conf)
+        self._vision_lower_latched_until = float(candidate_ts) + 300.0
+        cloudlog.warning(
+          f"[XNOR_VSL_V12UK] lower_candidate_latched="
+          f"{candidate_ms * CV.MS_TO_MPH:.0f}mph "
+          f"against={current_limit_ms * CV.MS_TO_MPH:.0f}mph "
+          f"confidence={candidate_conf:.3f}"
+        )
+
+    if self._vision_lower_latched_ms > 0.0 and now <= self._vision_lower_latched_until:
+      return float(self._vision_lower_latched_ms)
+
+    if self._vision_lower_latched_ms > 0.0:
+      self._vision_lower_latched_ms = 0.0
+      self._vision_lower_latched_confidence = 0.0
+      self._vision_lower_latched_until = 0.0
+    return 0.0
 
 
   def _update_speed_limit(self, can_parsers) -> None:
@@ -711,20 +780,35 @@ class CarState(CarStateBase):
     # Use DAS as fallback only, never as a cap.
     chosen = speed_limit_ms if speed_limit_ms > 0.0 else speed_limit_ms_das
 
-    # XNOR Vision Speed Limit V1-UK:
-    # - A confirmed camera sign may LOWER the Tesla/map source.
-    # - Vision never raises above a valid Tesla/map source.
-    # - If no other source is available, a confirmed vision sign is usable.
-    # - A confirmed higher sign is handled by the vision daemon by releasing
-    #   its lower override, returning authority to Tesla/map data.
+    # XNOR Vision Speed Limit V1.2-UK:
+    # - Confirmed vision may lower Tesla/map and is usable if map is absent.
+    # - A newly accepted *provisional* vision candidate is latched only when it
+    #   is already lower than the current trusted Tesla/map/DAS source. It can
+    #   therefore never raise speed, but it immediately brings speed down even
+    #   before tracked temporal confirmation completes.
+    # - Higher signs never become a provisional cap; the daemon must confirm
+    #   them before releasing a previous lower vision restriction.
     vision_ms = float(self._get_vision_speed_limit_ms())
+    provisional_ms = float(self._get_latched_vision_lower_candidate_ms(chosen))
     vision_applied = False
+    provisional_applied = False
+
+    if provisional_ms > 0.0 and chosen > 0.0 and provisional_ms < chosen:
+      chosen = float(provisional_ms)
+      provisional_applied = True
+
     if vision_ms > 0.0 and (chosen <= 0.0 or vision_ms < chosen):
       chosen = float(vision_ms)
       vision_applied = True
+      provisional_applied = False
 
     self.speed_limit_ms = float(chosen)
-    self._xnor_speed_limit_source = "vision_uk" if vision_applied else ("tesla_map" if speed_limit_ms > 0.0 else ("das_fallback" if speed_limit_ms_das > 0.0 else "none"))
+    if vision_applied:
+      self._xnor_speed_limit_source = "vision_uk"
+    elif provisional_applied:
+      self._xnor_speed_limit_source = "vision_uk_lower_candidate"
+    else:
+      self._xnor_speed_limit_source = "tesla_map" if speed_limit_ms > 0.0 else ("das_fallback" if speed_limit_ms_das > 0.0 else "none")
 
     if self._tinkla.adjust_acc_with_speed_limit and (self._param_frame % 100 == 0):
       try:
@@ -739,6 +823,9 @@ class CarState(CarStateBase):
           f"speedLimit={float(getattr(self, 'speed_limit_ms', 0.0))*conv:.1f} das={float(getattr(self, 'speed_limit_ms_das', 0.0))*conv:.1f} "
           f"vision={float(getattr(self, '_vision_speed_limit_ms', 0.0))*conv:.1f} "
           f"visionConf={float(getattr(self, '_vision_speed_limit_confidence', 0.0)):.2f} "
+          f"visionCandidate={float(getattr(self, '_vision_speed_limit_candidate_ms', 0.0))*conv:.1f} "
+          f"visionCandidateConf={float(getattr(self, '_vision_speed_limit_candidate_confidence', 0.0)):.2f} "
+          f"visionLatched={float(getattr(self, '_vision_lower_latched_ms', 0.0))*conv:.1f} "
           f"slSrc={str(getattr(self, '_xnor_speed_limit_source', 'none'))} "
           f"raw(gps_u={gps_units}, gps_mpp={gps_mpp}, rd_sign={rd_sign}, rd_base_mps={rd_base_mps}, map_type={map_type}, das_mph={das_mph})"
         )
