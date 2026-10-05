@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.2-UK
+# XNOR Vision Speed Limit V1.3-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,8 +29,9 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# National Speed Limit and non-numeric restrictions are intentionally not
-# handled in V1.2 with scoped mapd road context.
+# V1.3 hardens National Speed Limit recognition after real-drive false
+# positives: stricter sign geometry, conservative map resolution, three-read
+# confirmation for NSL, and fresh tracker timestamps after detector inference.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -63,6 +64,7 @@ MIN_CONFIRMED_CONFIDENCE = 0.18
 HIGHER_RELEASE_CONFIDENCE = 0.55
 INITIAL_REQUIRED_READS = 2
 CHANGE_REQUIRED_READS = 2
+NATIONAL_REQUIRED_READS = 3
 HIGHER_RELEASE_REQUIRED_READS = 3
 MAX_PROPOSALS = 8
 MAX_BOX_AREA_RATIO = 0.18
@@ -72,7 +74,7 @@ DETECTOR_INPUT_SIZE = 640
 NATIONAL_SCAN_MAX_WIDTH = 960
 NATIONAL_HOUGH_MIN_RADIUS = 7
 NATIONAL_HOUGH_MAX_RADIUS_RATIO = 0.09
-NATIONAL_MIN_SCORE = 0.68
+NATIONAL_MIN_SCORE = 0.78
 
 SUPPORTED_UK_LIMITS_MPH = frozenset((20, 30, 40, 50, 60, 70))
 SPEED_LIMIT_CLASSES = {
@@ -177,7 +179,7 @@ class SpeedLimitVisionUK:
     self._last_raw_log_at = now
     bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
     cloudlog.info(
-      f"[XNOR_VSL_V12UK] legacy={int(legacy_speed_mph)} "
+      f"[XNOR_VSL_V13UK] legacy={int(legacy_speed_mph)} "
       f"model={float(model_confidence):.3f} ring={float(ring_score):.3f} "
       f"ukValue={int(value_speed_mph)} valueConf={float(value_confidence):.3f} "
       f"combined={float(combined_confidence):.3f} decision={decision} bbox={bbox_text}"
@@ -185,7 +187,7 @@ class SpeedLimitVisionUK:
 
   def _log_temporal_candidate(self, detection: Detection, count: int, required: int, decision: str) -> None:
     cloudlog.info(
-      f"[XNOR_VSL_V12UK] candidate={int(detection.speed_limit_mph)} "
+      f"[XNOR_VSL_V13UK] candidate={int(detection.speed_limit_mph)} "
       f"legacy={int(detection.legacy_speed_mph)} model={float(detection.model_confidence):.3f} "
       f"ring={float(detection.ring_score):.3f} valueConf={float(detection.value_confidence):.3f} "
       f"combined={float(detection.confidence):.3f} count={int(count)}/{int(required)} "
@@ -204,7 +206,7 @@ class SpeedLimitVisionUK:
     except Exception:
       pass
     self._set_status(f"UK vision: {speed_limit_mph} mph ({confidence * 100.0:.0f}%)")
-    cloudlog.info(f"[XNOR_VSL_V12UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
+    cloudlog.info(f"[XNOR_VSL_V13UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
 
   def _publish_lower_candidate(self, detection: Detection) -> None:
     """Publish an accepted sign as a provisional lower-only candidate.
@@ -222,7 +224,7 @@ class SpeedLimitVisionUK:
     except Exception:
       pass
     cloudlog.info(
-      f"[XNOR_VSL_V12UK] lower_candidate={int(detection.speed_limit_mph)}mph "
+      f"[XNOR_VSL_V13UK] lower_candidate={int(detection.speed_limit_mph)}mph "
       f"confidence={float(detection.confidence):.3f} source={detection.source}"
     )
 
@@ -236,7 +238,7 @@ class SpeedLimitVisionUK:
     except Exception:
       pass
     if had_candidate:
-      cloudlog.info(f"[XNOR_VSL_V12UK] clear lower candidate reason={reason}")
+      cloudlog.info(f"[XNOR_VSL_V13UK] clear lower candidate reason={reason}")
 
   def _refresh_publish_timestamp(self) -> None:
     if self.published_speed_limit_mph <= 0:
@@ -267,7 +269,7 @@ class SpeedLimitVisionUK:
       self._clear_lower_candidate(reason)
     self._set_status(f"UK vision: scanning ({reason})")
     if old > 0:
-      cloudlog.info(f"[XNOR_VSL_V12UK] clear previous={old}mph reason={reason}")
+      cloudlog.info(f"[XNOR_VSL_V13UK] clear previous={old}mph reason={reason}")
 
   @staticmethod
   def _sha256_file(path: Path) -> str:
@@ -281,7 +283,7 @@ class SpeedLimitVisionUK:
     """Import system cv2, or activate the pinned ARM64 wheel carried by V1-UK."""
     try:
       import cv2
-      cloudlog.info(f"[XNOR_VSL_V12UK] using system OpenCV {getattr(cv2, '__version__', 'unknown')}")
+      cloudlog.info(f"[XNOR_VSL_V13UK] using system OpenCV {getattr(cv2, '__version__', 'unknown')}")
       return cv2
     except ModuleNotFoundError:
       pass
@@ -321,7 +323,7 @@ class SpeedLimitVisionUK:
 
     import cv2
     cloudlog.info(
-      f"[XNOR_VSL_V12UK] using vendored OpenCV {getattr(cv2, '__version__', 'unknown')} "
+      f"[XNOR_VSL_V13UK] using vendored OpenCV {getattr(cv2, '__version__', 'unknown')} "
       f"from {OPENCV_RUNTIME_DIR}"
     )
     return cv2
@@ -344,13 +346,13 @@ class SpeedLimitVisionUK:
     except Exception as exc:
       self.runtime_error = f"OpenCV/VisionIPC unavailable: {type(exc).__name__}: {exc}"
       self._set_status(self.runtime_error)
-      cloudlog.exception("[XNOR_VSL_V12UK] runtime dependency unavailable")
+      cloudlog.exception("[XNOR_VSL_V13UK] runtime dependency unavailable")
       return False
 
     if not MODEL_PATH.is_file():
       self.runtime_error = f"Vision model missing: {MODEL_PATH.name}"
       self._set_status(self.runtime_error)
-      cloudlog.error(f"[XNOR_VSL_V12UK] {self.runtime_error}")
+      cloudlog.error(f"[XNOR_VSL_V13UK] {self.runtime_error}")
       return False
 
     try:
@@ -360,13 +362,13 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.2: ready")
-      cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
+      self._set_status("UK vision V1.3: ready")
+      cloudlog.info(f"[XNOR_VSL_V13UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
       self.runtime_error = f"Vision model load failed: {type(exc).__name__}"
       self._set_status(self.runtime_error)
-      cloudlog.exception("[XNOR_VSL_V12UK] model load failed")
+      cloudlog.exception("[XNOR_VSL_V13UK] model load failed")
       return False
 
   def _disconnect_camera(self) -> None:
@@ -525,7 +527,13 @@ class SpeedLimitVisionUK:
     if "freeway" in context and motorway_ref:
       return 70, "motorway"
 
-    if "freeway" not in context and not bool(one_way) and lane_count <= 3:
+    # V1.3: missing lane metadata is not evidence of a single carriageway.
+    # Accept lane_count=0 only when OSM supplied a non-motorway road reference.
+    # This blocks the observed false-positive context:
+    #   mapContext=city oneWay=0 lanes=0 ref=
+    non_motorway_ref = any(ref and not (len(ref) >= 2 and ref[0] == "M" and ref[1].isdigit()) for ref in refs)
+    single_carriageway_metadata = (1 <= lane_count <= 3) or (lane_count == 0 and non_motorway_ref)
+    if "freeway" not in context and not bool(one_way) and not motorway_ref and single_carriageway_metadata:
       return 60, "single_carriageway"
 
     return 0, "unresolved"
@@ -634,7 +642,7 @@ class SpeedLimitVisionUK:
       if now - self._last_national_log_at >= 0.5:
         bbox_text = ",".join(str(int(v)) for v in best.bbox) if best.bbox is not None else "none"
         cloudlog.info(
-          f"[XNOR_VSL_V12UK] national=1 score={best.confidence:.3f} "
+          f"[XNOR_VSL_V13UK] national=1 score={best.confidence:.3f} "
           f"mapClass={road_class} mapContext={context} oneWay={int(one_way)} lanes={lanes} ref={way_ref} "
           f"resolved={best.speed_limit_mph}mph bbox={bbox_text}"
         )
@@ -688,7 +696,7 @@ class SpeedLimitVisionUK:
         last_frame_at=float(now),
       )
       cloudlog.info(
-        f"[XNOR_VSL_V12UK] track_start source={self.track.source} "
+        f"[XNOR_VSL_V13UK] track_start source={self.track.source} "
         f"speed={self.track.speed_limit_mph}mph features={len(points)}"
       )
     except Exception:
@@ -697,7 +705,7 @@ class SpeedLimitVisionUK:
   def _clear_track(self, reason: str) -> None:
     if self.track is not None:
       cloudlog.info(
-        f"[XNOR_VSL_V12UK] track_clear source={self.track.source} "
+        f"[XNOR_VSL_V13UK] track_clear source={self.track.source} "
         f"speed={self.track.speed_limit_mph}mph reason={reason}"
       )
     self.track = None
@@ -826,7 +834,7 @@ class SpeedLimitVisionUK:
 
     track.failed_reads = 0
     cloudlog.info(
-      f"[XNOR_VSL_V12UK] track_read source={detection.source} "
+      f"[XNOR_VSL_V13UK] track_read source={detection.source} "
       f"speed={detection.speed_limit_mph}mph confidence={detection.confidence:.3f}"
     )
     return detection
@@ -849,7 +857,7 @@ class SpeedLimitVisionUK:
     try:
       predictions = np.squeeze(self.net.forward())
     except Exception:
-      cloudlog.exception("[XNOR_VSL_V12UK] detector forward failed")
+      cloudlog.exception("[XNOR_VSL_V13UK] detector forward failed")
       return None
 
     if predictions.ndim != 2:
@@ -955,19 +963,23 @@ class SpeedLimitVisionUK:
     count = counts.get(detection.speed_limit_mph, 0)
     confs = [x.confidence for x in self.history if x.speed_limit_mph == detection.speed_limit_mph]
     best_conf = max(confs) if confs else 0.0
+    is_national = detection.source.startswith("national")
+    initial_required = NATIONAL_REQUIRED_READS if is_national else INITIAL_REQUIRED_READS
+    change_required = NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS
+
     if best_conf < MIN_CONFIRMED_CONFIDENCE:
-      self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "confidence_reject")
+      self._log_temporal_candidate(detection, count, initial_required, "confidence_reject")
       self._set_status(f"UK candidate: {detection.speed_limit_mph} mph")
       return
 
     current = self.published_speed_limit_mph
     if current <= 0:
-      if count >= INITIAL_REQUIRED_READS:
-        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "publish")
+      if count >= initial_required:
+        self._log_temporal_candidate(detection, count, initial_required, "publish")
         self._publish(detection.speed_limit_mph, best_conf)
       else:
-        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "waiting")
-        self._set_status(f"UK candidate: {detection.speed_limit_mph} mph ({count}/{INITIAL_REQUIRED_READS})")
+        self._log_temporal_candidate(detection, count, initial_required, "waiting")
+        self._set_status(f"UK candidate: {detection.speed_limit_mph} mph ({count}/{initial_required})")
       return
 
     if detection.speed_limit_mph == current:
@@ -977,12 +989,12 @@ class SpeedLimitVisionUK:
       return
 
     if detection.speed_limit_mph < current:
-      if count >= CHANGE_REQUIRED_READS:
-        self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "publish_lower")
+      if count >= change_required:
+        self._log_temporal_candidate(detection, count, change_required, "publish_lower")
         self._publish(detection.speed_limit_mph, best_conf)
       else:
-        self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "waiting_lower")
-        self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{CHANGE_REQUIRED_READS})")
+        self._log_temporal_candidate(detection, count, change_required, "waiting_lower")
+        self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
     # V1 never uses a higher vision value as a new speed target. A strongly
@@ -1059,7 +1071,9 @@ class SpeedLimitVisionUK:
       # frame of the same physical sign and therefore counts toward 2/2 or 3/3.
       tracked_detection = None
       if track_due:
-        tracked_detection = self._track_detection(frame_bgr, now)
+        # recv() and detector work can be expensive; use a fresh timestamp for
+        # track age rather than the loop timestamp captured before camera I/O.
+        tracked_detection = self._track_detection(frame_bgr, time.monotonic())
         if tracked_detection is not None:
           self._update_detection(tracked_detection)
 
@@ -1067,11 +1081,13 @@ class SpeedLimitVisionUK:
       # temporal read. If tracking succeeded, wait for the next frame.
       detection = None
       if tracked_detection is None and detector_due:
-        self.last_inference_at = now
         detection = self._detect(frame_bgr)
+        # Stamp the completed inference. V1.2 stamped before inference, so a
+        # slow detector pass could consume the entire 1.5 s track lifetime.
+        self.last_inference_at = time.monotonic()
         if detection is not None:
           self._update_detection(detection)
-          self._start_track(frame_bgr, detection, now)
+          self._start_track(frame_bgr, detection, self.last_inference_at)
 
       if tracked_detection is None and detection is None:
         if self.published_speed_limit_mph > 0:
