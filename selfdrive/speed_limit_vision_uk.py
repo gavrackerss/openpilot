@@ -206,6 +206,38 @@ class SpeedLimitVisionUK:
     self._set_status(f"UK vision: {speed_limit_mph} mph ({confidence * 100.0:.0f}%)")
     cloudlog.info(f"[XNOR_VSL_V12UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
 
+  def _publish_lower_candidate(self, detection: Detection) -> None:
+    """Publish an accepted sign as a provisional lower-only candidate.
+
+    CarState decides whether it is actually lower than the current trusted
+    Tesla/map/DAS limit. If it is not lower, this candidate can never raise the
+    effective limit.
+    """
+    now = time.monotonic()
+    self.last_candidate_at = now
+    try:
+      self.params.put_nonblocking("VisionSpeedLimitCandidate", float(detection.speed_limit_mph) * CV.MPH_TO_MS)
+      self.params.put_nonblocking("VisionSpeedLimitCandidateConfidence", float(detection.confidence))
+      self.params.put_nonblocking("VisionSpeedLimitCandidateTimestamp", float(now))
+    except Exception:
+      pass
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] lower_candidate={int(detection.speed_limit_mph)}mph "
+      f"confidence={float(detection.confidence):.3f} source={detection.source}"
+    )
+
+  def _clear_lower_candidate(self, reason: str) -> None:
+    had_candidate = self.last_candidate_at > 0.0
+    self.last_candidate_at = 0.0
+    try:
+      self.params.put_nonblocking("VisionSpeedLimitCandidate", 0.0)
+      self.params.put_nonblocking("VisionSpeedLimitCandidateConfidence", 0.0)
+      self.params.put_nonblocking("VisionSpeedLimitCandidateTimestamp", 0.0)
+    except Exception:
+      pass
+    if had_candidate:
+      cloudlog.info(f"[XNOR_VSL_V12UK] clear lower candidate reason={reason}")
+
   def _refresh_publish_timestamp(self) -> None:
     if self.published_speed_limit_mph <= 0:
       return
@@ -228,6 +260,7 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitTimestamp", 0.0)
     except Exception:
       pass
+    self._clear_lower_candidate(reason)
     self._set_status(f"UK vision: scanning ({reason})")
     if old > 0:
       cloudlog.info(f"[XNOR_VSL_V12UK] clear previous={old}mph reason={reason}")
