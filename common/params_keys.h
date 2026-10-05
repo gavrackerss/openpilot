@@ -171,5 +171,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionSpeedLimitConfidence", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
     {"VisionSpeedLimitTimestamp", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
     {"VisionSpeedLimitStatus", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, STRING, ""}},
+    {"VisionSpeedLimitCandidate", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
+    {"VisionSpeedLimitCandidateConfidence", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
+    {"VisionSpeedLimitCandidateTimestamp", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, FLOAT, "0.0"}},
     {"MapdSettings", {PERSISTENT, JSON}},
 };
