@@ -132,6 +132,7 @@ class SpeedLimitVisionUK:
     self.history: deque[HistoryEntry] = deque()
     self.published_speed_limit_mph = 0
     self.published_confidence = 0.0
+    self.published_source = "none"
     self.last_detection_at = 0.0
     self.last_inference_at = -1e9
     self.followup_until = 0.0
@@ -192,19 +193,25 @@ class SpeedLimitVisionUK:
       f"source={detection.source} decision={decision}"
     )
 
-  def _publish(self, speed_limit_mph: int, confidence: float) -> None:
+  def _publish(self, speed_limit_mph: int, confidence: float, source: str = "numeric") -> None:
     now = time.monotonic()
     self.published_speed_limit_mph = int(speed_limit_mph)
     self.published_confidence = float(confidence)
+    self.published_source = str(source or "numeric")
     self.last_detection_at = now
+    is_national = self.published_source.startswith("national")
     try:
       self.params.put_nonblocking("VisionSpeedLimit", float(speed_limit_mph) * CV.MPH_TO_MS)
       self.params.put_nonblocking("VisionSpeedLimitConfidence", float(confidence))
       self.params.put_nonblocking("VisionSpeedLimitTimestamp", float(now))
+      self.params.put_bool_nonblocking("VisionSpeedLimitNational", bool(is_national))
     except Exception:
       pass
     self._set_status(f"UK vision: {speed_limit_mph} mph ({confidence * 100.0:.0f}%)")
-    cloudlog.info(f"[XNOR_VSL_V12UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] publish={speed_limit_mph}mph confidence={confidence:.3f} "
+      f"source={self.published_source} national={int(is_national)}"
+    )
 
   def _publish_lower_candidate(self, detection: Detection) -> None:
     """Publish an accepted sign as a provisional lower-only candidate.
@@ -252,12 +259,14 @@ class SpeedLimitVisionUK:
     old = self.published_speed_limit_mph
     self.published_speed_limit_mph = 0
     self.published_confidence = 0.0
+    self.published_source = "none"
     self.last_detection_at = 0.0
     self.history.clear()
     try:
       self.params.put_nonblocking("VisionSpeedLimit", 0.0)
       self.params.put_nonblocking("VisionSpeedLimitConfidence", 0.0)
       self.params.put_nonblocking("VisionSpeedLimitTimestamp", 0.0)
+      self.params.put_bool_nonblocking("VisionSpeedLimitNational", False)
     except Exception:
       pass
     # A newly-seen lower candidate may be fresher than an older confirmed
@@ -964,7 +973,7 @@ class SpeedLimitVisionUK:
     if current <= 0:
       if count >= INITIAL_REQUIRED_READS:
         self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "publish")
-        self._publish(detection.speed_limit_mph, best_conf)
+        self._publish(detection.speed_limit_mph, best_conf, detection.source)
       else:
         self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "waiting")
         self._set_status(f"UK candidate: {detection.speed_limit_mph} mph ({count}/{INITIAL_REQUIRED_READS})")
@@ -972,22 +981,36 @@ class SpeedLimitVisionUK:
 
     if detection.speed_limit_mph == current:
       self._log_temporal_candidate(detection, count, 1, "refresh")
-      self._refresh_publish_timestamp()
-      self._set_status(f"UK vision: {current} mph ({best_conf * 100.0:.0f}%)")
+      if detection.source.startswith("national") and not self.published_source.startswith("national"):
+        self._publish(detection.speed_limit_mph, best_conf, detection.source)
+      else:
+        self._refresh_publish_timestamp()
+        self._set_status(f"UK vision: {current} mph ({best_conf * 100.0:.0f}%)")
       return
 
     if detection.speed_limit_mph < current:
       if count >= CHANGE_REQUIRED_READS:
         self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "publish_lower")
-        self._publish(detection.speed_limit_mph, best_conf)
+        self._publish(detection.speed_limit_mph, best_conf, detection.source)
       else:
         self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "waiting_lower")
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{CHANGE_REQUIRED_READS})")
       return
 
-    # V1 never uses a higher vision value as a new speed target. A strongly
-    # confirmed higher sign only releases the existing lower vision override;
-    # Tesla/map speed-limit logic then becomes authoritative again.
+    # A tracked UK national-limit sign is different from an ordinary higher
+    # numeric sign: mapd has independently resolved its legal value from road
+    # class, so two consistent visual reads may establish 60/70 directly.
+    if detection.source.startswith("national"):
+      if count >= INITIAL_REQUIRED_READS and best_conf >= NATIONAL_MIN_SCORE:
+        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "publish_national_higher")
+        self._publish(detection.speed_limit_mph, best_conf, detection.source)
+      else:
+        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "waiting_national_higher")
+      return
+
+    # Ordinary higher numeric signs remain conservative: they release the
+    # existing lower vision override after three strong reads, returning
+    # authority to Tesla/map rather than directly commanding an increase.
     if count >= HIGHER_RELEASE_REQUIRED_READS and best_conf >= HIGHER_RELEASE_CONFIDENCE:
       self._log_temporal_candidate(detection, count, HIGHER_RELEASE_REQUIRED_READS, "release_higher")
       self._clear_publish(f"confirmed higher sign {detection.speed_limit_mph} mph")
