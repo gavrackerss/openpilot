@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
+import importlib
 import os
+import shutil
+import sys
 import time
+import zipfile
 from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +32,17 @@ from openpilot.common.swaglog import cloudlog
 # handled in V1.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
+
+# The comma/AGNOS Python environment does not automatically re-resolve
+# pyproject.toml when a changed-files overlay is installed. Carry a pinned
+# official ARM64 opencv-python-headless wheel with V1-UK and unpack it once to
+# persistent media when cv2 is not already available.
+OPENCV_VERSION = "4.13.0.92"
+OPENCV_WHEEL_NAME = "opencv_python_headless-4.13.0.92-cp37-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl"
+OPENCV_WHEEL_SHA256 = "5c8cfc8e87ed452b5cecb9419473ee5560a989859fe1d10d1ce11ae87b09a2cb"
+OPENCV_WHEEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_runtime" / OPENCV_WHEEL_NAME
+OPENCV_RUNTIME_DIR = Path("/data/media/0/xnor_speed_limit_runtime") / f"opencv-{OPENCV_VERSION}-aarch64"
+OPENCV_RUNTIME_MARKER = OPENCV_RUNTIME_DIR / ".xnor_vsl_opencv_complete"
 
 RUNTIME_HZ = 20
 NORMAL_INFERENCE_INTERVAL = 0.40
@@ -182,9 +198,66 @@ class SpeedLimitVisionUK:
     if old > 0:
       cloudlog.info(f"[XNOR_VSL_V1UK] clear previous={old}mph reason={reason}")
 
-  def _load_runtime(self) -> bool:
+  @staticmethod
+  def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+      for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+  def _load_cv2(self):
+    """Import system cv2, or activate the pinned ARM64 wheel carried by V1-UK."""
     try:
       import cv2
+      cloudlog.info(f"[XNOR_VSL_V1UK] using system OpenCV {getattr(cv2, '__version__', 'unknown')}")
+      return cv2
+    except ModuleNotFoundError:
+      pass
+
+    if not OPENCV_WHEEL_PATH.is_file():
+      raise FileNotFoundError(f"vendored OpenCV wheel missing: {OPENCV_WHEEL_PATH}")
+
+    wheel_hash = self._sha256_file(OPENCV_WHEEL_PATH)
+    if wheel_hash != OPENCV_WHEEL_SHA256:
+      raise RuntimeError(f"vendored OpenCV wheel checksum mismatch: {wheel_hash}")
+
+    marker_ok = False
+    try:
+      marker_ok = OPENCV_RUNTIME_MARKER.read_text().strip() == OPENCV_WHEEL_SHA256
+    except (FileNotFoundError, OSError):
+      pass
+
+    if not marker_ok:
+      tmp_dir = OPENCV_RUNTIME_DIR.with_name(OPENCV_RUNTIME_DIR.name + ".tmp")
+      shutil.rmtree(tmp_dir, ignore_errors=True)
+      tmp_dir.parent.mkdir(parents=True, exist_ok=True)
+      tmp_dir.mkdir(parents=True, exist_ok=True)
+      try:
+        with zipfile.ZipFile(OPENCV_WHEEL_PATH, "r") as zf:
+          zf.extractall(tmp_dir)
+        (tmp_dir / ".xnor_vsl_opencv_complete").write_text(OPENCV_WHEEL_SHA256)
+        shutil.rmtree(OPENCV_RUNTIME_DIR, ignore_errors=True)
+        os.replace(tmp_dir, OPENCV_RUNTIME_DIR)
+      except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    runtime_path = str(OPENCV_RUNTIME_DIR)
+    if runtime_path not in sys.path:
+      sys.path.insert(0, runtime_path)
+    importlib.invalidate_caches()
+
+    import cv2
+    cloudlog.info(
+      f"[XNOR_VSL_V1UK] using vendored OpenCV {getattr(cv2, '__version__', 'unknown')} "
+      f"from {OPENCV_RUNTIME_DIR}"
+    )
+    return cv2
+
+  def _load_runtime(self) -> bool:
+    try:
+      cv2 = self._load_cv2()
       from cereal import messaging
       from msgq.visionipc import VisionIpcClient, VisionStreamType
 
@@ -198,7 +271,7 @@ class SpeedLimitVisionUK:
       except Exception:
         pass
     except Exception as exc:
-      self.runtime_error = f"OpenCV/VisionIPC unavailable: {type(exc).__name__}"
+      self.runtime_error = f"OpenCV/VisionIPC unavailable: {type(exc).__name__}: {exc}"
       self._set_status(self.runtime_error)
       cloudlog.exception("[XNOR_VSL_V1UK] runtime dependency unavailable")
       return False
