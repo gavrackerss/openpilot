@@ -18,9 +18,10 @@ from openpilot.common.constants import CV
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.speed_limit_uk_reader import UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1-UK
+# XNOR Vision Speed Limit V1.1-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,7 +30,7 @@ from openpilot.common.swaglog import cloudlog
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
 # National Speed Limit and non-numeric restrictions are intentionally not
-# handled in V1.
+# handled in V1.1.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -82,6 +83,8 @@ class Detection:
   confidence: float
   model_confidence: float = 0.0
   ring_score: float = 0.0
+  value_confidence: float = 0.0
+  legacy_speed_mph: int = 0
   bbox: tuple[int, int, int, int] | None = None
 
 
@@ -99,6 +102,7 @@ class SpeedLimitVisionUK:
     self.VisionIpcClient = None
     self.VisionStreamType = None
     self.net = None
+    self.value_reader = None
     self.client = None
     self.stream_type = None
     self.stream_name = ""
@@ -125,16 +129,19 @@ class SpeedLimitVisionUK:
     except Exception:
       pass
 
-  def _log_raw_proposal(self, decision: str, speed_limit_mph: int, model_confidence: float,
-                        ring_score: float, combined_confidence: float = 0.0,
+  def _log_raw_proposal(self, decision: str, legacy_speed_mph: int, model_confidence: float,
+                        ring_score: float, value_speed_mph: int = 0, value_confidence: float = 0.0,
+                        combined_confidence: float = 0.0,
                         bbox: tuple[int, int, int, int] | None = None) -> None:
     """Log detector/ring-gate state without flooding rlogs with identical frames."""
     now = time.monotonic()
     signature = (
       str(decision),
-      int(speed_limit_mph),
+      int(legacy_speed_mph),
+      int(value_speed_mph),
       round(float(model_confidence), 2),
       round(float(ring_score), 2),
+      round(float(value_confidence), 2),
       round(float(combined_confidence), 2),
     )
     # Rejected raw proposals can repeat every inference. Log a changed proposal
@@ -145,15 +152,17 @@ class SpeedLimitVisionUK:
     self._last_raw_log_at = now
     bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
     cloudlog.info(
-      f"[XNOR_VSL_V1UK] proposal={int(speed_limit_mph)} "
+      f"[XNOR_VSL_V11UK] legacy={int(legacy_speed_mph)} "
       f"model={float(model_confidence):.3f} ring={float(ring_score):.3f} "
+      f"ukValue={int(value_speed_mph)} valueConf={float(value_confidence):.3f} "
       f"combined={float(combined_confidence):.3f} decision={decision} bbox={bbox_text}"
     )
 
   def _log_temporal_candidate(self, detection: Detection, count: int, required: int, decision: str) -> None:
     cloudlog.info(
-      f"[XNOR_VSL_V1UK] candidate={int(detection.speed_limit_mph)} "
-      f"model={float(detection.model_confidence):.3f} ring={float(detection.ring_score):.3f} "
+      f"[XNOR_VSL_V11UK] candidate={int(detection.speed_limit_mph)} "
+      f"legacy={int(detection.legacy_speed_mph)} model={float(detection.model_confidence):.3f} "
+      f"ring={float(detection.ring_score):.3f} valueConf={float(detection.value_confidence):.3f} "
       f"combined={float(detection.confidence):.3f} count={int(count)}/{int(required)} "
       f"decision={decision}"
     )
@@ -170,7 +179,7 @@ class SpeedLimitVisionUK:
     except Exception:
       pass
     self._set_status(f"UK vision: {speed_limit_mph} mph ({confidence * 100.0:.0f}%)")
-    cloudlog.info(f"[XNOR_VSL_V1UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
+    cloudlog.info(f"[XNOR_VSL_V11UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
 
   def _refresh_publish_timestamp(self) -> None:
     if self.published_speed_limit_mph <= 0:
@@ -196,7 +205,7 @@ class SpeedLimitVisionUK:
       pass
     self._set_status(f"UK vision: scanning ({reason})")
     if old > 0:
-      cloudlog.info(f"[XNOR_VSL_V1UK] clear previous={old}mph reason={reason}")
+      cloudlog.info(f"[XNOR_VSL_V11UK] clear previous={old}mph reason={reason}")
 
   @staticmethod
   def _sha256_file(path: Path) -> str:
@@ -210,7 +219,7 @@ class SpeedLimitVisionUK:
     """Import system cv2, or activate the pinned ARM64 wheel carried by V1-UK."""
     try:
       import cv2
-      cloudlog.info(f"[XNOR_VSL_V1UK] using system OpenCV {getattr(cv2, '__version__', 'unknown')}")
+      cloudlog.info(f"[XNOR_VSL_V11UK] using system OpenCV {getattr(cv2, '__version__', 'unknown')}")
       return cv2
     except ModuleNotFoundError:
       pass
@@ -250,7 +259,7 @@ class SpeedLimitVisionUK:
 
     import cv2
     cloudlog.info(
-      f"[XNOR_VSL_V1UK] using vendored OpenCV {getattr(cv2, '__version__', 'unknown')} "
+      f"[XNOR_VSL_V11UK] using vendored OpenCV {getattr(cv2, '__version__', 'unknown')} "
       f"from {OPENCV_RUNTIME_DIR}"
     )
     return cv2
@@ -273,27 +282,28 @@ class SpeedLimitVisionUK:
     except Exception as exc:
       self.runtime_error = f"OpenCV/VisionIPC unavailable: {type(exc).__name__}: {exc}"
       self._set_status(self.runtime_error)
-      cloudlog.exception("[XNOR_VSL_V1UK] runtime dependency unavailable")
+      cloudlog.exception("[XNOR_VSL_V11UK] runtime dependency unavailable")
       return False
 
     if not MODEL_PATH.is_file():
       self.runtime_error = f"Vision model missing: {MODEL_PATH.name}"
       self._set_status(self.runtime_error)
-      cloudlog.error(f"[XNOR_VSL_V1UK] {self.runtime_error}")
+      cloudlog.error(f"[XNOR_VSL_V11UK] {self.runtime_error}")
       return False
 
     try:
       self.net = self.cv2.dnn.readNetFromONNX(str(MODEL_PATH))
       self.net.setPreferableBackend(self.cv2.dnn.DNN_BACKEND_OPENCV)
       self.net.setPreferableTarget(self.cv2.dnn.DNN_TARGET_CPU)
+      self.value_reader = UKSpeedValueReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision: ready")
-      cloudlog.info(f"[XNOR_VSL_V1UK] loaded model {MODEL_PATH}")
+      self._set_status("UK vision V1.1: ready")
+      cloudlog.info(f"[XNOR_VSL_V11UK] loaded proposal model {MODEL_PATH}; UK crop reader active")
       return True
     except Exception as exc:
       self.runtime_error = f"Vision model load failed: {type(exc).__name__}"
       self._set_status(self.runtime_error)
-      cloudlog.exception("[XNOR_VSL_V1UK] model load failed")
+      cloudlog.exception("[XNOR_VSL_V11UK] model load failed")
       return False
 
   def _disconnect_camera(self) -> None:
@@ -447,7 +457,7 @@ class SpeedLimitVisionUK:
     try:
       predictions = np.squeeze(self.net.forward())
     except Exception:
-      cloudlog.exception("[XNOR_VSL_V1UK] detector forward failed")
+      cloudlog.exception("[XNOR_VSL_V11UK] detector forward failed")
       return None
 
     if predictions.ndim != 2:
@@ -496,26 +506,47 @@ class SpeedLimitVisionUK:
       if uk_score <= 0.0:
         continue
 
-      confidence = float(np.clip(model_conf * 0.72 + uk_score * 0.28, 0.0, 0.99))
-      candidates.append(Detection(speed_mph, confidence, model_conf, uk_score, bbox))
+      value_read = self.value_reader.read(crop) if self.value_reader is not None else None
+      if value_read is None:
+        self._log_raw_proposal(
+          "value_reject", speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
+        )
+        continue
+
+      final_speed_mph = int(value_read.speed_limit_mph)
+      value_conf = float(value_read.confidence)
+      confidence = float(np.clip(
+        value_conf * 0.60 +
+        uk_score * 0.30 +
+        model_conf * 0.10,
+        0.0,
+        0.99,
+      ))
+      self._log_raw_proposal(
+        "value_accept", speed_mph, model_conf, uk_score,
+        final_speed_mph, value_conf, confidence, bbox,
+      )
+      candidates.append(Detection(
+        final_speed_mph,
+        confidence,
+        model_conf,
+        uk_score,
+        value_conf,
+        speed_mph,
+        bbox,
+      ))
 
     if not candidates:
       if raw_supported:
-        model_conf, speed_mph, uk_score, bbox = max(raw_supported, key=lambda item: item[0])
-        self._log_raw_proposal("ring_reject", speed_mph, model_conf, uk_score, 0.0, bbox)
+        model_conf, legacy_speed_mph, uk_score, bbox = max(raw_supported, key=lambda item: item[0])
+        if uk_score <= 0.0:
+          self._log_raw_proposal(
+            "ring_reject", legacy_speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
+          )
       return None
 
     candidates.sort(key=lambda d: d.confidence, reverse=True)
-    best = candidates[0]
-    self._log_raw_proposal(
-      "ring_accept",
-      best.speed_limit_mph,
-      best.model_confidence,
-      best.ring_score,
-      best.confidence,
-      best.bbox,
-    )
-    return best
+    return candidates[0]
 
   def _prune_history(self, now: float) -> None:
     while self.history and now - self.history[0].created_at > HISTORY_SECONDS:
