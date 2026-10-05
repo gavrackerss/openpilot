@@ -189,7 +189,7 @@ class SpeedLimitVisionUK:
       f"legacy={int(detection.legacy_speed_mph)} model={float(detection.model_confidence):.3f} "
       f"ring={float(detection.ring_score):.3f} valueConf={float(detection.value_confidence):.3f} "
       f"combined={float(detection.confidence):.3f} count={int(count)}/{int(required)} "
-      f"decision={decision}"
+      f"source={detection.source} decision={decision}"
     )
 
   def _publish(self, speed_limit_mph: int, confidence: float) -> None:
@@ -915,7 +915,7 @@ class SpeedLimitVisionUK:
           self._log_raw_proposal(
             "ring_reject", legacy_speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
           )
-      return None
+      return self._detect_national_sign(frame_bgr)
 
     candidates.sort(key=lambda d: d.confidence, reverse=True)
     return candidates[0]
@@ -926,6 +926,7 @@ class SpeedLimitVisionUK:
 
   def _update_detection(self, detection: Detection) -> None:
     now = time.monotonic()
+    self._publish_lower_candidate(detection)
     self.followup_until = max(self.followup_until, now + FOLLOWUP_WINDOW_SECONDS)
     self.history.append(HistoryEntry(detection.speed_limit_mph, detection.confidence, now))
     self._prune_history(now)
