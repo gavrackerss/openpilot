@@ -1000,43 +1000,66 @@ class SpeedLimitVisionUK:
       now = time.monotonic()
       mem = self._memory_usage_percent()
 
+      if self.last_candidate_at > 0.0 and now - self.last_candidate_at > PUBLISHED_HOLD_SECONDS:
+        self._clear_lower_candidate("stale")
+
+      if self.published_speed_limit_mph > 0 and now - self.last_detection_at > PUBLISHED_HOLD_SECONDS:
+        self._clear_publish("stale")
+
       if mem >= MEMORY_CRITICAL_PERCENT:
+        self._clear_track("memory")
         self._disconnect_camera()
         self._set_status(f"UK vision paused - memory {mem:.0f}%")
         rk.keep_time()
         continue
 
       if not self._connect_camera():
+        self._clear_track("camera")
         self._set_status("UK vision: waiting for camera")
         rk.keep_time()
         continue
 
-      interval = MEMORY_PRESSURE_INTERVAL if mem >= MEMORY_PRESSURE_PERCENT else NORMAL_INFERENCE_INTERVAL
+      detector_interval = MEMORY_PRESSURE_INTERVAL if mem >= MEMORY_PRESSURE_PERCENT else NORMAL_INFERENCE_INTERVAL
       if now < self.followup_until:
-        interval = max(FOLLOWUP_INFERENCE_INTERVAL, min(interval, NORMAL_INFERENCE_INTERVAL))
+        detector_interval = max(FOLLOWUP_INFERENCE_INTERVAL, min(detector_interval, NORMAL_INFERENCE_INTERVAL))
 
-      if now - self.last_inference_at < interval:
-        if self.published_speed_limit_mph > 0 and now - self.last_detection_at > PUBLISHED_HOLD_SECONDS:
-          self._clear_publish("stale")
+      detector_due = (now - self.last_inference_at) >= detector_interval
+      track_due = self.track is not None and (now - self.track.last_frame_at) >= TRACK_FRAME_INTERVAL
+      if not detector_due and not track_due:
         rk.keep_time()
         continue
 
       frame_bgr = self._receive_frame_bgr()
-      self.last_inference_at = now
       if frame_bgr is None:
         rk.keep_time()
         continue
 
-      detection = self._detect(frame_bgr)
-      if detection is not None:
-        self._update_detection(detection)
-      elif self.published_speed_limit_mph > 0:
-        if now - self.last_detection_at > PUBLISHED_HOLD_SECONDS:
-          self._clear_publish("stale")
-        else:
+      # Cheap optical-flow confirmation runs between expensive full-frame
+      # detector passes. A successful tracked read is a genuinely later camera
+      # frame of the same physical sign and therefore counts toward 2/2 or 3/3.
+      tracked_detection = None
+      if track_due:
+        tracked_detection = self._track_detection(frame_bgr, now)
+        if tracked_detection is not None:
+          self._update_detection(tracked_detection)
+
+      # Do not count a detector result from the same frame as an additional
+      # temporal read. If tracking succeeded, wait for the next frame.
+      detection = None
+      if tracked_detection is None and detector_due:
+        self.last_inference_at = now
+        detection = self._detect(frame_bgr)
+        if detection is not None:
+          self._update_detection(detection)
+          self._start_track(frame_bgr, detection, now)
+
+      if tracked_detection is None and detection is None:
+        if self.published_speed_limit_mph > 0:
           self._set_status(f"UK vision: holding {self.published_speed_limit_mph} mph")
-      else:
-        self._set_status(f"UK vision: scanning {self.stream_name}")
+        elif self.last_candidate_at > 0.0:
+          self._set_status("UK vision: provisional lower candidate active")
+        else:
+          self._set_status(f"UK vision: scanning {self.stream_name}")
 
       frame_bgr = None
       rk.keep_time()
