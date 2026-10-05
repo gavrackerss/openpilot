@@ -112,11 +112,50 @@ jobs:
           assert np.min(np.linalg.norm(centers - expected, axis=1)) < 35.0
           PY
 
+      - name: Test exact mapd national-limit resolver
+        run: |
+          python - <<'PY'
+          import ast
+          import pathlib
+
+          src = pathlib.Path("selfdrive/speed_limit_vision_uk.py").read_text()
+          tree = ast.parse(src)
+          fn = None
+          for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "SpeedLimitVisionUK":
+              for child in node.body:
+                if isinstance(child, ast.FunctionDef) and child.name == "_resolve_national_limit_from_mapd_values":
+                  fn = child
+                  break
+          assert fn is not None
+          fn.decorator_list = []
+          module = ast.Module(body=[fn], type_ignores=[])
+          ast.fix_missing_locations(module)
+          ns = {}
+          exec(compile(module, "<resolver>", "exec"), ns)
+          resolve = ns["_resolve_national_limit_from_mapd_values"]
+
+          cases = [
+            ((False, "freeway", True, 3, "M3"), (0, "map_unavailable")),
+            ((True, "freeway", True, 3, "M3"), (70, "motorway")),
+            ((True, "freeway", True, 4, "A34"), (0, "unresolved")),
+            ((True, "city", False, 2, "A272"), (60, "single_carriageway")),
+            ((True, "unknown", False, 2, "A31"), (60, "single_carriageway")),
+            ((True, "city", True, 2, "A27"), (0, "unresolved")),
+            ((True, "unknown", False, 4, "A34"), (0, "unresolved")),
+          ]
+          for args, expected in cases:
+            got = resolve(*args)
+            print(args, "->", got)
+            assert got == expected, (args, got, expected)
+          PY
+
       - name: Validate lower-candidate Params
         run: |
           grep -F '"VisionSpeedLimitCandidate"' common/params_keys.h
           grep -F '"VisionSpeedLimitCandidateConfidence"' common/params_keys.h
           grep -F '"VisionSpeedLimitCandidateTimestamp"' common/params_keys.h
+          grep -F 'vision_forced_lower = str(getattr(self, "_xnor_speed_limit_source", "")).startswith("vision_uk")' opendbc_repo/opendbc/car/tesla/carstate.py
 
       - name: Package changed-files overlay
         run: |
