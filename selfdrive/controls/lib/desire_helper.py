@@ -7,6 +7,7 @@ from cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.realtime import DT_MDL
+from openpilot.common.swaglog import cloudlog
 
 
 LaneChangeState = log.LaneChangeState
@@ -59,6 +60,8 @@ class DesireHelper:
     self._pre_lane_change_start_t: float | None = None
     self._v209_native_alc_owns_lane_changes = False
     self._v211_hybrid_native_ap = False
+    self._alc_gate_last_log_t = 0.0
+    self._alc_gate_prev_ready = True
 
   def _poll_tinkla_params(self) -> None:
     now = time.monotonic()
@@ -117,7 +120,21 @@ class DesireHelper:
     physical_one_blinker = carstate.leftBlinker != carstate.rightBlinker
     native_lkas = bool(getattr(carstate, 'stockLkas', False))
     op_lane_change_allowed = self._v211_op_lane_change_allowed(self._v211_hybrid_native_ap, native_lkas)
+    tesla_handover_ready = bool(
+      (not self._v211_hybrid_native_ap) or
+      bool(getattr(carstate, 'teslaAlcHandoverReady', False))
+    )
     one_blinker = bool(physical_one_blinker and op_lane_change_allowed)
+
+    if self._v211_hybrid_native_ap and tesla_handover_ready != bool(self._alc_gate_prev_ready):
+      cloudlog.warning(
+        f"[XNOR_ALC_MODEL_GATE] ready={int(tesla_handover_ready)} "
+        f"native_lkas={int(native_lkas)} "
+        f"eac={int(getattr(carstate, 'teslaEacStatus', 0))} "
+        f"error={int(getattr(carstate, 'teslaEacError', 0))} "
+        f"state={self.lane_change_state}"
+      )
+    self._alc_gate_prev_ready = tesla_handover_ready
     if not op_lane_change_allowed and self.lane_change_state != LaneChangeState.off:
       # Genuine native steering took ownership mid-request: cancel OP's model
       # desire instead of generating a second physical lane-change trajectory.
@@ -132,6 +149,27 @@ class DesireHelper:
     # ALC-in-progress (9/10) may take steering ownership downstream; the panda
     # tracking guard remains in force otherwise. No full-detent/availability spoof.
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
+
+    # V1.1 Hybrid ALC: if physical steering readiness disappears after the
+    # model has started a lane-change desire, terminate that desire immediately.
+    # prev_one_blinker below remains true while the stalk is held, so a fresh
+    # off->on indicator edge is required before another attempt.
+    hybrid_gate_abort = bool(
+      self._v211_hybrid_native_ap and
+      self.lane_change_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing) and
+      not tesla_handover_ready
+    )
+    if hybrid_gate_abort:
+      cloudlog.warning(
+        f"[XNOR_ALC_MODEL_GATE] abort_inflight=1 "
+        f"eac={int(getattr(carstate, 'teslaEacStatus', 0))} "
+        f"error={int(getattr(carstate, 'teslaEacError', 0))}"
+      )
+      self.lane_change_state = LaneChangeState.off
+      self.lane_change_direction = LaneChangeDirection.none
+      self._pre_lane_change_start_t = None
+      self.lane_change_timer = 0.0
+      self.lane_change_ll_prob = 1.0
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX:
       self.lane_change_state = LaneChangeState.off
@@ -163,9 +201,20 @@ class DesireHelper:
           self.lane_change_state = LaneChangeState.off
           self.lane_change_direction = LaneChangeDirection.none
           self._pre_lane_change_start_t = None
-        elif (torque_applied or auto_start) and not blindspot_detected:
+        elif (torque_applied or auto_start) and not blindspot_detected and tesla_handover_ready:
           self.lane_change_state = LaneChangeState.laneChangeStarting
           self._pre_lane_change_start_t = None
+        elif (torque_applied or auto_start) and not blindspot_detected and self._v211_hybrid_native_ap:
+          now = time.monotonic()
+          if now - self._alc_gate_last_log_t >= 1.0:
+            cloudlog.warning(
+              f"[XNOR_ALC_MODEL_GATE] waiting_epas=1 "
+              f"direction={self.lane_change_direction} "
+              f"eac={int(getattr(carstate, 'teslaEacStatus', 0))} "
+              f"error={int(getattr(carstate, 'teslaEacError', 0))} "
+              f"native_lkas={int(native_lkas)}"
+            )
+            self._alc_gate_last_log_t = now
 
       # LaneChangeState.laneChangeStarting
       elif self.lane_change_state == LaneChangeState.laneChangeStarting:

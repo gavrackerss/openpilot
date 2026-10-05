@@ -1406,6 +1406,7 @@ class CarController(CarControllerBase):
       self._hybrid_drop_frame = -1
       self._hybrid_drop_warmup_until_frame = -1
     CS._xnor_hybrid_epas_failed = bool(self._hybrid_coop_failed)
+    CS._xnor_hybrid_epas_rearm = bool(self._hybrid_coop_rearm)
     steer_inhibit = bool(steer_inhibit or self._hybrid_coop_failed)
 
     if op_enabled and (not bool(self._op_enabled_prev)):
