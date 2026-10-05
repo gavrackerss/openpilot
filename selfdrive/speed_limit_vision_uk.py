@@ -498,6 +498,319 @@ class SpeedLimitVisionUK:
     )
     return float(np.clip(score, 0.0, 1.0))
 
+  @staticmethod
+  def _resolve_national_limit_from_mapd_values(tile_loaded: bool, road_context: str, one_way: bool) -> tuple[int, str]:
+    """Resolve only road classes the bundled mapd schema can distinguish safely."""
+    if not tile_loaded:
+      return 0, "map_unavailable"
+    context = str(road_context).lower()
+    if "freeway" in context:
+      return 70, "motorway"
+    if "city" in context and not bool(one_way):
+      # mapd's public schema has no explicit single-carriageway enum. A
+      # non-freeway bidirectional OSM way is the deliberately narrow proxy used
+      # for the requested single-carriageway 60 mph case.
+      return 60, "single_carriageway"
+    return 0, "unresolved"
+
+  def _mapd_national_limit(self) -> tuple[int, str, str, bool, int]:
+    if self.sm is None:
+      return 0, "map_unavailable", "unknown", False, 0
+    try:
+      if not self.sm.valid.get("mapdOut", False) or not self.sm.alive.get("mapdOut", False):
+        return 0, "map_unavailable", "unknown", False, 0
+      msg = self.sm["mapdOut"]
+      tile_loaded = bool(msg.tileLoaded)
+      context = str(msg.roadContext)
+      one_way = bool(msg.oneWay)
+      lanes = int(msg.lanes)
+      limit, road_class = self._resolve_national_limit_from_mapd_values(tile_loaded, context, one_way)
+      return limit, road_class, context, one_way, lanes
+    except Exception:
+      return 0, "map_unavailable", "unknown", False, 0
+
+  def _detect_national_sign(self, frame_bgr) -> Detection | None:
+    if self.national_reader is None:
+      return None
+
+    resolved_mph, road_class, context, one_way, lanes = self._mapd_national_limit()
+    if resolved_mph <= 0:
+      return None
+
+    frame_h, frame_w = frame_bgr.shape[:2]
+    scale = min(1.0, NATIONAL_SCAN_MAX_WIDTH / max(frame_w, 1))
+    if scale < 1.0:
+      scan = self.cv2.resize(
+        frame_bgr,
+        (max(int(round(frame_w * scale)), 1), max(int(round(frame_h * scale)), 1)),
+        interpolation=self.cv2.INTER_AREA,
+      )
+    else:
+      scan = frame_bgr
+
+    # The sign can appear on either side of UK roads, so scan the full width but
+    # exclude the very bottom of the frame where wheels/road markings dominate.
+    scan_h, scan_w = scan.shape[:2]
+    roi_h = max(int(scan_h * 0.88), 1)
+    gray = self.cv2.cvtColor(scan[:roi_h], self.cv2.COLOR_BGR2GRAY)
+    gray = self.cv2.GaussianBlur(gray, (5, 5), 1.2)
+    max_radius = max(int(min(scan_w, roi_h) * NATIONAL_HOUGH_MAX_RADIUS_RATIO), NATIONAL_HOUGH_MIN_RADIUS + 2)
+
+    circles = self.cv2.HoughCircles(
+      gray,
+      self.cv2.HOUGH_GRADIENT,
+      dp=1.25,
+      minDist=max(int(scan_h * 0.025), 18),
+      param1=110,
+      param2=22,
+      minRadius=NATIONAL_HOUGH_MIN_RADIUS,
+      maxRadius=max_radius,
+    )
+    if circles is None:
+      return None
+
+    best = None
+    for cx, cy, radius in np.round(circles[0]).astype(int)[:24]:
+      if radius <= 0:
+        continue
+      # Expand slightly beyond the Hough circle so the entire sign face/edge is
+      # available to the stripe reader.
+      pad_r = max(int(round(radius * 1.12)), radius + 1)
+      sx1 = max(cx - pad_r, 0)
+      sy1 = max(cy - pad_r, 0)
+      sx2 = min(cx + pad_r, scan_w)
+      sy2 = min(cy + pad_r, roi_h)
+      if sx2 <= sx1 or sy2 <= sy1:
+        continue
+
+      if scale < 1.0:
+        x1 = max(int(round(sx1 / scale)), 0)
+        y1 = max(int(round(sy1 / scale)), 0)
+        x2 = min(int(round(sx2 / scale)), frame_w)
+        y2 = min(int(round(sy2 / scale)), frame_h)
+      else:
+        x1, y1, x2, y2 = sx1, sy1, sx2, sy2
+
+      crop = frame_bgr[y1:y2, x1:x2]
+      national = self.national_reader.read(crop)
+      if national is None or national.confidence < NATIONAL_MIN_SCORE:
+        continue
+
+      detection = Detection(
+        speed_limit_mph=int(resolved_mph),
+        confidence=float(national.confidence),
+        model_confidence=0.0,
+        ring_score=0.0,
+        value_confidence=float(national.confidence),
+        legacy_speed_mph=0,
+        bbox=(x1, y1, x2, y2),
+        source="national",
+      )
+      if best is None or detection.confidence > best.confidence:
+        best = detection
+
+    if best is not None:
+      now = time.monotonic()
+      if now - self._last_national_log_at >= 0.5:
+        bbox_text = ",".join(str(int(v)) for v in best.bbox) if best.bbox is not None else "none"
+        cloudlog.info(
+          f"[XNOR_VSL_V12UK] national=1 score={best.confidence:.3f} "
+          f"mapClass={road_class} mapContext={context} oneWay={int(one_way)} lanes={lanes} "
+          f"resolved={best.speed_limit_mph}mph bbox={bbox_text}"
+        )
+        self._last_national_log_at = now
+    return best
+
+  @staticmethod
+  def _clamp_bbox(bbox, width: int, height: int):
+    x1, y1, x2, y2 = bbox
+    result = (
+      max(int(round(x1)), 0),
+      max(int(round(y1)), 0),
+      min(int(round(x2)), int(width)),
+      min(int(round(y2)), int(height)),
+    )
+    return result if result[2] > result[0] and result[3] > result[1] else None
+
+  def _track_feature_points(self, gray: np.ndarray, bbox):
+    height, width = gray.shape[:2]
+    x1, y1, x2, y2 = bbox
+    bw = x2 - x1
+    bh = y2 - y1
+    pad_x = max(int(bw * 0.25), 3)
+    pad_y = max(int(bh * 0.25), 3)
+    mask = np.zeros_like(gray)
+    mask[max(y1-pad_y, 0):min(y2+pad_y, height), max(x1-pad_x, 0):min(x2+pad_x, width)] = 255
+    return self.cv2.goodFeaturesToTrack(
+      gray,
+      mask=mask,
+      maxCorners=48,
+      qualityLevel=0.004,
+      minDistance=3,
+      blockSize=5,
+    )
+
+  def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
+    if detection.bbox is None:
+      return
+    try:
+      gray = self.cv2.cvtColor(frame_bgr, self.cv2.COLOR_BGR2GRAY)
+      points = self._track_feature_points(gray, detection.bbox)
+      if points is None or len(points) < TRACK_MIN_FEATURE_COUNT:
+        return
+      self.track = SignTrack(
+        source="national" if detection.source.startswith("national") else "numeric",
+        speed_limit_mph=int(detection.speed_limit_mph),
+        bbox=detection.bbox,
+        previous_gray=gray,
+        points=points,
+        started_at=float(now),
+        last_frame_at=float(now),
+      )
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] track_start source={self.track.source} "
+        f"speed={self.track.speed_limit_mph}mph features={len(points)}"
+      )
+    except Exception:
+      self.track = None
+
+  def _clear_track(self, reason: str) -> None:
+    if self.track is not None:
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] track_clear source={self.track.source} "
+        f"speed={self.track.speed_limit_mph}mph reason={reason}"
+      )
+    self.track = None
+
+  def _track_detection(self, frame_bgr: np.ndarray, now: float) -> Detection | None:
+    track = self.track
+    if track is None:
+      return None
+    if now - track.started_at > TRACK_MAX_AGE_SECONDS:
+      self._clear_track("age")
+      return None
+
+    current_gray = self.cv2.cvtColor(frame_bgr, self.cv2.COLOR_BGR2GRAY)
+    points = track.points
+    if points is None or len(points) < TRACK_MIN_FEATURE_COUNT:
+      points = self._track_feature_points(track.previous_gray, track.bbox)
+    if points is None or len(points) < TRACK_MIN_FEATURE_COUNT:
+      self._clear_track("features")
+      return None
+
+    next_points, status, errors = self.cv2.calcOpticalFlowPyrLK(
+      track.previous_gray,
+      current_gray,
+      points,
+      None,
+      winSize=(25, 25),
+      maxLevel=3,
+      criteria=(self.cv2.TERM_CRITERIA_EPS | self.cv2.TERM_CRITERIA_COUNT, 20, 0.03),
+    )
+    if next_points is None or status is None:
+      self._clear_track("flow")
+      return None
+
+    good = status.reshape(-1).astype(bool)
+    if errors is not None:
+      good &= errors.reshape(-1) < 35.0
+    old = points.reshape(-1, 2)[good]
+    new = next_points.reshape(-1, 2)[good]
+    if len(old) < TRACK_MIN_FEATURE_COUNT:
+      self._clear_track("flow_features")
+      return None
+
+    transform, inliers = self.cv2.estimateAffinePartial2D(
+      old, new, method=self.cv2.RANSAC, ransacReprojThreshold=3.0
+    )
+    if transform is None or inliers is None or int(inliers.sum()) < TRACK_MIN_FEATURE_COUNT:
+      self._clear_track("transform")
+      return None
+
+    scale = float(np.hypot(transform[0, 0], transform[0, 1]))
+    if not 0.78 <= scale <= 1.35:
+      self._clear_track("scale")
+      return None
+
+    x1, y1, x2, y2 = track.bbox
+    corners = np.float32(((x1, y1), (x2, y1), (x2, y2), (x1, y2))).reshape(-1, 1, 2)
+    moved = self.cv2.transform(corners, transform).reshape(-1, 2)
+    bbox = self._clamp_bbox(
+      (moved[:, 0].min(), moved[:, 1].min(), moved[:, 0].max(), moved[:, 1].max()),
+      frame_bgr.shape[1],
+      frame_bgr.shape[0],
+    )
+    if bbox is None:
+      self._clear_track("bbox")
+      return None
+
+    inlier_points = new[inliers.reshape(-1).astype(bool)].reshape(-1, 1, 2)
+    track.bbox = bbox
+    track.previous_gray = current_gray
+    track.points = inlier_points
+    track.last_frame_at = float(now)
+
+    bx1, by1, bx2, by2 = bbox
+    bw, bh = bx2 - bx1, by2 - by1
+    px, py = max(int(bw * 0.08), 1), max(int(bh * 0.08), 1)
+    crop_bbox = self._clamp_bbox(
+      (bx1-px, by1-py, bx2+px, by2+py),
+      frame_bgr.shape[1],
+      frame_bgr.shape[0],
+    )
+    if crop_bbox is None:
+      return None
+    cx1, cy1, cx2, cy2 = crop_bbox
+    crop = frame_bgr[cy1:cy2, cx1:cx2]
+
+    detection = None
+    if track.source == "numeric":
+      ring = self._uk_red_ring_score(crop)
+      read = self.value_reader.read(crop) if ring > 0.0 and self.value_reader is not None else None
+      if read is not None and int(read.speed_limit_mph) == int(track.speed_limit_mph):
+        confidence = float(np.clip(read.confidence * 0.65 + ring * 0.35, 0.0, 0.99))
+        detection = Detection(
+          speed_limit_mph=int(read.speed_limit_mph),
+          confidence=confidence,
+          model_confidence=0.0,
+          ring_score=float(ring),
+          value_confidence=float(read.confidence),
+          legacy_speed_mph=0,
+          bbox=bbox,
+          source="numeric_track",
+        )
+    else:
+      national = self.national_reader.read(crop) if self.national_reader is not None else None
+      resolved_mph, road_class, context, one_way, lanes = self._mapd_national_limit()
+      if (
+        national is not None and
+        resolved_mph == int(track.speed_limit_mph) and
+        national.confidence >= NATIONAL_MIN_SCORE
+      ):
+        detection = Detection(
+          speed_limit_mph=int(resolved_mph),
+          confidence=float(national.confidence),
+          model_confidence=0.0,
+          ring_score=0.0,
+          value_confidence=float(national.confidence),
+          legacy_speed_mph=0,
+          bbox=bbox,
+          source="national_track",
+        )
+
+    if detection is None:
+      track.failed_reads += 1
+      if track.failed_reads >= TRACK_MAX_FAILED_READS:
+        self._clear_track("read_fail")
+      return None
+
+    track.failed_reads = 0
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] track_read source={detection.source} "
+      f"speed={detection.speed_limit_mph}mph confidence={detection.confidence:.3f}"
+    )
+    return detection
+
   def _detect(self, frame_bgr):
     if self.net is None:
       return None
