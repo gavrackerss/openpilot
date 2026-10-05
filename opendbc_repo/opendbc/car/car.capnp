@@ -222,6 +222,10 @@ struct CarState {
   # Tesla follow distance setting (0..6). 255 means unknown/SNA.
   followDistanceS @61 :UInt8;
   adaptiveCruiseEnabled @62 :Bool;  # Tesla adaptive-cruise state for UI/events
+  # XNOR Tesla Hybrid ALC planner/controller handover diagnostics.
+  teslaAlcHandoverReady @63 :Bool;
+  teslaEacStatus @64 :UInt8;
+  teslaEacError @65 :UInt8;
 
   # lock info
   doorOpen @24 :Bool;           # ideally includes all doors
