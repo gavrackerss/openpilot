@@ -133,6 +133,7 @@ class CarState(CarStateBase):
     self._vision_speed_limit_ms = 0.0
     self._vision_speed_limit_confidence = 0.0
     self._vision_speed_limit_timestamp = 0.0
+    self._vision_speed_limit_is_national = False
     self._vision_speed_limit_candidate_ms = 0.0
     self._vision_speed_limit_candidate_confidence = 0.0
     self._vision_speed_limit_candidate_timestamp = 0.0
@@ -607,6 +608,7 @@ class CarState(CarStateBase):
       limit_ms = float(self._vision_params.get("VisionSpeedLimit") or 0.0)
       confidence = float(self._vision_params.get("VisionSpeedLimitConfidence") or 0.0)
       timestamp = float(self._vision_params.get("VisionSpeedLimitTimestamp") or 0.0)
+      is_national = bool(self._vision_params.get_bool("VisionSpeedLimitNational"))
       candidate_ms = float(self._vision_params.get("VisionSpeedLimitCandidate") or 0.0)
       candidate_conf = float(self._vision_params.get("VisionSpeedLimitCandidateConfidence") or 0.0)
       candidate_ts = float(self._vision_params.get("VisionSpeedLimitCandidateTimestamp") or 0.0)
@@ -614,6 +616,7 @@ class CarState(CarStateBase):
       limit_ms = 0.0
       confidence = 0.0
       timestamp = 0.0
+      is_national = False
       candidate_ms = 0.0
       candidate_conf = 0.0
       candidate_ts = 0.0
@@ -638,6 +641,7 @@ class CarState(CarStateBase):
     self._vision_speed_limit_ms = float(limit_ms) if valid else 0.0
     self._vision_speed_limit_confidence = float(confidence) if valid else 0.0
     self._vision_speed_limit_timestamp = float(timestamp) if valid else 0.0
+    self._vision_speed_limit_is_national = bool(is_national) if valid else False
     self._vision_speed_limit_candidate_ms = float(candidate_ms) if candidate_valid else 0.0
     self._vision_speed_limit_candidate_confidence = float(candidate_conf) if candidate_valid else 0.0
     self._vision_speed_limit_candidate_timestamp = float(candidate_ts) if candidate_valid else 0.0
@@ -789,24 +793,37 @@ class CarState(CarStateBase):
     # - Higher signs never become a provisional cap; the daemon must confirm
     #   them before releasing a previous lower vision restriction.
     vision_ms = float(self._get_vision_speed_limit_ms())
-    provisional_ms = float(self._get_latched_vision_lower_candidate_ms(chosen))
+    vision_national = bool(getattr(self, "_vision_speed_limit_is_national", False))
     vision_applied = False
+    national_applied = False
     provisional_applied = False
 
+    # A confirmed UK national-limit sign is mapd-backed by road class and may
+    # therefore establish 60/70 in either direction. Ordinary numeric vision
+    # retains the lower-only arbitration used since V1.
+    if vision_ms > 0.0 and vision_national:
+      chosen = float(vision_ms)
+      national_applied = True
+
+    provisional_ms = float(self._get_latched_vision_lower_candidate_ms(chosen))
     if provisional_ms > 0.0 and chosen > 0.0 and provisional_ms < chosen:
       chosen = float(provisional_ms)
       provisional_applied = True
+      national_applied = False
 
-    if vision_ms > 0.0 and (chosen <= 0.0 or vision_ms < chosen):
+    if vision_ms > 0.0 and not vision_national and (chosen <= 0.0 or vision_ms < chosen):
       chosen = float(vision_ms)
       vision_applied = True
       provisional_applied = False
+      national_applied = False
 
     self.speed_limit_ms = float(chosen)
-    if vision_applied:
-      self._xnor_speed_limit_source = "vision_uk"
-    elif provisional_applied:
+    if provisional_applied:
       self._xnor_speed_limit_source = "vision_uk_lower_candidate"
+    elif national_applied:
+      self._xnor_speed_limit_source = "vision_uk_national"
+    elif vision_applied:
+      self._xnor_speed_limit_source = "vision_uk"
     else:
       self._xnor_speed_limit_source = "tesla_map" if speed_limit_ms > 0.0 else ("das_fallback" if speed_limit_ms_das > 0.0 else "none")
 
@@ -823,6 +840,7 @@ class CarState(CarStateBase):
           f"speedLimit={float(getattr(self, 'speed_limit_ms', 0.0))*conv:.1f} das={float(getattr(self, 'speed_limit_ms_das', 0.0))*conv:.1f} "
           f"vision={float(getattr(self, '_vision_speed_limit_ms', 0.0))*conv:.1f} "
           f"visionConf={float(getattr(self, '_vision_speed_limit_confidence', 0.0)):.2f} "
+          f"visionNational={int(bool(getattr(self, '_vision_speed_limit_is_national', False)))} "
           f"visionCandidate={float(getattr(self, '_vision_speed_limit_candidate_ms', 0.0))*conv:.1f} "
           f"visionCandidateConf={float(getattr(self, '_vision_speed_limit_candidate_confidence', 0.0)):.2f} "
           f"visionLatched={float(getattr(self, '_vision_lower_latched_ms', 0.0))*conv:.1f} "
