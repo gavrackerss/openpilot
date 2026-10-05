@@ -810,7 +810,7 @@ class CarState(CarStateBase):
     else:
       self._xnor_speed_limit_source = "tesla_map" if speed_limit_ms > 0.0 else ("das_fallback" if speed_limit_ms_das > 0.0 else "none")
 
-    if self._tinkla.adjust_acc_with_speed_limit and (self._param_frame % 100 == 0):
+    if (self._tinkla.adjust_acc_with_speed_limit or str(getattr(self, "_xnor_speed_limit_source", "")).startswith("vision_uk")) and (self._param_frame % 100 == 0):
       try:
         uom = str(getattr(self, "speed_units", "MPH"))
         conv = 2.2369362920544 if uom == "MPH" else 3.6
@@ -1173,7 +1173,8 @@ class CarState(CarStateBase):
       prev_adapt = bool(getattr(self, "_prev_enable_adaptive_cruise", False))
       now_adapt = bool(getattr(self, "enable_adaptive_cruise", False))
       uom = str(getattr(self, "speed_units", "MPH") or "MPH")
-      use_sl = bool(getattr(self._tinkla, "adjust_acc_with_speed_limit", False))
+      vision_forced_lower = str(getattr(self, "_xnor_speed_limit_source", "")).startswith("vision_uk")
+      use_sl = bool(getattr(self._tinkla, "adjust_acc_with_speed_limit", False) or vision_forced_lower)
       sl_target_ms = float(self._calc_speed_limit_target_ms(uom)) if use_sl else 0.0
 
       # Unity parity: maintain a separate max cruise (planner/UI ceiling) so following a lead doesn't
