@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.2-UK
+# XNOR Vision Speed Limit V1.3-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,8 +29,9 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# National Speed Limit and non-numeric restrictions are intentionally not
-# handled in V1.2 with scoped mapd road context.
+# V1.3 hardens National Speed Limit recognition after real-drive false
+# positives: stricter sign geometry, conservative map resolution, three-read
+# confirmation for NSL, and fresh tracker timestamps after detector inference.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -63,6 +64,7 @@ MIN_CONFIRMED_CONFIDENCE = 0.18
 HIGHER_RELEASE_CONFIDENCE = 0.55
 INITIAL_REQUIRED_READS = 2
 CHANGE_REQUIRED_READS = 2
+NATIONAL_REQUIRED_READS = 3
 HIGHER_RELEASE_REQUIRED_READS = 3
 MAX_PROPOSALS = 8
 MAX_BOX_AREA_RATIO = 0.18
@@ -72,7 +74,7 @@ DETECTOR_INPUT_SIZE = 640
 NATIONAL_SCAN_MAX_WIDTH = 960
 NATIONAL_HOUGH_MIN_RADIUS = 7
 NATIONAL_HOUGH_MAX_RADIUS_RATIO = 0.09
-NATIONAL_MIN_SCORE = 0.68
+NATIONAL_MIN_SCORE = 0.78
 
 SUPPORTED_UK_LIMITS_MPH = frozenset((20, 30, 40, 50, 60, 70))
 SPEED_LIMIT_CLASSES = {
@@ -114,6 +116,7 @@ class HistoryEntry:
   speed_limit_mph: int
   confidence: float
   created_at: float
+  source_family: str
 
 
 class SpeedLimitVisionUK:
@@ -360,7 +363,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.2: ready")
+      self._set_status("UK vision V1.3: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -525,7 +528,13 @@ class SpeedLimitVisionUK:
     if "freeway" in context and motorway_ref:
       return 70, "motorway"
 
-    if "freeway" not in context and not bool(one_way) and lane_count <= 3:
+    # V1.3: missing lane metadata is not evidence of a single carriageway.
+    # Accept lane_count=0 only when OSM supplied a non-motorway road reference.
+    # This blocks the observed false-positive context:
+    #   mapContext=city oneWay=0 lanes=0 ref=
+    non_motorway_ref = any(ref and not (len(ref) >= 2 and ref[0] == "M" and ref[1].isdigit()) for ref in refs)
+    single_carriageway_metadata = (1 <= lane_count <= 3) or (lane_count == 0 and non_motorway_ref)
+    if "freeway" not in context and not bool(one_way) and not motorway_ref and single_carriageway_metadata:
       return 60, "single_carriageway"
 
     return 0, "unresolved"
@@ -672,6 +681,11 @@ class SpeedLimitVisionUK:
 
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
+      return
+    # NSL confirmation must come from fresh Hough + geometry detections on
+    # separate inference frames. Optical-flowing one initially-wrong circular
+    # object would otherwise make a single false positive easier to confirm.
+    if detection.source.startswith("national"):
       return
     try:
       gray = self.cv2.cvtColor(frame_bgr, self.cv2.COLOR_BGR2GRAY)
@@ -946,28 +960,50 @@ class SpeedLimitVisionUK:
 
   def _update_detection(self, detection: Detection) -> None:
     now = time.monotonic()
-    self._publish_lower_candidate(detection)
     self.followup_until = max(self.followup_until, now + FOLLOWUP_WINDOW_SECONDS)
-    self.history.append(HistoryEntry(detection.speed_limit_mph, detection.confidence, now))
+
+    is_national = detection.source.startswith("national")
+    source_family = "national" if is_national else "numeric"
+    self.history.append(HistoryEntry(
+      detection.speed_limit_mph,
+      detection.confidence,
+      now,
+      source_family,
+    ))
     self._prune_history(now)
 
-    counts = Counter(x.speed_limit_mph for x in self.history)
-    count = counts.get(detection.speed_limit_mph, 0)
-    confs = [x.confidence for x in self.history if x.speed_limit_mph == detection.speed_limit_mph]
+    counts = Counter(
+      (x.speed_limit_mph, x.source_family)
+      for x in self.history
+    )
+    count = counts.get((detection.speed_limit_mph, source_family), 0)
+    confs = [
+      x.confidence for x in self.history
+      if x.speed_limit_mph == detection.speed_limit_mph and x.source_family == source_family
+    ]
     best_conf = max(confs) if confs else 0.0
+    initial_required = NATIONAL_REQUIRED_READS if is_national else INITIAL_REQUIRED_READS
+    change_required = NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS
+
+    # Numeric signs retain the existing immediate lower-only provisional path.
+    # NSL is heuristic-only, so do not expose it to CarState until all 3 fresh
+    # full-frame confirmations have succeeded.
+    if not is_national or count >= NATIONAL_REQUIRED_READS:
+      self._publish_lower_candidate(detection)
+
     if best_conf < MIN_CONFIRMED_CONFIDENCE:
-      self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "confidence_reject")
+      self._log_temporal_candidate(detection, count, initial_required, "confidence_reject")
       self._set_status(f"UK candidate: {detection.speed_limit_mph} mph")
       return
 
     current = self.published_speed_limit_mph
     if current <= 0:
-      if count >= INITIAL_REQUIRED_READS:
-        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "publish")
+      if count >= initial_required:
+        self._log_temporal_candidate(detection, count, initial_required, "publish")
         self._publish(detection.speed_limit_mph, best_conf)
       else:
-        self._log_temporal_candidate(detection, count, INITIAL_REQUIRED_READS, "waiting")
-        self._set_status(f"UK candidate: {detection.speed_limit_mph} mph ({count}/{INITIAL_REQUIRED_READS})")
+        self._log_temporal_candidate(detection, count, initial_required, "waiting")
+        self._set_status(f"UK candidate: {detection.speed_limit_mph} mph ({count}/{initial_required})")
       return
 
     if detection.speed_limit_mph == current:
@@ -977,12 +1013,12 @@ class SpeedLimitVisionUK:
       return
 
     if detection.speed_limit_mph < current:
-      if count >= CHANGE_REQUIRED_READS:
-        self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "publish_lower")
+      if count >= change_required:
+        self._log_temporal_candidate(detection, count, change_required, "publish_lower")
         self._publish(detection.speed_limit_mph, best_conf)
       else:
-        self._log_temporal_candidate(detection, count, CHANGE_REQUIRED_READS, "waiting_lower")
-        self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{CHANGE_REQUIRED_READS})")
+        self._log_temporal_candidate(detection, count, change_required, "waiting_lower")
+        self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
     # V1 never uses a higher vision value as a new speed target. A strongly
@@ -1059,7 +1095,9 @@ class SpeedLimitVisionUK:
       # frame of the same physical sign and therefore counts toward 2/2 or 3/3.
       tracked_detection = None
       if track_due:
-        tracked_detection = self._track_detection(frame_bgr, now)
+        # recv() and detector work can be expensive; use a fresh timestamp for
+        # track age rather than the loop timestamp captured before camera I/O.
+        tracked_detection = self._track_detection(frame_bgr, time.monotonic())
         if tracked_detection is not None:
           self._update_detection(tracked_detection)
 
@@ -1067,11 +1105,13 @@ class SpeedLimitVisionUK:
       # temporal read. If tracking succeeded, wait for the next frame.
       detection = None
       if tracked_detection is None and detector_due:
-        self.last_inference_at = now
         detection = self._detect(frame_bgr)
+        # Stamp the completed inference. V1.2 stamped before inference, so a
+        # slow detector pass could consume the entire 1.5 s track lifetime.
+        self.last_inference_at = time.monotonic()
         if detection is not None:
           self._update_detection(detection)
-          self._start_track(frame_bgr, detection, now)
+          self._start_track(frame_bgr, detection, self.last_inference_at)
 
       if tracked_detection is None and detection is None:
         if self.published_speed_limit_mph > 0:

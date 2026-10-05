@@ -301,17 +301,22 @@ class UKNationalRead:
   background_white: float
   red_ratio: float
   opposite_dark: float
+  stripe_end_dark: float
+  rim_dark: float
 
 
 class UKNationalSpeedLimitReader:
-  """Score a cropped UK national-speed-limit sign.
+  """Strict geometry scorer for a UK national-speed-limit sign.
 
-  This intentionally does not assign 60/70 itself. It only identifies the
-  white circular sign with the black diagonal band; mapd road context resolves
-  the numeric limit separately.
+  The reader identifies only the white circular sign with the black diagonal
+  band. It does not assign 60/70 itself; mapd road context does that separately.
+
+  V1.3 intentionally prefers false negatives over false positives. The previous
+  scorer accepted any roughly circular white crop with a dark diagonal, which
+  produced two false NSL detections on a drive containing no NSL signs.
   """
 
-  MIN_CONFIDENCE = 0.68
+  MIN_CONFIDENCE = 0.78
 
   def __init__(self, cv2):
     self.cv2 = cv2
@@ -321,18 +326,21 @@ class UKNationalSpeedLimitReader:
       return None
 
     h, w = sign_crop.shape[:2]
-    if h < 16 or w < 16:
+    if h < 18 or w < 18:
       return None
+
+    # Hough already proposes a circle. Keep the crop near-square so elongated
+    # vehicle trim, wheels, lamps and road furniture cannot pass as signs.
     aspect = w / max(h, 1)
-    if aspect < 0.65 or aspect > 1.55:
+    if aspect < 0.72 or aspect > 1.38:
       return None
 
     crop = self.cv2.resize(sign_crop, (128, 128), interpolation=self.cv2.INTER_CUBIC)
     hsv = self.cv2.cvtColor(crop, self.cv2.COLOR_BGR2HSV)
     hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
-    white = ((val >= 120) & (sat <= 90)).astype(np.uint8)
-    dark = ((val <= 105) & (sat <= 150)).astype(np.uint8)
+    white = ((val >= 125) & (sat <= 82)).astype(np.uint8)
+    dark = ((val <= 108) & (sat <= 155)).astype(np.uint8)
     red = (
       (((hue <= 12) | (hue >= 168))) &
       (sat >= 70) &
@@ -344,40 +352,71 @@ class UKNationalSpeedLimitReader:
     ny = (yy - 63.5) / 64.0
     rr = np.sqrt(nx * nx + ny * ny)
 
-    face = rr <= 0.86
-    core = rr <= 0.72
-    # Official UK NSL stripe rises from lower-left to upper-right: y ~= -x
-    # in image coordinates. Allow perspective/rotation with a fairly wide band.
-    stripe = core & (np.abs(nx + ny) <= 0.20)
-    opposite = core & (np.abs(nx - ny) <= 0.20)
-    background = core & (np.abs(nx + ny) >= 0.30)
+    face = rr <= 0.88
+    core = rr <= 0.70
+    rim = (rr >= 0.72) & (rr <= 0.92)
 
-    if not face.any() or not stripe.any() or not background.any():
+    # UK NSL diagonal rises lower-left -> upper-right, i.e. y ~= -x in image
+    # coordinates. Use a narrow centre stripe and independently demand dark
+    # evidence at both ends of the physical band.
+    diagonal_distance = np.abs(nx + ny)
+    stripe = core & (diagonal_distance <= 0.12)
+    opposite = core & (np.abs(nx - ny) <= 0.12)
+    side_pos = core & ((nx + ny) >= 0.30)
+    side_neg = core & ((nx + ny) <= -0.30)
+    stripe_ll = core & (nx <= -0.18) & (ny >= 0.18) & (diagonal_distance <= 0.16)
+    stripe_ur = core & (nx >= 0.18) & (ny <= -0.18) & (diagonal_distance <= 0.16)
+
+    masks = (face, core, rim, stripe, opposite, side_pos, side_neg, stripe_ll, stripe_ur)
+    if not all(mask.any() for mask in masks):
       return None
 
     stripe_dark = float(dark[stripe].mean())
     opposite_dark = float(dark[opposite].mean())
-    background_white = float(white[background].mean())
-    background_dark = float(dark[background].mean())
+
+    side_pos_white = float(white[side_pos].mean())
+    side_neg_white = float(white[side_neg].mean())
+    background_white = min(side_pos_white, side_neg_white)
+
+    side_pos_dark = float(dark[side_pos].mean())
+    side_neg_dark = float(dark[side_neg].mean())
+    background_dark = max(side_pos_dark, side_neg_dark)
+
+    stripe_end_dark = min(
+      float(dark[stripe_ll].mean()),
+      float(dark[stripe_ur].mean()),
+    )
+    rim_dark = float(dark[rim].mean())
+    face_white = float(white[face].mean())
     red_ratio = float(red[face].mean())
+    diagonal_advantage = stripe_dark - opposite_dark
 
-    # Keep this deliberately strict: red-ring numeric signs, dark circular
-    # logos and clutter should all fail before mapd is consulted.
-    if red_ratio > 0.045:
+    # Hard gates before scoring. These specifically reject the V1.2 failure
+    # class: white/grey circular clutter with an incidental dark diagonal.
+    if red_ratio > 0.035:
       return None
-    if stripe_dark < 0.34:
+    if stripe_dark < 0.48:
       return None
-    if background_white < 0.44:
+    if stripe_end_dark < 0.30:
       return None
-    if background_dark > 0.28:
+    if diagonal_advantage < 0.16:
+      return None
+    if background_white < 0.52:
+      return None
+    if background_dark > 0.20:
+      return None
+    if face_white < 0.42:
+      return None
+    if rim_dark < 0.045:
       return None
 
-    diagonal_advantage = max(stripe_dark - opposite_dark, 0.0)
     score = (
-      min(stripe_dark / 0.72, 1.0) * 0.45 +
-      min(background_white / 0.82, 1.0) * 0.30 +
-      min(diagonal_advantage / 0.34, 1.0) * 0.20 +
-      max(0.0, 1.0 - red_ratio / 0.045) * 0.05
+      min(stripe_dark / 0.72, 1.0) * 0.30 +
+      min(background_white / 0.80, 1.0) * 0.25 +
+      min(diagonal_advantage / 0.38, 1.0) * 0.20 +
+      min(stripe_end_dark / 0.62, 1.0) * 0.15 +
+      min(rim_dark / 0.20, 1.0) * 0.05 +
+      max(0.0, 1.0 - red_ratio / 0.035) * 0.05
     )
     score = float(np.clip(score, 0.0, 1.0))
     if score < self.MIN_CONFIDENCE:
@@ -389,4 +428,6 @@ class UKNationalSpeedLimitReader:
       background_white=background_white,
       red_ratio=red_ratio,
       opposite_dark=opposite_dark,
+      stripe_end_dark=stripe_end_dark,
+      rim_dark=rim_dark,
     )
