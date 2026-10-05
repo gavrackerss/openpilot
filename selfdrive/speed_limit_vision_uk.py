@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
+import importlib
 import os
+import shutil
+import sys
 import time
+import zipfile
 from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +32,17 @@ from openpilot.common.swaglog import cloudlog
 # handled in V1.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
+
+# The comma/AGNOS Python environment does not automatically re-resolve
+# pyproject.toml when a changed-files overlay is installed. Carry a pinned
+# official ARM64 opencv-python-headless wheel with V1-UK and unpack it once to
+# persistent media when cv2 is not already available.
+OPENCV_VERSION = "4.13.0.92"
+OPENCV_WHEEL_NAME = "opencv_python_headless-4.13.0.92-cp37-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl"
+OPENCV_WHEEL_SHA256 = "5c8cfc8e87ed452b5cecb9419473ee5560a989859fe1d10d1ce11ae87b09a2cb"
+OPENCV_WHEEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_runtime" / OPENCV_WHEEL_NAME
+OPENCV_RUNTIME_DIR = Path("/data/media/0/xnor_speed_limit_runtime") / f"opencv-{OPENCV_VERSION}-aarch64"
+OPENCV_RUNTIME_MARKER = OPENCV_RUNTIME_DIR / ".xnor_vsl_opencv_complete"
 
 RUNTIME_HZ = 20
 NORMAL_INFERENCE_INTERVAL = 0.40
@@ -70,14 +86,6 @@ class Detection:
 
 
 @dataclass
-class NV12Frame:
-  y: np.ndarray
-  uv: np.ndarray
-  width: int
-  height: int
-
-
-@dataclass
 class HistoryEntry:
   speed_limit_mph: int
   confidence: float
@@ -87,11 +95,10 @@ class HistoryEntry:
 class SpeedLimitVisionUK:
   def __init__(self):
     self.params = Params()
-    self.Image = None
+    self.cv2 = None
     self.VisionIpcClient = None
     self.VisionStreamType = None
     self.net = None
-    self.model_input_name = ""
     self.client = None
     self.stream_type = None
     self.stream_name = ""
@@ -191,23 +198,80 @@ class SpeedLimitVisionUK:
     if old > 0:
       cloudlog.info(f"[XNOR_VSL_V1UK] clear previous={old}mph reason={reason}")
 
+  @staticmethod
+  def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+      for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+  def _load_cv2(self):
+    """Import system cv2, or activate the pinned ARM64 wheel carried by V1-UK."""
+    try:
+      import cv2
+      cloudlog.info(f"[XNOR_VSL_V1UK] using system OpenCV {getattr(cv2, '__version__', 'unknown')}")
+      return cv2
+    except ModuleNotFoundError:
+      pass
+
+    if not OPENCV_WHEEL_PATH.is_file():
+      raise FileNotFoundError(f"vendored OpenCV wheel missing: {OPENCV_WHEEL_PATH}")
+
+    wheel_hash = self._sha256_file(OPENCV_WHEEL_PATH)
+    if wheel_hash != OPENCV_WHEEL_SHA256:
+      raise RuntimeError(f"vendored OpenCV wheel checksum mismatch: {wheel_hash}")
+
+    marker_ok = False
+    try:
+      marker_ok = OPENCV_RUNTIME_MARKER.read_text().strip() == OPENCV_WHEEL_SHA256
+    except (FileNotFoundError, OSError):
+      pass
+
+    if not marker_ok:
+      tmp_dir = OPENCV_RUNTIME_DIR.with_name(OPENCV_RUNTIME_DIR.name + ".tmp")
+      shutil.rmtree(tmp_dir, ignore_errors=True)
+      tmp_dir.parent.mkdir(parents=True, exist_ok=True)
+      tmp_dir.mkdir(parents=True, exist_ok=True)
+      try:
+        with zipfile.ZipFile(OPENCV_WHEEL_PATH, "r") as zf:
+          zf.extractall(tmp_dir)
+        (tmp_dir / ".xnor_vsl_opencv_complete").write_text(OPENCV_WHEEL_SHA256)
+        shutil.rmtree(OPENCV_RUNTIME_DIR, ignore_errors=True)
+        os.replace(tmp_dir, OPENCV_RUNTIME_DIR)
+      except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    runtime_path = str(OPENCV_RUNTIME_DIR)
+    if runtime_path not in sys.path:
+      sys.path.insert(0, runtime_path)
+    importlib.invalidate_caches()
+
+    import cv2
+    cloudlog.info(
+      f"[XNOR_VSL_V1UK] using vendored OpenCV {getattr(cv2, '__version__', 'unknown')} "
+      f"from {OPENCV_RUNTIME_DIR}"
+    )
+    return cv2
+
   def _load_runtime(self) -> bool:
     try:
-      from PIL import Image
+      cv2 = self._load_cv2()
       from cereal import messaging
       from msgq.visionipc import VisionIpcClient, VisionStreamType
-      from tinygrad.nn.onnx import OnnxRunner
 
-      self.Image = Image
+      self.cv2 = cv2
       self.VisionIpcClient = VisionIpcClient
       self.VisionStreamType = VisionStreamType
       self.sm = messaging.SubMaster(["deviceState"])
+      cv2.setNumThreads(1)
       try:
         os.nice(10)
       except Exception:
         pass
     except Exception as exc:
-      self.runtime_error = f"Tinygrad/Pillow/VisionIPC unavailable: {type(exc).__name__}"
+      self.runtime_error = f"OpenCV/VisionIPC unavailable: {type(exc).__name__}: {exc}"
       self._set_status(self.runtime_error)
       cloudlog.exception("[XNOR_VSL_V1UK] runtime dependency unavailable")
       return False
@@ -219,18 +283,12 @@ class SpeedLimitVisionUK:
       return False
 
     try:
-      self.net = OnnxRunner(str(MODEL_PATH))
-      inputs = list(self.net.graph_inputs.items())
-      if len(inputs) != 1:
-        raise RuntimeError(f"expected one model input, found {len(inputs)}")
-      self.model_input_name, input_spec = inputs[0]
-      cloudlog.info(
-        f"[XNOR_VSL_V1UK] Tinygrad ONNX input={self.model_input_name} "
-        f"shape={tuple(input_spec.shape)} dtype={input_spec.dtype}"
-      )
+      self.net = self.cv2.dnn.readNetFromONNX(str(MODEL_PATH))
+      self.net.setPreferableBackend(self.cv2.dnn.DNN_BACKEND_OPENCV)
+      self.net.setPreferableTarget(self.cv2.dnn.DNN_TARGET_CPU)
       self.runtime_error = ""
       self._set_status("UK vision: ready")
-      cloudlog.info(f"[XNOR_VSL_V1UK] loaded Tinygrad ONNX model {MODEL_PATH}")
+      cloudlog.info(f"[XNOR_VSL_V1UK] loaded model {MODEL_PATH}")
       return True
     except Exception as exc:
       self.runtime_error = f"Vision model load failed: {type(exc).__name__}"
@@ -278,7 +336,7 @@ class SpeedLimitVisionUK:
       self._disconnect_camera()
       return False
 
-  def _receive_frame_nv12(self):
+  def _receive_frame_bgr(self):
     client = self.client
     if client is None:
       return None
@@ -287,110 +345,31 @@ class SpeedLimitVisionUK:
       buf = client.recv()
       if buf is None:
         return None
-      raw = np.frombuffer(buf.data, dtype=np.uint8)
-      needed = int(client.stride) * int(client.height) * 3 // 2
-      if raw.size < needed:
+      data = buf.data
+      if not data.any():
         return None
-      image = raw[:needed].reshape((int(client.height) * 3 // 2, int(client.stride)))
-      y = image[:int(client.height), :int(client.width)]
-      uv = image[int(client.height):int(client.height) + int(client.height) // 2, :int(client.width)]
-      return NV12Frame(y=y, uv=uv, width=int(client.width), height=int(client.height))
+      image = np.frombuffer(data, dtype=np.uint8).reshape((len(data) // client.stride, client.stride))
+      return self.cv2.cvtColor(image[:client.height * 3 // 2, :client.width], self.cv2.COLOR_YUV2BGR_NV12)
     except Exception:
       return None
 
-  def _resize_luma(self, plane: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    if self.Image is None:
-      raise RuntimeError("Pillow is not loaded")
-    img = self.Image.fromarray(np.ascontiguousarray(plane), mode="L")
-    return np.asarray(img.resize(size, self.Image.Resampling.BILINEAR), dtype=np.uint8)
-
-  def _nv12_region_to_rgb(self, frame: NV12Frame, x1: int, y1: int, x2: int, y2: int,
-                          target_size: tuple[int, int] | None = None) -> np.ndarray:
-    x1 = int(np.clip(x1, 0, frame.width - 1))
-    y1 = int(np.clip(y1, 0, frame.height - 1))
-    x2 = int(np.clip(x2, x1 + 1, frame.width))
-    y2 = int(np.clip(y2, y1 + 1, frame.height))
-
-    y_plane = frame.y[y1:y2, x1:x2]
-
-    # NV12 stores one interleaved U/V sample per 2x2 luma block.
-    uv_x1 = x1 // 2
-    uv_x2 = (x2 + 1) // 2
-    uv_y1 = y1 // 2
-    uv_y2 = (y2 + 1) // 2
-    uv = frame.uv[uv_y1:uv_y2, uv_x1 * 2:uv_x2 * 2]
-    u_plane = uv[:, 0::2]
-    v_plane = uv[:, 1::2]
-
-    out_w = int(target_size[0]) if target_size is not None else (x2 - x1)
-    out_h = int(target_size[1]) if target_size is not None else (y2 - y1)
-    if out_w <= 0 or out_h <= 0:
-      raise ValueError("invalid NV12 region size")
-
-    if y_plane.shape != (out_h, out_w):
-      y_plane = self._resize_luma(y_plane, (out_w, out_h))
-    else:
-      y_plane = np.asarray(y_plane, dtype=np.uint8)
-
-    u_plane = self._resize_luma(u_plane, (out_w, out_h))
-    v_plane = self._resize_luma(v_plane, (out_w, out_h))
-
-    # ITU-R BT.601 limited-range NV12 -> RGB, equivalent to the conversion
-    # previously performed by OpenCV for our purposes.
-    y32 = y_plane.astype(np.int32)
-    u32 = u_plane.astype(np.int32) - 128
-    v32 = v_plane.astype(np.int32) - 128
-    c = np.maximum(y32 - 16, 0)
-
-    r = (298 * c + 409 * v32 + 128) >> 8
-    g = (298 * c - 100 * u32 - 208 * v32 + 128) >> 8
-    b = (298 * c + 516 * u32 + 128) >> 8
-    return np.stack((r, g, b), axis=-1).clip(0, 255).astype(np.uint8)
-
-  def _prepare_detector_input(self, frame: NV12Frame):
-    ratio = min(DETECTOR_INPUT_SIZE / frame.width, DETECTOR_INPUT_SIZE / frame.height)
-    new_width = int(round(frame.width * ratio))
-    new_height = int(round(frame.height * ratio))
-    pad_width = (DETECTOR_INPUT_SIZE - new_width) / 2
-    pad_height = (DETECTOR_INPUT_SIZE - new_height) / 2
-    left = int(round(pad_width - 0.1))
-    top = int(round(pad_height - 0.1))
-
-    rgb = self._nv12_region_to_rgb(frame, 0, 0, frame.width, frame.height, (new_width, new_height))
-    letterboxed = np.full((DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE, 3), 114, dtype=np.uint8)
-    letterboxed[top:top + new_height, left:left + new_width] = rgb
-
-    # StarPilot/Ultralytics model input: RGB, NCHW float32, [0,1].
-    blob = letterboxed.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
-    return blob, ratio, left, top
-
   @staticmethod
-  def _rgb_to_opencv_hsv_channels(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return H/S/V channels on OpenCV's H=0..179, S/V=0..255 scale."""
-    rgbf = rgb.astype(np.float32)
-    r = rgbf[:, :, 0]
-    g = rgbf[:, :, 1]
-    b = rgbf[:, :, 2]
+  def _letterbox(cv2, image, shape=(DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE), color=(114, 114, 114)):
+    image_height, image_width = image.shape[:2]
+    target_height, target_width = shape
+    ratio = min(target_width / image_width, target_height / image_height)
+    new_width = int(round(image_width * ratio))
+    new_height = int(round(image_height * ratio))
+    resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
 
-    vmax = np.maximum(np.maximum(r, g), b)
-    vmin = np.minimum(np.minimum(r, g), b)
-    delta = vmax - vmin
-
-    hue = np.zeros_like(vmax, dtype=np.float32)
-    nz = delta > 1e-6
-    rmax = nz & (vmax == r)
-    gmax = nz & (vmax == g)
-    bmax = nz & (vmax == b)
-
-    hue[rmax] = np.mod((g[rmax] - b[rmax]) / delta[rmax], 6.0) * 30.0
-    hue[gmax] = (((b[gmax] - r[gmax]) / delta[gmax]) + 2.0) * 30.0
-    hue[bmax] = (((r[bmax] - g[bmax]) / delta[bmax]) + 4.0) * 30.0
-    hue = np.mod(hue, 180.0)
-
-    sat = np.zeros_like(vmax, dtype=np.float32)
-    nonblack = vmax > 1e-6
-    sat[nonblack] = (delta[nonblack] / vmax[nonblack]) * 255.0
-    return hue, sat, vmax
+    pad_width = (target_width - new_width) / 2
+    pad_height = (target_height - new_height) / 2
+    top = int(round(pad_height - 0.1))
+    bottom = int(round(pad_height + 0.1))
+    left = int(round(pad_width - 0.1))
+    right = int(round(pad_width + 0.1))
+    result = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    return result, ratio, left, top
 
   def _uk_red_ring_score(self, sign_crop) -> float:
     if sign_crop is None or sign_crop.size == 0:
@@ -403,7 +382,10 @@ class SpeedLimitVisionUK:
     if aspect < 0.60 or aspect > 1.50:
       return 0.0
 
-    hue, sat, val = self._rgb_to_opencv_hsv_channels(sign_crop)
+    hsv = self.cv2.cvtColor(sign_crop, self.cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
 
     red = ((((hue <= 12) | (hue >= 168)) & (sat >= 70) & (val >= 55))).astype(np.uint8)
     white = ((val >= 125) & (sat <= 85)).astype(np.uint8)
@@ -447,21 +429,25 @@ class SpeedLimitVisionUK:
     )
     return float(np.clip(score, 0.0, 1.0))
 
-  def _detect(self, frame: NV12Frame):
-    if self.net is None or not self.model_input_name:
+  def _detect(self, frame_bgr):
+    if self.net is None:
       return None
 
-    frame_h, frame_w = frame.height, frame.width
-    blob, ratio, pad_x, pad_y = self._prepare_detector_input(frame)
+    frame_h, frame_w = frame_bgr.shape[:2]
+    lb, ratio, pad_x, pad_y = self._letterbox(self.cv2, frame_bgr)
+    blob = self.cv2.dnn.blobFromImage(
+      lb,
+      scalefactor=1.0 / 255.0,
+      size=(DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE),
+      swapRB=True,
+      crop=False,
+    )
+    self.net.setInput(blob)
 
     try:
-      outputs = self.net({self.model_input_name: blob})
-      if not outputs:
-        raise RuntimeError("ONNX runner returned no outputs")
-      output = next(iter(outputs.values()))
-      predictions = np.squeeze(output.numpy())
+      predictions = np.squeeze(self.net.forward())
     except Exception:
-      cloudlog.exception("[XNOR_VSL_V1UK] Tinygrad detector forward failed")
+      cloudlog.exception("[XNOR_VSL_V1UK] detector forward failed")
       return None
 
     if predictions.ndim != 2:
@@ -503,10 +489,7 @@ class SpeedLimitVisionUK:
       if y1 > frame_h * 0.88:
         continue
 
-      try:
-        crop = self._nv12_region_to_rgb(frame, x1, y1, x2, y2)
-      except Exception:
-        continue
+      crop = frame_bgr[y1:y2, x1:x2]
       uk_score = self._uk_red_ring_score(crop)
       bbox = (x1, y1, x2, y2)
       raw_supported.append((model_conf, speed_mph, uk_score, bbox))
@@ -634,13 +617,13 @@ class SpeedLimitVisionUK:
         rk.keep_time()
         continue
 
-      frame = self._receive_frame_nv12()
+      frame_bgr = self._receive_frame_bgr()
       self.last_inference_at = now
-      if frame is None:
+      if frame_bgr is None:
         rk.keep_time()
         continue
 
-      detection = self._detect(frame)
+      detection = self._detect(frame_bgr)
       if detection is not None:
         self._update_detection(detection)
       elif self.published_speed_limit_mph > 0:
@@ -651,7 +634,7 @@ class SpeedLimitVisionUK:
       else:
         self._set_status(f"UK vision: scanning {self.stream_name}")
 
-      frame = None
+      frame_bgr = None
       rk.keep_time()
 
 
