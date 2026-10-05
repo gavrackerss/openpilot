@@ -88,6 +88,10 @@ class CarState(CarStateBase):
     self.eac_status_raw = 0
     self.eac_error_code_raw = 0
     self._xnor_hybrid_epas_failed = False
+    self._xnor_hybrid_epas_rearm = False
+    self._alc_epas_good_frames = 0
+    self._alc_native_idle_good_frames = 0
+    self._alc_planner_ready_prev = False
     self.das_control = None
     # Unity parity fields
     self._tinkla = _TinklaConfig()
@@ -180,6 +184,58 @@ class CarState(CarStateBase):
       self.hybrid_native_ap = bool(self._tinkla.hybrid_native_ap) and not self.autopilot_disabled
     except Exception:
       pass
+
+
+  def _update_hybrid_alc_planner_ready(self, ret: structs.CarState, native_lkas_active: bool) -> None:
+    """Publish the physical handover state modeld needs before starting ALC."""
+    eac_status = int(getattr(self, "eac_status_raw", 0))
+    eac_error = int(getattr(self, "eac_error_code_raw", 0))
+    hands = int(getattr(self, "hands_on_level", 0))
+
+    ret.teslaEacStatus = max(0, min(eac_status, 255))
+    ret.teslaEacError = max(0, min(eac_error, 255))
+
+    hybrid = bool(getattr(self, "hybrid_native_ap", False))
+    engaged = bool(ret.cruiseState.enabled)
+    epas_healthy = bool(eac_status == 2 and eac_error == 0 and hands <= 1)
+    steer_inhibit = bool(
+      ret.steerFaultTemporary or
+      ret.steerFaultPermanent or
+      ret.steeringDisengage or
+      bool(getattr(self, "_xnor_hybrid_epas_failed", False)) or
+      bool(getattr(self, "_xnor_hybrid_epas_rearm", False))
+    )
+
+    if hybrid and engaged and epas_healthy and not steer_inhibit:
+      self._alc_epas_good_frames = min(100, int(self._alc_epas_good_frames) + 1)
+      if not native_lkas_active:
+        self._alc_native_idle_good_frames = min(25, int(self._alc_native_idle_good_frames) + 1)
+      else:
+        self._alc_native_idle_good_frames = 0
+    else:
+      self._alc_epas_good_frames = 0
+      self._alc_native_idle_good_frames = 0
+
+    ready = bool(
+      hybrid and engaged and
+      not native_lkas_active and
+      epas_healthy and
+      not steer_inhibit and
+      int(self._alc_epas_good_frames) >= 25 and
+      int(self._alc_native_idle_good_frames) >= 5
+    )
+    ret.teslaAlcHandoverReady = ready
+
+    if ready != bool(self._alc_planner_ready_prev):
+      cloudlog.warning(
+        f"[XNOR_ALC_PLANNER_READY] ready={int(ready)} native_lkas={int(native_lkas_active)} "
+        f"eac={eac_status} error={eac_error} hands={hands} "
+        f"epas_good={int(self._alc_epas_good_frames)} idle_good={int(self._alc_native_idle_good_frames)} "
+        f"rearm={int(bool(getattr(self, '_xnor_hybrid_epas_rearm', False)))} "
+        f"failed={int(bool(getattr(self, '_xnor_hybrid_epas_failed', False)))} "
+        f"inhibit={int(steer_inhibit)}"
+      )
+    self._alc_planner_ready_prev = ready
 
 
   def _reload_tinkla_params(self) -> None:
@@ -1317,6 +1373,9 @@ class CarState(CarStateBase):
 
     # LKAS
     ret.stockLkas = bool(native_lkas_active)  # native AP LANE_KEEP_ASSIST, raw bus-2 state
+    # V1.1: modeld must not begin an independent lane-change trajectory
+    # until EPAS and the idle native carrier are genuinely ready.
+    self._update_hybrid_alc_planner_ready(ret, native_lkas_active)
 
     # Stock Autosteer should be off (includes FSD)
     # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
