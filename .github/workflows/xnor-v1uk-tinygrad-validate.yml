@@ -1,0 +1,71 @@
+name: XNOR V1 UK Tinygrad validation
+
+on:
+  push:
+    branches:
+      - xnor-speed-limit-v1-uk-tinygrad
+    paths:
+      - .github/workflows/xnor-v1uk-tinygrad-validate.yml
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: xnor-speed-limit-v1-uk-tinygrad
+
+      - name: Syntax check
+        run: python -m py_compile selfdrive/speed_limit_vision_uk.py
+
+      - name: Tinygrad ONNX zero-frame inference
+        env:
+          PYTHONPATH: tinygrad_repo
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from tinygrad.nn.onnx import OnnxRunner
+
+          path = "selfdrive/assets/vision_models/speed_limit_vision.onnx"
+          runner = OnnxRunner(path)
+          print("inputs:", runner.graph_inputs)
+          assert len(runner.graph_inputs) == 1
+          name, spec = next(iter(runner.graph_inputs.items()))
+          assert tuple(spec.shape) == (1, 3, 640, 640), tuple(spec.shape)
+          outputs = runner({name: np.zeros(spec.shape, dtype=np.float32)})
+          assert outputs
+          for key, value in outputs.items():
+            arr = value.numpy()
+            print("output", key, arr.shape, arr.dtype, float(arr.min()), float(arr.max()))
+          out = next(iter(outputs.values())).numpy()
+          assert tuple(out.shape) == (1, 19, 8400), tuple(out.shape)
+          PY
+
+      - name: Package cumulative V1 UK overlay
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/xnor-v1uk
+          mkdir -p /tmp/xnor-v1uk
+          files=(
+            common/params_keys.h
+            opendbc_repo/opendbc/car/tesla/carstate.py
+            pyproject.toml
+            selfdrive/assets/vision_models/speed_limit_vision.onnx
+            selfdrive/speed_limit_vision_uk.py
+            selfdrive/ui/layouts/settings/tesla.py
+            system/manager/process_config.py
+            uv.lock
+          )
+          for f in "${files[@]}"; do
+            mkdir -p "/tmp/xnor-v1uk/$(dirname "$f")"
+            cp "$f" "/tmp/xnor-v1uk/$f"
+          done
+          cd /tmp/xnor-v1uk
+          zip -r "$GITHUB_WORKSPACE/xnor-speed-limit-v1-uk-tinygrad-changed-files.zip" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xnor-speed-limit-v1-uk-tinygrad-changed-files
+          path: xnor-speed-limit-v1-uk-tinygrad-changed-files.zip
+          if-no-files-found: error
+          retention-days: 7
