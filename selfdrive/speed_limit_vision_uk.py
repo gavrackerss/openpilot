@@ -503,41 +503,57 @@ class SpeedLimitVisionUK:
     return float(np.clip(score, 0.0, 1.0))
 
   @staticmethod
-  def _resolve_national_limit_from_mapd_values(tile_loaded: bool, road_context: str, one_way: bool) -> tuple[int, str]:
-    """Resolve only road classes the bundled mapd schema can distinguish safely."""
+  def _resolve_national_limit_from_mapd_values(tile_loaded: bool, road_context: str,
+                                                one_way: bool, lanes: int,
+                                                way_ref: str) -> tuple[int, str]:
+    """Resolve UK NSL only where the bundled mapd outputs are specific enough.
+
+    mapd's 'freeway' context is an inferred matching class, not an OSM motorway
+    tag. Require a UK motorway reference (M + digit) before assigning 70.
+    Single-carriageway is scoped to a bidirectional, non-freeway way with at
+    most three mapped lanes; dual carriageways are normally separate one-way
+    OSM ways and therefore intentionally remain unresolved here.
+    """
     if not tile_loaded:
       return 0, "map_unavailable"
+
     context = str(road_context).lower()
-    if "freeway" in context:
+    lane_count = max(int(lanes), 0)
+    refs = [part.strip().upper().replace(" ", "") for part in str(way_ref or "").split(";")]
+    motorway_ref = any(len(ref) >= 2 and ref[0] == "M" and ref[1].isdigit() for ref in refs)
+
+    if "freeway" in context and motorway_ref:
       return 70, "motorway"
-    if "city" in context and not bool(one_way):
-      # mapd's public schema has no explicit single-carriageway enum. A
-      # non-freeway bidirectional OSM way is the deliberately narrow proxy used
-      # for the requested single-carriageway 60 mph case.
+
+    if "freeway" not in context and not bool(one_way) and lane_count <= 3:
       return 60, "single_carriageway"
+
     return 0, "unresolved"
 
-  def _mapd_national_limit(self) -> tuple[int, str, str, bool, int]:
+  def _mapd_national_limit(self) -> tuple[int, str, str, bool, int, str]:
     if self.sm is None:
-      return 0, "map_unavailable", "unknown", False, 0
+      return 0, "map_unavailable", "unknown", False, 0, ""
     try:
       if not self.sm.valid.get("mapdOut", False) or not self.sm.alive.get("mapdOut", False):
-        return 0, "map_unavailable", "unknown", False, 0
+        return 0, "map_unavailable", "unknown", False, 0, ""
       msg = self.sm["mapdOut"]
       tile_loaded = bool(msg.tileLoaded)
       context = str(msg.roadContext)
       one_way = bool(msg.oneWay)
       lanes = int(msg.lanes)
-      limit, road_class = self._resolve_national_limit_from_mapd_values(tile_loaded, context, one_way)
-      return limit, road_class, context, one_way, lanes
+      way_ref = str(msg.wayRef)
+      limit, road_class = self._resolve_national_limit_from_mapd_values(
+        tile_loaded, context, one_way, lanes, way_ref
+      )
+      return limit, road_class, context, one_way, lanes, way_ref
     except Exception:
-      return 0, "map_unavailable", "unknown", False, 0
+      return 0, "map_unavailable", "unknown", False, 0, ""
 
   def _detect_national_sign(self, frame_bgr) -> Detection | None:
     if self.national_reader is None:
       return None
 
-    resolved_mph, road_class, context, one_way, lanes = self._mapd_national_limit()
+    resolved_mph, road_class, context, one_way, lanes, way_ref = self._mapd_national_limit()
     if resolved_mph <= 0:
       return None
 
@@ -619,7 +635,7 @@ class SpeedLimitVisionUK:
         bbox_text = ",".join(str(int(v)) for v in best.bbox) if best.bbox is not None else "none"
         cloudlog.info(
           f"[XNOR_VSL_V12UK] national=1 score={best.confidence:.3f} "
-          f"mapClass={road_class} mapContext={context} oneWay={int(one_way)} lanes={lanes} "
+          f"mapClass={road_class} mapContext={context} oneWay={int(one_way)} lanes={lanes} ref={way_ref} "
           f"resolved={best.speed_limit_mph}mph bbox={bbox_text}"
         )
         self._last_national_log_at = now
@@ -785,7 +801,7 @@ class SpeedLimitVisionUK:
         )
     else:
       national = self.national_reader.read(crop) if self.national_reader is not None else None
-      resolved_mph, road_class, context, one_way, lanes = self._mapd_national_limit()
+      resolved_mph, road_class, context, one_way, lanes, way_ref = self._mapd_national_limit()
       if (
         national is not None and
         resolved_mph == int(track.speed_limit_mph) and
