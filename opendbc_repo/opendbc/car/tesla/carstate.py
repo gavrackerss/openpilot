@@ -587,9 +587,9 @@ class CarState(CarStateBase):
 
 
   def _get_vision_speed_limit_ms(self) -> float:
-    """Return a fresh confirmed V1.2-UK camera limit in m/s.
+    """Return a fresh confirmed V1.4-UK camera limit in m/s.
 
-    V1.2 also samples a provisional lower candidate. That candidate is never
+    V1.4 also samples a provisional lower candidate. That candidate is never
     allowed to raise speed: CarState only latches it when it is already below
     the current trusted Tesla/map limit at the moment it is first observed.
     """
@@ -780,14 +780,13 @@ class CarState(CarStateBase):
     # Use DAS as fallback only, never as a cap.
     chosen = speed_limit_ms if speed_limit_ms > 0.0 else speed_limit_ms_das
 
-    # XNOR Vision Speed Limit V1.2-UK:
-    # - Confirmed vision may lower Tesla/map and is usable if map is absent.
-    # - A newly accepted *provisional* vision candidate is latched only when it
-    #   is already lower than the current trusted Tesla/map/DAS source. It can
-    #   therefore never raise speed, but it immediately brings speed down even
-    #   before tracked temporal confirmation completes.
-    # - Higher signs never become a provisional cap; the daemon must confirm
-    #   them before releasing a previous lower vision restriction.
+    # XNOR Vision Speed Limit V1.4-UK:
+    # - A confirmed camera sign is authoritative in either direction. Numeric
+    #   signs have already passed independent 2/2 confirmation; NSL requires
+    #   independent 3/3 confirmation.
+    # - A newly accepted *provisional* numeric candidate remains lower-only and
+    #   is latched only when below the current trusted Tesla/map/DAS source.
+    #   Therefore a single unconfirmed camera read can never raise speed.
     vision_ms = float(self._get_vision_speed_limit_ms())
     provisional_ms = float(self._get_latched_vision_lower_candidate_ms(chosen))
     vision_applied = False
@@ -797,10 +796,14 @@ class CarState(CarStateBase):
       chosen = float(provisional_ms)
       provisional_applied = True
 
-    if vision_ms > 0.0 and (chosen <= 0.0 or vision_ms < chosen):
+    if vision_ms > 0.0:
       chosen = float(vision_ms)
       vision_applied = True
       provisional_applied = False
+      # A confirmed camera limit supersedes any older provisional lower latch.
+      self._vision_lower_latched_ms = 0.0
+      self._vision_lower_latched_confidence = 0.0
+      self._vision_lower_latched_until = 0.0
 
     self.speed_limit_ms = float(chosen)
     if vision_applied:

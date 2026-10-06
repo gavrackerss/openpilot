@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.3-UK
+# XNOR Vision Speed Limit V1.4-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,9 +29,11 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# V1.3 hardens National Speed Limit recognition after real-drive false
-# positives: stricter sign geometry, conservative map resolution, three-read
-# confirmation for NSL, and fresh tracker timestamps after detector inference.
+# V1.4 improves real-world numeric sign confirmation: overlapping ONNX boxes
+# are deduplicated before the expensive value reader, a failed/tight ring crop
+# gets one expanded retry, and temporal confirmation comes from fresh detector
+# frames rather than fragile optical-flow confirmation. Confirmed 2/2 numeric
+# signs can become authoritative even when Tesla map data is stale.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -49,6 +51,8 @@ OPENCV_RUNTIME_MARKER = OPENCV_RUNTIME_DIR / ".xnor_vsl_opencv_complete"
 RUNTIME_HZ = 20
 NORMAL_INFERENCE_INTERVAL = 0.40
 FOLLOWUP_INFERENCE_INTERVAL = 0.20
+NUMERIC_NMS_IOU_THRESHOLD = 0.55
+NUMERIC_RING_RETRY_PADDING = 0.18
 FOLLOWUP_WINDOW_SECONDS = 2.0
 TRACK_FRAME_INTERVAL = 0.10
 TRACK_MAX_AGE_SECONDS = 1.50
@@ -61,11 +65,10 @@ PUBLISHED_HOLD_SECONDS = 300.0
 HISTORY_SECONDS = 2.5
 MIN_MODEL_CONFIDENCE = 0.10
 MIN_CONFIRMED_CONFIDENCE = 0.18
-HIGHER_RELEASE_CONFIDENCE = 0.55
+HIGHER_CHANGE_CONFIDENCE = 0.55
 INITIAL_REQUIRED_READS = 2
 CHANGE_REQUIRED_READS = 2
 NATIONAL_REQUIRED_READS = 3
-HIGHER_RELEASE_REQUIRED_READS = 3
 MAX_PROPOSALS = 8
 MAX_BOX_AREA_RATIO = 0.18
 MIN_BOX_WIDTH = 10
@@ -263,11 +266,9 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitTimestamp", 0.0)
     except Exception:
       pass
-    # A newly-seen lower candidate may be fresher than an older confirmed
-    # publish that is expiring. Only an explicitly confirmed higher sign is
-    # allowed to release the conservative provisional lower cap immediately.
-    if str(reason).startswith("confirmed higher sign"):
-      self._clear_lower_candidate(reason)
+    # A newly-seen provisional lower candidate may be fresher than an older
+    # confirmed publish that is expiring, so its own 300 s lifetime is managed
+    # independently rather than being cleared here.
     self._set_status(f"UK vision: scanning ({reason})")
     if old > 0:
       cloudlog.info(f"[XNOR_VSL_V12UK] clear previous={old}mph reason={reason}")
@@ -363,7 +364,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.3: ready")
+      self._set_status("UK vision V1.4: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -661,6 +662,51 @@ class SpeedLimitVisionUK:
     )
     return result if result[2] > result[0] and result[3] > result[1] else None
 
+  @staticmethod
+  def _bbox_iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(ix2 - ix1, 0), max(iy2 - iy1, 0)
+    inter = float(iw * ih)
+    if inter <= 0.0:
+      return 0.0
+    area_a = float(max(ax2 - ax1, 0) * max(ay2 - ay1, 0))
+    area_b = float(max(bx2 - bx1, 0) * max(by2 - by1, 0))
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+  @classmethod
+  def _expand_bbox(cls, bbox, width: int, height: int, padding_ratio: float):
+    x1, y1, x2, y2 = bbox
+    bw, bh = x2 - x1, y2 - y1
+    px = max(int(round(bw * padding_ratio)), 2)
+    py = max(int(round(bh * padding_ratio)), 2)
+    return cls._clamp_bbox((x1 - px, y1 - py, x2 + px, y2 + py), width, height)
+
+  @classmethod
+  def _dedupe_numeric_proposals(cls, proposals):
+    """Keep one ONNX proposal per physical sign before running digit OCR."""
+    if not proposals:
+      return []
+
+    # Ring geometry is a stronger UK-sign cue than the legacy class score.
+    ordered = sorted(
+      proposals,
+      key=lambda item: (float(item[2]) > 0.0, float(item[2]), float(item[0])),
+      reverse=True,
+    )
+    kept = []
+    for proposal in ordered:
+      bbox = proposal[3]
+      if any(cls._bbox_iou(bbox, existing[3]) >= NUMERIC_NMS_IOU_THRESHOLD for existing in kept):
+        continue
+      kept.append(proposal)
+      if len(kept) >= MAX_PROPOSALS:
+        break
+    return kept
+
   def _track_feature_points(self, gray: np.ndarray, bbox):
     height, width = gray.shape[:2]
     x1, y1, x2, y2 = bbox
@@ -682,10 +728,11 @@ class SpeedLimitVisionUK:
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
       return
-    # NSL confirmation must come from fresh Hough + geometry detections on
-    # separate inference frames. Optical-flowing one initially-wrong circular
-    # object would otherwise make a single false positive easier to confirm.
-    if detection.source.startswith("national"):
+    # V1.4 confirmation comes only from independent detector passes on fresh
+    # camera frames. The previous numeric optical-flow path could fail before
+    # 2/2 even after a strong first read, while tracking one bad object could
+    # also make confirmation less independent.
+    if detection.source.startswith(("numeric", "national")):
       return
     try:
       gray = self.cv2.cvtColor(frame_bgr, self.cv2.COLOR_BGR2GRAY)
@@ -872,9 +919,11 @@ class SpeedLimitVisionUK:
       predictions = predictions.T
 
     max_area = frame_w * frame_h * MAX_BOX_AREA_RATIO
-    candidates = []
     raw_supported = []
 
+    # Stage 1: cheap proposal/ring pass only. Do not run digit OCR repeatedly
+    # over the several nearly-identical boxes the legacy detector often emits
+    # for one physical sign.
     for prediction in predictions:
       if len(prediction) <= 4:
         continue
@@ -905,11 +954,45 @@ class SpeedLimitVisionUK:
       if y1 > frame_h * 0.88:
         continue
 
+      bbox = (x1, y1, x2, y2)
       crop = frame_bgr[y1:y2, x1:x2]
       uk_score = self._uk_red_ring_score(crop)
-      bbox = (x1, y1, x2, y2)
-      raw_supported.append((model_conf, speed_mph, uk_score, bbox))
+
+      # A tight model box can clip the red perimeter. Retry once with a modest
+      # expansion before classifying the proposal as a ring failure.
       if uk_score <= 0.0:
+        retry_bbox = self._expand_bbox(
+          bbox, frame_w, frame_h, NUMERIC_RING_RETRY_PADDING
+        )
+        if retry_bbox is not None and retry_bbox != bbox:
+          rx1, ry1, rx2, ry2 = retry_bbox
+          retry_crop = frame_bgr[ry1:ry2, rx1:rx2]
+          retry_score = self._uk_red_ring_score(retry_crop)
+          if retry_score > uk_score:
+            uk_score = float(retry_score)
+            bbox = retry_bbox
+
+      raw_supported.append((model_conf, speed_mph, uk_score, bbox))
+
+    if not raw_supported:
+      return self._detect_national_sign(frame_bgr)
+
+    proposals = self._dedupe_numeric_proposals(raw_supported)
+    if len(proposals) < len(raw_supported):
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] numeric_dedupe raw={len(raw_supported)} kept={len(proposals)}"
+      )
+
+    # Stage 2: expensive digit OCR only on spatially distinct sign proposals.
+    candidates = []
+    for model_conf, speed_mph, uk_score, bbox in proposals:
+      x1, y1, x2, y2 = bbox
+      crop = frame_bgr[y1:y2, x1:x2]
+
+      if uk_score <= 0.0:
+        self._log_raw_proposal(
+          "ring_reject", speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
+        )
         continue
 
       value_read = self.value_reader.read(crop) if self.value_reader is not None else None
@@ -943,12 +1026,6 @@ class SpeedLimitVisionUK:
       ))
 
     if not candidates:
-      if raw_supported:
-        model_conf, legacy_speed_mph, uk_score, bbox = max(raw_supported, key=lambda item: item[0])
-        if uk_score <= 0.0:
-          self._log_raw_proposal(
-            "ring_reject", legacy_speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
-          )
       return self._detect_national_sign(frame_bgr)
 
     candidates.sort(key=lambda d: d.confidence, reverse=True)
@@ -1021,19 +1098,19 @@ class SpeedLimitVisionUK:
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
-    # V1 never uses a higher vision value as a new speed target. A strongly
-    # confirmed higher sign only releases the existing lower vision override;
-    # Tesla/map speed-limit logic then becomes authoritative again.
-    if count >= HIGHER_RELEASE_REQUIRED_READS and best_conf >= HIGHER_RELEASE_CONFIDENCE:
-      self._log_temporal_candidate(detection, count, HIGHER_RELEASE_REQUIRED_READS, "release_higher")
-      self._clear_publish(f"confirmed higher sign {detection.speed_limit_mph} mph")
-      self.followup_until = now + 1.0
+    # V1.4: an independently confirmed higher camera sign is authoritative.
+    # Numeric signs require the normal 2/2 plus a strong confidence floor;
+    # NSL already requires 3/3 and its stricter 0.78 geometry threshold.
+    higher_confidence_ok = is_national or best_conf >= HIGHER_CHANGE_CONFIDENCE
+    if count >= change_required and higher_confidence_ok:
+      self._log_temporal_candidate(detection, count, change_required, "publish_higher")
+      self._publish(detection.speed_limit_mph, best_conf)
     else:
-      decision = "waiting_higher" if best_conf >= HIGHER_RELEASE_CONFIDENCE else "higher_confidence_reject"
-      self._log_temporal_candidate(detection, count, HIGHER_RELEASE_REQUIRED_READS, decision)
+      decision = "waiting_higher" if higher_confidence_ok else "higher_confidence_reject"
+      self._log_temporal_candidate(detection, count, change_required, decision)
       self._set_status(
         f"UK higher candidate: {detection.speed_limit_mph} mph "
-        f"({count}/{HIGHER_RELEASE_REQUIRED_READS})"
+        f"({count}/{change_required})"
       )
 
   def _memory_usage_percent(self) -> float:
@@ -1090,9 +1167,8 @@ class SpeedLimitVisionUK:
         rk.keep_time()
         continue
 
-      # Cheap optical-flow confirmation runs between expensive full-frame
-      # detector passes. A successful tracked read is a genuinely later camera
-      # frame of the same physical sign and therefore counts toward 2/2 or 3/3.
+      # Legacy track support remains for diagnostics, but V1.4 confirmation is
+      # driven by independent full detector passes on fresh camera frames.
       tracked_detection = None
       if track_due:
         # recv() and detector work can be expensive; use a fresh timestamp for
@@ -1111,7 +1187,8 @@ class SpeedLimitVisionUK:
         self.last_inference_at = time.monotonic()
         if detection is not None:
           self._update_detection(detection)
-          self._start_track(frame_bgr, detection, self.last_inference_at)
+          # Do not optical-flow this detection into a second confirmation.
+          # followup_until schedules another fresh detector pass instead.
 
       if tracked_detection is None and detection is None:
         if self.published_speed_limit_mph > 0:
