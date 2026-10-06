@@ -69,7 +69,6 @@ HIGHER_CHANGE_CONFIDENCE = 0.55
 INITIAL_REQUIRED_READS = 2
 CHANGE_REQUIRED_READS = 2
 NATIONAL_REQUIRED_READS = 3
-HIGHER_RELEASE_REQUIRED_READS = 3
 MAX_PROPOSALS = 8
 MAX_BOX_AREA_RATIO = 0.18
 MIN_BOX_WIDTH = 10
@@ -267,11 +266,9 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitTimestamp", 0.0)
     except Exception:
       pass
-    # A newly-seen lower candidate may be fresher than an older confirmed
-    # publish that is expiring. Only an explicitly confirmed higher sign is
-    # allowed to release the conservative provisional lower cap immediately.
-    if str(reason).startswith("confirmed higher sign"):
-      self._clear_lower_candidate(reason)
+    # A newly-seen provisional lower candidate may be fresher than an older
+    # confirmed publish that is expiring, so its own 300 s lifetime is managed
+    # independently rather than being cleared here.
     self._set_status(f"UK vision: scanning ({reason})")
     if old > 0:
       cloudlog.info(f"[XNOR_VSL_V12UK] clear previous={old}mph reason={reason}")
