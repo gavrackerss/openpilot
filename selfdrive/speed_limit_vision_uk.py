@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.6-UK
+# XNOR Vision Speed Limit V1.7-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,11 +29,10 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# V1.6 recentres numeric sign crops on the dominant red ring before geometry
-# scoring/OCR. This makes yellow-backed UK terminal signs behave like ordinary
-# circular signs without loosening the red-ring gate. CarState V1.6 also gives
-# confirmed camera limits decaying authority instead of an unconditional
-# five-minute override.
+# V1.7 replaces the coarse fixed-box numeric reacquirer with a lightweight
+# 20 Hz local red-ring tracker and 10 Hz digit reread. It activates only after
+# one fully accepted numeric detection and can confirm only that same value on
+# a later camera frame, preserving the original independent 2/2 rule.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -55,15 +54,18 @@ NUMERIC_NMS_IOU_THRESHOLD = 0.55
 NUMERIC_RING_RETRY_PADDING = 0.18
 NUMERIC_RING_RECENTER_PADDING = 0.08
 NUMERIC_RING_MIN_BOX_RATIO = 0.035
-NUMERIC_REACQUIRE_MIN_DELAY = 0.08
-NUMERIC_REACQUIRE_INTERVAL = 0.10
-NUMERIC_REACQUIRE_MAX_AGE = 1.25
-NUMERIC_REACQUIRE_MAX_ATTEMPTS = 5
-NUMERIC_REACQUIRE_ARM_MIN_CONFIDENCE = 0.40
-NUMERIC_REACQUIRE_MIN_CONFIDENCE = 0.52
-NUMERIC_REACQUIRE_OFFSETS = (-0.18, 0.0, 0.18)
-NUMERIC_REACQUIRE_SCALES = (0.92, 1.05, 1.18)
-NUMERIC_REACQUIRE_MAX_OCR = 3
+NUMERIC_TRACK_INTERVAL = 0.05
+NUMERIC_TRACK_OCR_INTERVAL = 0.10
+NUMERIC_TRACK_MIN_DELAY = 0.08
+NUMERIC_TRACK_MAX_AGE = 1.50
+NUMERIC_TRACK_MAX_FRAMES = 24
+NUMERIC_TRACK_ARM_MIN_CONFIDENCE = 0.40
+NUMERIC_TRACK_MIN_CONFIDENCE = 0.52
+NUMERIC_TRACK_SEARCH_PADDING = 1.25
+NUMERIC_TRACK_MIN_SCALE = 0.50
+NUMERIC_TRACK_MAX_SCALE = 2.40
+NUMERIC_TRACK_MAX_CENTER_SHIFT = 1.75
+NUMERIC_TRACK_MIN_RING_SCORE = 0.20
 FOLLOWUP_WINDOW_SECONDS = 2.0
 TRACK_FRAME_INTERVAL = 0.10
 TRACK_MAX_AGE_SECONDS = 1.50
@@ -130,8 +132,10 @@ class PendingNumeric:
   speed_limit_mph: int
   bbox: tuple[int, int, int, int]
   created_at: float
-  last_attempt_at: float
-  attempts: int = 0
+  last_track_at: float
+  last_ocr_at: float
+  frames: int = 0
+  ocr_attempts: int = 0
   first_confidence: float = 0.0
 
 
@@ -233,6 +237,8 @@ class SpeedLimitVisionUK:
       pass
     self._set_status(f"UK vision: {speed_limit_mph} mph ({confidence * 100.0:.0f}%)")
     cloudlog.info(f"[XNOR_VSL_V12UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
+    if self.pending_numeric is not None and self.pending_numeric.speed_limit_mph == int(speed_limit_mph):
+      self._clear_pending_numeric("published")
 
   def _publish_lower_candidate(self, detection: Detection) -> None:
     """Publish an accepted sign as a provisional lower-only candidate.
@@ -386,7 +392,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.6: ready")
+      self._set_status("UK vision V1.7: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -806,17 +812,17 @@ class SpeedLimitVisionUK:
     if pending is not None:
       cloudlog.info(
         f"[XNOR_VSL_V12UK] numeric_pending_clear speed={pending.speed_limit_mph}mph "
-        f"attempts={pending.attempts} reason={reason}"
+        f"frames={pending.frames} ocr={pending.ocr_attempts} reason={reason}"
       )
     self.pending_numeric = None
 
   def _arm_pending_numeric(self, detection: Detection, now: float | None = None) -> None:
     if detection.bbox is None or detection.source != "numeric":
       return
-    if detection.confidence < NUMERIC_REACQUIRE_ARM_MIN_CONFIDENCE:
+    if detection.confidence < NUMERIC_TRACK_ARM_MIN_CONFIDENCE:
       return
-    # No need to reacquire a value that is already the confirmed publish.
     if self.published_speed_limit_mph == int(detection.speed_limit_mph):
+      self._clear_pending_numeric("already_published")
       return
 
     stamp = time.monotonic() if now is None else float(now)
@@ -824,8 +830,10 @@ class SpeedLimitVisionUK:
       speed_limit_mph=int(detection.speed_limit_mph),
       bbox=detection.bbox,
       created_at=stamp,
-      last_attempt_at=stamp,
-      attempts=0,
+      last_track_at=stamp,
+      last_ocr_at=stamp,
+      frames=0,
+      ocr_attempts=0,
       first_confidence=float(detection.confidence),
     )
     bbox_text = ",".join(str(int(v)) for v in detection.bbox)
@@ -834,29 +842,101 @@ class SpeedLimitVisionUK:
       f"confidence={detection.confidence:.3f} bbox={bbox_text}"
     )
 
-  def _numeric_reacquire_boxes(self, bbox, frame_w: int, frame_h: int):
-    """Generate a compact local position/scale search around the first-read box."""
-    x1, y1, x2, y2 = bbox
-    bw = max(x2 - x1, 1)
-    bh = max(y2 - y1, 1)
-    cx = (x1 + x2) * 0.5
-    cy = (y1 + y2) * 0.5
-    boxes = []
-    for scale in NUMERIC_REACQUIRE_SCALES:
-      sw = bw * float(scale)
-      sh = bh * float(scale)
-      for oy in NUMERIC_REACQUIRE_OFFSETS:
-        for ox in NUMERIC_REACQUIRE_OFFSETS:
-          bx = cx + float(ox) * bw
-          by = cy + float(oy) * bh
-          candidate = self._clamp_bbox(
-            (bx - sw * 0.5, by - sh * 0.5, bx + sw * 0.5, by + sh * 0.5),
-            frame_w,
-            frame_h,
-          )
-          if candidate is not None and candidate not in boxes:
-            boxes.append(candidate)
-    return boxes
+  def _find_tracked_numeric_ring(self, frame_bgr: np.ndarray, bbox):
+    """Follow the already-detected red ring in a small local ROI.
+
+    This is intentionally not a second full-frame detector. Candidate geometry
+    must remain close in position/scale to the previously accepted physical
+    sign and must still pass the normal UK red-ring scorer.
+    """
+    frame_h, frame_w = frame_bgr.shape[:2]
+    search_bbox = self._expand_bbox(
+      bbox, frame_w, frame_h, NUMERIC_TRACK_SEARCH_PADDING
+    )
+    if search_bbox is None:
+      return None
+
+    sx1, sy1, sx2, sy2 = search_bbox
+    search = frame_bgr[sy1:sy2, sx1:sx2]
+    if search.size == 0:
+      return None
+
+    try:
+      hsv = self.cv2.cvtColor(search, self.cv2.COLOR_BGR2HSV)
+      hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+      red = (
+        (((hue <= 12) | (hue >= 168))) &
+        (sat >= 65) &
+        (val >= 50)
+      ).astype(np.uint8) * 255
+      red = self.cv2.morphologyEx(
+        red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
+      )
+      contours, _hier = self.cv2.findContours(
+        red, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
+      )
+    except Exception:
+      return None
+
+    px1, py1, px2, py2 = bbox
+    prev_w = max(px2 - px1, 1)
+    prev_h = max(py2 - py1, 1)
+    prev_cx = (px1 + px2) * 0.5
+    prev_cy = (py1 + py2) * 0.5
+
+    best = None
+    best_rank = -1.0
+    for contour in contours:
+      x, y, cw, ch = self.cv2.boundingRect(contour)
+      if cw < 8 or ch < 8:
+        continue
+      aspect = cw / max(ch, 1)
+      if aspect < 0.55 or aspect > 1.65:
+        continue
+
+      gx1, gy1 = sx1 + x, sy1 + y
+      gx2, gy2 = gx1 + cw, gy1 + ch
+      scale_w = cw / float(prev_w)
+      scale_h = ch / float(prev_h)
+      if not (
+        NUMERIC_TRACK_MIN_SCALE <= scale_w <= NUMERIC_TRACK_MAX_SCALE and
+        NUMERIC_TRACK_MIN_SCALE <= scale_h <= NUMERIC_TRACK_MAX_SCALE
+      ):
+        continue
+
+      cx = (gx1 + gx2) * 0.5
+      cy = (gy1 + gy2) * 0.5
+      dx = abs(cx - prev_cx) / float(prev_w)
+      dy = abs(cy - prev_cy) / float(prev_h)
+      if dx > NUMERIC_TRACK_MAX_CENTER_SHIFT or dy > NUMERIC_TRACK_MAX_CENTER_SHIFT:
+        continue
+
+      # Add a little white margin around the red contour so ring/centre
+      # geometry and digit OCR see the complete circular sign face.
+      pad_x = max(int(round(cw * NUMERIC_RING_RECENTER_PADDING)), 2)
+      pad_y = max(int(round(ch * NUMERIC_RING_RECENTER_PADDING)), 2)
+      candidate = self._clamp_bbox(
+        (gx1 - pad_x, gy1 - pad_y, gx2 + pad_x, gy2 + pad_y),
+        frame_w,
+        frame_h,
+      )
+      if candidate is None:
+        continue
+      x1, y1, x2, y2 = candidate
+      crop = frame_bgr[y1:y2, x1:x2]
+      ring = self._uk_red_ring_score(crop)
+      if ring < NUMERIC_TRACK_MIN_RING_SCORE:
+        continue
+
+      motion = float(np.hypot(dx, dy))
+      proximity = max(0.0, 1.0 - motion / max(NUMERIC_TRACK_MAX_CENTER_SHIFT * 1.414, 1e-3))
+      squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+      rank = float(ring) * 0.70 + proximity * 0.20 + squareness * 0.10
+      if rank > best_rank:
+        best_rank = rank
+        best = (candidate, float(ring))
+
+    return best
 
   def _reacquire_pending_numeric(self, frame_bgr: np.ndarray, now: float) -> Detection | None:
     pending = self.pending_numeric
@@ -864,66 +944,91 @@ class SpeedLimitVisionUK:
       return None
 
     age = now - pending.created_at
-    if age > NUMERIC_REACQUIRE_MAX_AGE:
+    if age > NUMERIC_TRACK_MAX_AGE:
       self._clear_pending_numeric("age")
       return None
-    if age < NUMERIC_REACQUIRE_MIN_DELAY:
+    if age < NUMERIC_TRACK_MIN_DELAY:
       return None
-    if now - pending.last_attempt_at < NUMERIC_REACQUIRE_INTERVAL:
+    if now - pending.last_track_at < NUMERIC_TRACK_INTERVAL:
       return None
 
-    pending.last_attempt_at = float(now)
-    pending.attempts += 1
+    pending.last_track_at = float(now)
+    pending.frames += 1
 
-    frame_h, frame_w = frame_bgr.shape[:2]
-    scored = []
-    for bbox in self._numeric_reacquire_boxes(pending.bbox, frame_w, frame_h):
-      x1, y1, x2, y2 = bbox
-      crop = frame_bgr[y1:y2, x1:x2]
-      ring = self._uk_red_ring_score(crop)
-      if ring > 0.0:
-        scored.append((float(ring), bbox))
+    found = self._find_tracked_numeric_ring(frame_bgr, pending.bbox)
+    if found is None:
+      if pending.frames <= 3 or pending.frames % 5 == 0:
+        cloudlog.info(
+          f"[XNOR_VSL_V12UK] numeric_track_miss speed={pending.speed_limit_mph}mph "
+          f"frame={pending.frames}/{NUMERIC_TRACK_MAX_FRAMES}"
+        )
+      if pending.frames >= NUMERIC_TRACK_MAX_FRAMES:
+        self._clear_pending_numeric("frames")
+      return None
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    for ring, bbox in scored[:NUMERIC_REACQUIRE_MAX_OCR]:
-      x1, y1, x2, y2 = bbox
-      crop = frame_bgr[y1:y2, x1:x2]
-      read = self.value_reader.read(crop) if self.value_reader is not None else None
-      if read is None or int(read.speed_limit_mph) != int(pending.speed_limit_mph):
-        continue
+    tracked_bbox, ring = found
+    pending.bbox = tracked_bbox
+    bbox_text = ",".join(str(int(v)) for v in tracked_bbox)
 
-      value_conf = float(read.confidence)
-      confidence = float(np.clip(value_conf * 0.65 + ring * 0.35, 0.0, 0.99))
-      if confidence < NUMERIC_REACQUIRE_MIN_CONFIDENCE:
-        continue
+    # Track at up to 20 Hz, but the template digit reader is the more expensive
+    # part. Re-read digits at up to 10 Hz on the best continuously-followed box.
+    if now - pending.last_ocr_at < NUMERIC_TRACK_OCR_INTERVAL:
+      if pending.frames <= 3 or pending.frames % 5 == 0:
+        cloudlog.info(
+          f"[XNOR_VSL_V12UK] numeric_track speed={pending.speed_limit_mph}mph "
+          f"frame={pending.frames} ring={ring:.3f} bbox={bbox_text}"
+        )
+      return None
 
-      detection = Detection(
-        speed_limit_mph=int(read.speed_limit_mph),
-        confidence=confidence,
-        model_confidence=0.0,
-        ring_score=float(ring),
-        value_confidence=value_conf,
-        legacy_speed_mph=0,
-        bbox=bbox,
-        source="numeric_reacquire",
-      )
-      bbox_text = ",".join(str(int(v)) for v in bbox)
+    pending.last_ocr_at = float(now)
+    pending.ocr_attempts += 1
+    x1, y1, x2, y2 = tracked_bbox
+    crop = frame_bgr[y1:y2, x1:x2]
+    read = self.value_reader.read(crop) if self.value_reader is not None else None
+
+    if read is None:
       cloudlog.info(
-        f"[XNOR_VSL_V12UK] numeric_reacquire speed={detection.speed_limit_mph}mph "
-        f"confidence={detection.confidence:.3f} ring={ring:.3f} "
-        f"valueConf={value_conf:.3f} attempt={pending.attempts} bbox={bbox_text}"
+        f"[XNOR_VSL_V12UK] numeric_track_read_miss speed={pending.speed_limit_mph}mph "
+        f"frame={pending.frames} ocr={pending.ocr_attempts} ring={ring:.3f}"
       )
-      self._clear_pending_numeric("confirmed")
-      return detection
+      return None
 
-    cloudlog.info(
-      f"[XNOR_VSL_V12UK] numeric_reacquire_miss speed={pending.speed_limit_mph}mph "
-      f"attempt={pending.attempts}/{NUMERIC_REACQUIRE_MAX_ATTEMPTS} "
-      f"ringCandidates={len(scored)}"
+    value_conf = float(read.confidence)
+    read_speed = int(read.speed_limit_mph)
+    confidence = float(np.clip(value_conf * 0.65 + ring * 0.35, 0.0, 0.99))
+
+    if read_speed != int(pending.speed_limit_mph):
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] numeric_track_mismatch expected={pending.speed_limit_mph}mph "
+        f"read={read_speed}mph confidence={confidence:.3f} frame={pending.frames}"
+      )
+      return None
+
+    if confidence < NUMERIC_TRACK_MIN_CONFIDENCE:
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] numeric_track_low_conf speed={read_speed}mph "
+        f"confidence={confidence:.3f} frame={pending.frames}"
+      )
+      return None
+
+    detection = Detection(
+      speed_limit_mph=read_speed,
+      confidence=confidence,
+      model_confidence=0.0,
+      ring_score=float(ring),
+      value_confidence=value_conf,
+      legacy_speed_mph=0,
+      bbox=tracked_bbox,
+      source="numeric_reacquire",
     )
-    if pending.attempts >= NUMERIC_REACQUIRE_MAX_ATTEMPTS:
-      self._clear_pending_numeric("attempts")
-    return None
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] numeric_reacquire speed={detection.speed_limit_mph}mph "
+      f"confidence={detection.confidence:.3f} ring={ring:.3f} "
+      f"valueConf={value_conf:.3f} frame={pending.frames} "
+      f"ocr={pending.ocr_attempts} bbox={bbox_text}"
+    )
+    self._clear_pending_numeric("confirmed")
+    return detection
 
   def _track_feature_points(self, gray: np.ndarray, bbox):
     height, width = gray.shape[:2]
@@ -946,7 +1051,7 @@ class SpeedLimitVisionUK:
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
       return
-    # V1.6 confirmation comes only from independent detector passes on fresh
+    # V1.7 confirmation comes only from independent detector passes on fresh
     # camera frames. The previous numeric optical-flow path could fail before
     # 2/2 even after a strong first read, while tracking one bad object could
     # also make confirmation less independent.
@@ -1316,7 +1421,7 @@ class SpeedLimitVisionUK:
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
-    # V1.6: an independently confirmed higher camera sign is authoritative.
+    # V1.7: an independently confirmed higher camera sign is authoritative.
     # Numeric signs require the normal 2/2 plus a strong confidence floor;
     # NSL already requires 3/3 and its stricter 0.78 geometry threshold.
     higher_confidence_ok = is_national or best_conf >= HIGHER_CHANGE_CONFIDENCE
@@ -1380,8 +1485,8 @@ class SpeedLimitVisionUK:
       track_due = self.track is not None and (now - self.track.last_frame_at) >= TRACK_FRAME_INTERVAL
       pending_due = (
         self.pending_numeric is not None and
-        (now - self.pending_numeric.created_at) >= NUMERIC_REACQUIRE_MIN_DELAY and
-        (now - self.pending_numeric.last_attempt_at) >= NUMERIC_REACQUIRE_INTERVAL
+        (now - self.pending_numeric.created_at) >= NUMERIC_TRACK_MIN_DELAY and
+        (now - self.pending_numeric.last_track_at) >= NUMERIC_TRACK_INTERVAL
       )
       if not detector_due and not track_due and not pending_due:
         rk.keep_time()
@@ -1392,9 +1497,9 @@ class SpeedLimitVisionUK:
         rk.keep_time()
         continue
 
-      # V1.5 first tries a cheap local reacquisition on a genuinely fresh
-      # camera frame. A successful read counts as the independent second
-      # observation and skips the full ONNX detector on this same frame.
+      # V1.7 follows an already-accepted numeric sign locally at up to 20 Hz
+      # and reruns digit OCR at up to 10 Hz. A successful read is from a fresh
+      # camera frame and skips full ONNX on that same frame.
       reacquired_detection = None
       if pending_due:
         reacquired_detection = self._reacquire_pending_numeric(frame_bgr, time.monotonic())
