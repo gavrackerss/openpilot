@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.4-UK
+# XNOR Vision Speed Limit V1.5-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,11 +29,11 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# V1.4 improves real-world numeric sign confirmation: overlapping ONNX boxes
-# are deduplicated before the expensive value reader, a failed/tight ring crop
-# gets one expanded retry, and temporal confirmation comes from fresh detector
-# frames rather than fragile optical-flow confirmation. Confirmed 2/2 numeric
-# signs can become authoritative even when Tesla map data is stale.
+# V1.5 adds a short-lived fresh-frame numeric reacquisition path. After a valid
+# first numeric read, subsequent camera frames search a small position/scale
+# window around that physical sign and rerun the UK ring + value readers. This
+# preserves independent-frame 2/2 confirmation without requiring ONNX to
+# rediscover the same sign on the second frame.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -53,6 +53,15 @@ NORMAL_INFERENCE_INTERVAL = 0.40
 FOLLOWUP_INFERENCE_INTERVAL = 0.20
 NUMERIC_NMS_IOU_THRESHOLD = 0.55
 NUMERIC_RING_RETRY_PADDING = 0.18
+NUMERIC_REACQUIRE_MIN_DELAY = 0.08
+NUMERIC_REACQUIRE_INTERVAL = 0.10
+NUMERIC_REACQUIRE_MAX_AGE = 1.25
+NUMERIC_REACQUIRE_MAX_ATTEMPTS = 5
+NUMERIC_REACQUIRE_ARM_MIN_CONFIDENCE = 0.40
+NUMERIC_REACQUIRE_MIN_CONFIDENCE = 0.52
+NUMERIC_REACQUIRE_OFFSETS = (-0.18, 0.0, 0.18)
+NUMERIC_REACQUIRE_SCALES = (0.92, 1.05, 1.18)
+NUMERIC_REACQUIRE_MAX_OCR = 3
 FOLLOWUP_WINDOW_SECONDS = 2.0
 TRACK_FRAME_INTERVAL = 0.10
 TRACK_MAX_AGE_SECONDS = 1.50
@@ -115,6 +124,16 @@ class SignTrack:
 
 
 @dataclass
+class PendingNumeric:
+  speed_limit_mph: int
+  bbox: tuple[int, int, int, int]
+  created_at: float
+  last_attempt_at: float
+  attempts: int = 0
+  first_confidence: float = 0.0
+
+
+@dataclass
 class HistoryEntry:
   speed_limit_mph: int
   confidence: float
@@ -145,6 +164,7 @@ class SpeedLimitVisionUK:
     self._last_raw_log_signature = None
     self._last_raw_log_at = 0.0
     self.track: SignTrack | None = None
+    self.pending_numeric: PendingNumeric | None = None
     self.last_candidate_at = 0.0
     self._last_national_log_at = 0.0
 
@@ -364,7 +384,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.4: ready")
+      self._set_status("UK vision V1.5: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -707,6 +727,130 @@ class SpeedLimitVisionUK:
         break
     return kept
 
+  def _clear_pending_numeric(self, reason: str) -> None:
+    pending = self.pending_numeric
+    if pending is not None:
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] numeric_pending_clear speed={pending.speed_limit_mph}mph "
+        f"attempts={pending.attempts} reason={reason}"
+      )
+    self.pending_numeric = None
+
+  def _arm_pending_numeric(self, detection: Detection, now: float | None = None) -> None:
+    if detection.bbox is None or detection.source != "numeric":
+      return
+    if detection.confidence < NUMERIC_REACQUIRE_ARM_MIN_CONFIDENCE:
+      return
+    # No need to reacquire a value that is already the confirmed publish.
+    if self.published_speed_limit_mph == int(detection.speed_limit_mph):
+      return
+
+    stamp = time.monotonic() if now is None else float(now)
+    self.pending_numeric = PendingNumeric(
+      speed_limit_mph=int(detection.speed_limit_mph),
+      bbox=detection.bbox,
+      created_at=stamp,
+      last_attempt_at=stamp,
+      attempts=0,
+      first_confidence=float(detection.confidence),
+    )
+    bbox_text = ",".join(str(int(v)) for v in detection.bbox)
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] numeric_pending_arm speed={detection.speed_limit_mph}mph "
+      f"confidence={detection.confidence:.3f} bbox={bbox_text}"
+    )
+
+  def _numeric_reacquire_boxes(self, bbox, frame_w: int, frame_h: int):
+    """Generate a compact local position/scale search around the first-read box."""
+    x1, y1, x2, y2 = bbox
+    bw = max(x2 - x1, 1)
+    bh = max(y2 - y1, 1)
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+    boxes = []
+    for scale in NUMERIC_REACQUIRE_SCALES:
+      sw = bw * float(scale)
+      sh = bh * float(scale)
+      for oy in NUMERIC_REACQUIRE_OFFSETS:
+        for ox in NUMERIC_REACQUIRE_OFFSETS:
+          bx = cx + float(ox) * bw
+          by = cy + float(oy) * bh
+          candidate = self._clamp_bbox(
+            (bx - sw * 0.5, by - sh * 0.5, bx + sw * 0.5, by + sh * 0.5),
+            frame_w,
+            frame_h,
+          )
+          if candidate is not None and candidate not in boxes:
+            boxes.append(candidate)
+    return boxes
+
+  def _reacquire_pending_numeric(self, frame_bgr: np.ndarray, now: float) -> Detection | None:
+    pending = self.pending_numeric
+    if pending is None:
+      return None
+
+    age = now - pending.created_at
+    if age > NUMERIC_REACQUIRE_MAX_AGE:
+      self._clear_pending_numeric("age")
+      return None
+    if age < NUMERIC_REACQUIRE_MIN_DELAY:
+      return None
+    if now - pending.last_attempt_at < NUMERIC_REACQUIRE_INTERVAL:
+      return None
+
+    pending.last_attempt_at = float(now)
+    pending.attempts += 1
+
+    frame_h, frame_w = frame_bgr.shape[:2]
+    scored = []
+    for bbox in self._numeric_reacquire_boxes(pending.bbox, frame_w, frame_h):
+      x1, y1, x2, y2 = bbox
+      crop = frame_bgr[y1:y2, x1:x2]
+      ring = self._uk_red_ring_score(crop)
+      if ring > 0.0:
+        scored.append((float(ring), bbox))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    for ring, bbox in scored[:NUMERIC_REACQUIRE_MAX_OCR]:
+      x1, y1, x2, y2 = bbox
+      crop = frame_bgr[y1:y2, x1:x2]
+      read = self.value_reader.read(crop) if self.value_reader is not None else None
+      if read is None or int(read.speed_limit_mph) != int(pending.speed_limit_mph):
+        continue
+
+      value_conf = float(read.confidence)
+      confidence = float(np.clip(value_conf * 0.65 + ring * 0.35, 0.0, 0.99))
+      if confidence < NUMERIC_REACQUIRE_MIN_CONFIDENCE:
+        continue
+
+      detection = Detection(
+        speed_limit_mph=int(read.speed_limit_mph),
+        confidence=confidence,
+        model_confidence=0.0,
+        ring_score=float(ring),
+        value_confidence=value_conf,
+        legacy_speed_mph=0,
+        bbox=bbox,
+        source="numeric_reacquire",
+      )
+      bbox_text = ",".join(str(int(v)) for v in bbox)
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] numeric_reacquire speed={detection.speed_limit_mph}mph "
+        f"confidence={detection.confidence:.3f} ring={ring:.3f} "
+        f"valueConf={value_conf:.3f} attempt={pending.attempts} bbox={bbox_text}"
+      )
+      self._clear_pending_numeric("confirmed")
+      return detection
+
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] numeric_reacquire_miss speed={pending.speed_limit_mph}mph "
+      f"attempt={pending.attempts}/{NUMERIC_REACQUIRE_MAX_ATTEMPTS} "
+      f"ringCandidates={len(scored)}"
+    )
+    if pending.attempts >= NUMERIC_REACQUIRE_MAX_ATTEMPTS:
+      self._clear_pending_numeric("attempts")
+    return None
+
   def _track_feature_points(self, gray: np.ndarray, bbox):
     height, width = gray.shape[:2]
     x1, y1, x2, y2 = bbox
@@ -728,7 +872,7 @@ class SpeedLimitVisionUK:
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
       return
-    # V1.4 confirmation comes only from independent detector passes on fresh
+    # V1.5 confirmation comes only from independent detector passes on fresh
     # camera frames. The previous numeric optical-flow path could fail before
     # 2/2 even after a strong first read, while tracking one bad object could
     # also make confirmation less independent.
@@ -1098,7 +1242,7 @@ class SpeedLimitVisionUK:
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
-    # V1.4: an independently confirmed higher camera sign is authoritative.
+    # V1.5: an independently confirmed higher camera sign is authoritative.
     # Numeric signs require the normal 2/2 plus a strong confidence floor;
     # NSL already requires 3/3 and its stricter 0.78 geometry threshold.
     higher_confidence_ok = is_national or best_conf >= HIGHER_CHANGE_CONFIDENCE
@@ -1141,6 +1285,7 @@ class SpeedLimitVisionUK:
 
       if mem >= MEMORY_CRITICAL_PERCENT:
         self._clear_track("memory")
+        self._clear_pending_numeric("memory")
         self._disconnect_camera()
         self._set_status(f"UK vision paused - memory {mem:.0f}%")
         rk.keep_time()
@@ -1148,6 +1293,7 @@ class SpeedLimitVisionUK:
 
       if not self._connect_camera():
         self._clear_track("camera")
+        self._clear_pending_numeric("camera")
         self._set_status("UK vision: waiting for camera")
         rk.keep_time()
         continue
@@ -1158,7 +1304,12 @@ class SpeedLimitVisionUK:
 
       detector_due = (now - self.last_inference_at) >= detector_interval
       track_due = self.track is not None and (now - self.track.last_frame_at) >= TRACK_FRAME_INTERVAL
-      if not detector_due and not track_due:
+      pending_due = (
+        self.pending_numeric is not None and
+        (now - self.pending_numeric.created_at) >= NUMERIC_REACQUIRE_MIN_DELAY and
+        (now - self.pending_numeric.last_attempt_at) >= NUMERIC_REACQUIRE_INTERVAL
+      )
+      if not detector_due and not track_due and not pending_due:
         rk.keep_time()
         continue
 
@@ -1167,10 +1318,20 @@ class SpeedLimitVisionUK:
         rk.keep_time()
         continue
 
-      # Legacy track support remains for diagnostics, but V1.4 confirmation is
-      # driven by independent full detector passes on fresh camera frames.
+      # V1.5 first tries a cheap local reacquisition on a genuinely fresh
+      # camera frame. A successful read counts as the independent second
+      # observation and skips the full ONNX detector on this same frame.
+      reacquired_detection = None
+      if pending_due:
+        reacquired_detection = self._reacquire_pending_numeric(frame_bgr, time.monotonic())
+        if reacquired_detection is not None:
+          self._update_detection(reacquired_detection)
+
+      # Legacy track support remains for diagnostics. Numeric/NSL tracks are
+      # not armed by V1.5, so normal confirmation comes from reacquisition or
+      # independent full detector passes.
       tracked_detection = None
-      if track_due:
+      if reacquired_detection is None and track_due:
         # recv() and detector work can be expensive; use a fresh timestamp for
         # track age rather than the loop timestamp captured before camera I/O.
         tracked_detection = self._track_detection(frame_bgr, time.monotonic())
@@ -1180,17 +1341,19 @@ class SpeedLimitVisionUK:
       # Do not count a detector result from the same frame as an additional
       # temporal read. If tracking succeeded, wait for the next frame.
       detection = None
-      if tracked_detection is None and detector_due:
+      if reacquired_detection is None and tracked_detection is None and detector_due:
         detection = self._detect(frame_bgr)
         # Stamp the completed inference. V1.2 stamped before inference, so a
         # slow detector pass could consume the entire 1.5 s track lifetime.
         self.last_inference_at = time.monotonic()
         if detection is not None:
           self._update_detection(detection)
+          if detection.source == "numeric":
+            self._arm_pending_numeric(detection, self.last_inference_at)
           # Do not optical-flow this detection into a second confirmation.
-          # followup_until schedules another fresh detector pass instead.
+          # followup_until still schedules fresh detector passes as a fallback.
 
-      if tracked_detection is None and detection is None:
+      if reacquired_detection is None and tracked_detection is None and detection is None:
         if self.published_speed_limit_mph > 0:
           self._set_status(f"UK vision: holding {self.published_speed_limit_mph} mph")
         elif self.last_candidate_at > 0.0:
