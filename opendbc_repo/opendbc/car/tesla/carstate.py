@@ -947,11 +947,16 @@ class CarState(CarStateBase):
     # - A provisional 1/2 numeric candidate remains lower-only and now expires
     #   quickly unless reacquisition promotes it to a confirmed sign.
     vision_ms = float(self._get_vision_speed_limit_ms())
-    provisional_ms = float(self._get_latched_vision_lower_candidate_ms(chosen))
+    # A new lower 1/2 sign should be able to cap an older confirmed camera
+    # value even when Tesla map is already at that same lower value.
+    provisional_reference_ms = max(float(chosen), float(vision_ms))
+    provisional_ms = float(self._get_latched_vision_lower_candidate_ms(provisional_reference_ms))
     vision_applied = False
     provisional_applied = False
 
-    map_for_arbitration = float(chosen)
+    # Only real Tesla map/navigation data may release a confirmed camera value.
+    # DAS_accSpeedLimit is a fallback and is known to stick at low defaults.
+    map_for_arbitration = float(speed_limit_ms)
     if vision_ms > 0.0 and self._confirmed_vision_is_authoritative(
       vision_ms, map_for_arbitration, v_ego_ms
     ):
