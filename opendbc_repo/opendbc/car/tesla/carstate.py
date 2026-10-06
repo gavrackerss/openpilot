@@ -40,6 +40,20 @@ class CarState(CarStateBase):
   DOUBLE_PULL_WINDOW_MS = 750
   XNOR_CRUISE_SET_HOLD_MS = 8_000
 
+  # V1.6 camera/map arbitration. A camera observation is strongest immediately
+  # after it is seen, but must not remain an unconditional five-minute truth
+  # after the vehicle has moved onto another road/estate.
+  VISION_MAP_MATCH_TOLERANCE_MPH = 1.5
+  VISION_MAP_SYNC_SECONDS = 2.0
+  VISION_SYNCED_RELEASE_SECONDS = 4.0
+  VISION_SYNCED_RELEASE_DISTANCE_M = 20.0
+  VISION_UNSYNC_RELEASE_SECONDS = 60.0
+  VISION_UNSYNC_RELEASE_DISTANCE_M = 300.0
+  VISION_HARD_RELEASE_SECONDS = 90.0
+  VISION_HARD_RELEASE_DISTANCE_M = 150.0
+  VISION_MAP_DISAGREE_SECONDS = 5.0
+  VISION_PROVISIONAL_HOLD_SECONDS = 30.0
+
   def update_button_enable(self, button_events: list[structs.CarState.ButtonEvent]):
     # Non-PCM modes retain their established falling-edge behaviour. Hybrid is deliberately PCM
     # here and engages through V198's cruiseState rising edge, not through buttonEnable.
@@ -141,6 +155,17 @@ class CarState(CarStateBase):
     self._vision_lower_latched_confidence = 0.0
     self._vision_lower_latched_until = 0.0
     self._vision_speed_limit_last_read_frame = -100000
+
+    # V1.6 camera-limit aging / map synchronisation state.
+    self._vision_ignored_timestamp = 0.0
+    self._vision_observation_timestamp = 0.0
+    self._vision_observation_distance_m = 0.0
+    self._vision_distance_total_m = 0.0
+    self._vision_distance_last_update = 0.0
+    self._vision_map_match_since = 0.0
+    self._vision_map_synced = False
+    self._vision_map_disagree_since = 0.0
+    self._vision_map_disagree_distance_m = 0.0
     # Tesla UI speed-limit offset (if present on CAN)
     self.ui_speed_limit_offset_uom = 0.0
     self.ui_speed_limit_offset_units = ""  # "MPH" or "KPH"
@@ -587,9 +612,9 @@ class CarState(CarStateBase):
 
 
   def _get_vision_speed_limit_ms(self) -> float:
-    """Return a fresh confirmed V1.4-UK camera limit in m/s.
+    """Return a fresh confirmed V1.6-UK camera limit in m/s.
 
-    V1.4 also samples a provisional lower candidate. That candidate is never
+    V1.6 also samples a provisional lower candidate. That candidate is never
     allowed to raise speed: CarState only latches it when it is already below
     the current trusted Tesla/map limit at the moment it is first observed.
     """
@@ -625,14 +650,15 @@ class CarState(CarStateBase):
     valid = (
       min_ms <= limit_ms <= max_ms and
       confidence >= 0.18 and
-      0.0 <= age_s <= 310.0
+      0.0 <= age_s <= 310.0 and
+      timestamp != float(self._vision_ignored_timestamp)
     )
 
     candidate_age_s = now - candidate_ts if candidate_ts > 0.0 else 1e9
     candidate_valid = (
       min_ms <= candidate_ms <= max_ms and
       candidate_conf >= 0.18 and
-      0.0 <= candidate_age_s <= 310.0
+      0.0 <= candidate_age_s <= self.VISION_PROVISIONAL_HOLD_SECONDS + 10.0
     )
 
     self._vision_speed_limit_ms = float(limit_ms) if valid else 0.0
@@ -654,9 +680,9 @@ class CarState(CarStateBase):
   def _get_latched_vision_lower_candidate_ms(self, current_limit_ms: float) -> float:
     """Latch a newly-seen camera candidate only when it lowers a trusted limit.
 
-    Once latched, the conservative lower cap is held for the same 300 s window
-    as a confirmed vision limit. This protects the common UK case where a single
-    terminal sign is followed by a long gap before any repeater.
+    A single unconfirmed read is deliberately short lived in V1.6. Reacquisition
+    should either promote it to a confirmed 2/2 sign or allow it to expire; it
+    must not suppress speed for five minutes after the road context changes.
     """
     now = time.monotonic()
     candidate_ms = float(getattr(self, "_vision_speed_limit_candidate_ms", 0.0) or 0.0)
@@ -668,7 +694,7 @@ class CarState(CarStateBase):
       if current_limit_ms > 0.0 and candidate_ms > 0.0 and candidate_ms < current_limit_ms:
         self._vision_lower_latched_ms = float(candidate_ms)
         self._vision_lower_latched_confidence = float(candidate_conf)
-        self._vision_lower_latched_until = float(candidate_ts) + 300.0
+        self._vision_lower_latched_until = float(candidate_ts) + self.VISION_PROVISIONAL_HOLD_SECONDS
         cloudlog.warning(
           f"[XNOR_VSL_V12UK] lower_candidate_latched="
           f"{candidate_ms * CV.MS_TO_MPH:.0f}mph "
@@ -686,7 +712,141 @@ class CarState(CarStateBase):
     return 0.0
 
 
-  def _update_speed_limit(self, can_parsers) -> None:
+  def _update_vision_distance(self, v_ego_ms: float) -> None:
+    now = time.monotonic()
+    last = float(self._vision_distance_last_update)
+    self._vision_distance_last_update = now
+    if last <= 0.0:
+      return
+    dt = float(max(min(now - last, 0.25), 0.0))
+    speed = float(v_ego_ms) if math.isfinite(float(v_ego_ms)) else 0.0
+    self._vision_distance_total_m += max(speed, 0.0) * dt
+
+  def _reset_vision_map_arbitration(self, timestamp: float) -> None:
+    self._vision_observation_timestamp = float(timestamp)
+    self._vision_observation_distance_m = float(self._vision_distance_total_m)
+    self._vision_map_match_since = 0.0
+    self._vision_map_synced = False
+    self._vision_map_disagree_since = 0.0
+    self._vision_map_disagree_distance_m = float(self._vision_distance_total_m)
+
+  def _release_confirmed_vision(self, reason: str) -> None:
+    old_ms = float(self._vision_speed_limit_ms)
+    old_ts = float(self._vision_speed_limit_timestamp)
+    if old_ts > 0.0:
+      self._vision_ignored_timestamp = old_ts
+    self._vision_speed_limit_ms = 0.0
+    self._vision_speed_limit_confidence = 0.0
+    self._vision_speed_limit_timestamp = 0.0
+    self._vision_map_match_since = 0.0
+    self._vision_map_synced = False
+    self._vision_map_disagree_since = 0.0
+    if old_ms > 0.0:
+      cloudlog.warning(
+        f"[XNOR_VSL_V12UK] vision_release={old_ms * CV.MS_TO_MPH:.0f}mph "
+        f"reason={reason}"
+      )
+
+  def _confirmed_vision_is_authoritative(self, vision_ms: float, map_ms: float, v_ego_ms: float) -> bool:
+    """Give a confirmed camera sign strong but decaying authority.
+
+    Once Tesla map and Vision have agreed, a later stable map transition plus
+    physical travel is strong evidence that the car moved onto a new segment.
+    If they never agree, the camera observation can still age out after enough
+    time and distance rather than suppressing speed for five minutes.
+    """
+    self._update_vision_distance(v_ego_ms)
+    if vision_ms <= 0.0:
+      return False
+
+    now = time.monotonic()
+    timestamp = float(self._vision_speed_limit_timestamp)
+    if timestamp <= 0.0:
+      return False
+
+    if timestamp != float(self._vision_observation_timestamp):
+      self._reset_vision_map_arbitration(timestamp)
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] vision_anchor={vision_ms * CV.MS_TO_MPH:.0f}mph "
+        f"confidence={float(self._vision_speed_limit_confidence):.3f}"
+      )
+
+    age_s = max(now - timestamp, 0.0)
+    distance_m = max(
+      float(self._vision_distance_total_m) - float(self._vision_observation_distance_m),
+      0.0,
+    )
+
+    if map_ms <= 0.0:
+      self._vision_map_match_since = 0.0
+      self._vision_map_disagree_since = 0.0
+      return True
+
+    tolerance_ms = self.VISION_MAP_MATCH_TOLERANCE_MPH * CV.MPH_TO_MS
+    map_matches = abs(float(map_ms) - float(vision_ms)) <= tolerance_ms
+
+    if map_matches:
+      self._vision_map_disagree_since = 0.0
+      self._vision_map_disagree_distance_m = float(self._vision_distance_total_m)
+      if self._vision_map_match_since <= 0.0:
+        self._vision_map_match_since = now
+      elif not self._vision_map_synced and now - self._vision_map_match_since >= self.VISION_MAP_SYNC_SECONDS:
+        self._vision_map_synced = True
+        cloudlog.info(
+          f"[XNOR_VSL_V12UK] vision_map_synced="
+          f"{vision_ms * CV.MS_TO_MPH:.0f}mph age={age_s:.1f}s distance={distance_m:.0f}m"
+        )
+      return True
+
+    self._vision_map_match_since = 0.0
+    if self._vision_map_disagree_since <= 0.0:
+      self._vision_map_disagree_since = now
+      self._vision_map_disagree_distance_m = float(self._vision_distance_total_m)
+
+    disagree_s = max(now - self._vision_map_disagree_since, 0.0)
+    disagree_distance_m = max(
+      float(self._vision_distance_total_m) - float(self._vision_map_disagree_distance_m),
+      0.0,
+    )
+
+    if (
+      self._vision_map_synced and
+      disagree_s >= self.VISION_SYNCED_RELEASE_SECONDS and
+      disagree_distance_m >= self.VISION_SYNCED_RELEASE_DISTANCE_M
+    ):
+      self._release_confirmed_vision(
+        f"synced map transition to {map_ms * CV.MS_TO_MPH:.0f}mph "
+        f"stable={disagree_s:.1f}s travel={disagree_distance_m:.0f}m"
+      )
+      return False
+
+    if (
+      not self._vision_map_synced and
+      age_s >= self.VISION_UNSYNC_RELEASE_SECONDS and
+      distance_m >= self.VISION_UNSYNC_RELEASE_DISTANCE_M and
+      disagree_s >= self.VISION_MAP_DISAGREE_SECONDS
+    ):
+      self._release_confirmed_vision(
+        f"aged unsynced map={map_ms * CV.MS_TO_MPH:.0f}mph "
+        f"age={age_s:.1f}s travel={distance_m:.0f}m"
+      )
+      return False
+
+    if (
+      age_s >= self.VISION_HARD_RELEASE_SECONDS and
+      distance_m >= self.VISION_HARD_RELEASE_DISTANCE_M and
+      disagree_s >= self.VISION_MAP_DISAGREE_SECONDS
+    ):
+      self._release_confirmed_vision(
+        f"stale map={map_ms * CV.MS_TO_MPH:.0f}mph "
+        f"age={age_s:.1f}s travel={distance_m:.0f}m"
+      )
+      return False
+
+    return True
+
+
+  def _update_speed_limit(self, can_parsers, v_ego_ms: float = 0.0) -> None:
     """Unity-parity speed limit parsing (map/sign + DAS fallback) into m/s."""
     speed_limit_ms = 0.0
     speed_limit_ms_das = 0.0
@@ -780,30 +940,39 @@ class CarState(CarStateBase):
     # Use DAS as fallback only, never as a cap.
     chosen = speed_limit_ms if speed_limit_ms > 0.0 else speed_limit_ms_das
 
-    # XNOR Vision Speed Limit V1.4-UK:
-    # - A confirmed camera sign is authoritative in either direction. Numeric
-    #   signs have already passed independent 2/2 confirmation; NSL requires
-    #   independent 3/3 confirmation.
-    # - A newly accepted *provisional* numeric candidate remains lower-only and
-    #   is latched only when below the current trusted Tesla/map/DAS source.
-    #   Therefore a single unconfirmed camera read can never raise speed.
+    # XNOR Vision Speed Limit V1.6-UK:
+    # - Confirmed camera signs are initially authoritative but age with time and
+    #   distance. A stable map transition after prior map/Vision agreement can
+    #   release an old camera observation instead of holding it for five minutes.
+    # - A provisional 1/2 numeric candidate remains lower-only and now expires
+    #   quickly unless reacquisition promotes it to a confirmed sign.
     vision_ms = float(self._get_vision_speed_limit_ms())
     provisional_ms = float(self._get_latched_vision_lower_candidate_ms(chosen))
     vision_applied = False
     provisional_applied = False
 
+    map_for_arbitration = float(chosen)
+    if vision_ms > 0.0 and self._confirmed_vision_is_authoritative(
+      vision_ms, map_for_arbitration, v_ego_ms
+    ):
+      chosen = float(vision_ms)
+      vision_applied = True
+
+      # Clear only an older provisional cap. A genuinely newer lower 1/2 sign
+      # is allowed to apply immediately below an existing confirmed limit.
+      candidate_ts = float(getattr(self, "_vision_speed_limit_candidate_timestamp", 0.0) or 0.0)
+      vision_ts = float(getattr(self, "_vision_speed_limit_timestamp", 0.0) or 0.0)
+      if candidate_ts <= vision_ts:
+        self._vision_lower_latched_ms = 0.0
+        self._vision_lower_latched_confidence = 0.0
+        self._vision_lower_latched_until = 0.0
+
+    # Apply a provisional lower cap after confirmed arbitration so a newly-seen
+    # lower sign can conservatively reduce an older confirmed camera limit.
     if provisional_ms > 0.0 and chosen > 0.0 and provisional_ms < chosen:
       chosen = float(provisional_ms)
       provisional_applied = True
-
-    if vision_ms > 0.0:
-      chosen = float(vision_ms)
-      vision_applied = True
-      provisional_applied = False
-      # A confirmed camera limit supersedes any older provisional lower latch.
-      self._vision_lower_latched_ms = 0.0
-      self._vision_lower_latched_confidence = 0.0
-      self._vision_lower_latched_until = 0.0
+      vision_applied = False
 
     self.speed_limit_ms = float(chosen)
     if vision_applied:
@@ -829,6 +998,8 @@ class CarState(CarStateBase):
           f"visionCandidate={float(getattr(self, '_vision_speed_limit_candidate_ms', 0.0))*conv:.1f} "
           f"visionCandidateConf={float(getattr(self, '_vision_speed_limit_candidate_confidence', 0.0)):.2f} "
           f"visionLatched={float(getattr(self, '_vision_lower_latched_ms', 0.0))*conv:.1f} "
+          f"visionSynced={bool(getattr(self, '_vision_map_synced', False))} "
+          f"visionTravel={max(float(getattr(self, '_vision_distance_total_m', 0.0)) - float(getattr(self, '_vision_observation_distance_m', 0.0)), 0.0):.0f}m "
           f"slSrc={str(getattr(self, '_xnor_speed_limit_source', 'none'))} "
           f"raw(gps_u={gps_units}, gps_mpp={gps_mpp}, rd_sign={rd_sign}, rd_base_mps={rd_base_mps}, map_type={map_type}, das_mph={das_mph})"
         )
@@ -1081,7 +1252,7 @@ class CarState(CarStateBase):
     ret.rightBlindspot = cp_ap_party.vl["DAS_status"]["DAS_blindSpotRearRight"] != 0
 
     # Speed limit best-effort (needed for speed-limit matching)
-    self._update_speed_limit(can_parsers)
+    self._update_speed_limit(can_parsers, v_ego_ms=float(ret.vEgo))
 
     # XNOR Option 1: decode CSA curvature off the party parser (zero extra socket/deserialize).
     self._decode_csa(cp_party)
@@ -1354,7 +1525,7 @@ class CarState(CarStateBase):
 
 
     # Speed limit best-effort (needed for speed-limit matching)
-    self._update_speed_limit(can_parsers)
+    self._update_speed_limit(can_parsers, v_ego_ms=float(ret.vEgo))
 
     # XNOR Option 1: decode CSA curvature off the party parser (zero extra socket/deserialize).
     self._decode_csa(cp_party)
