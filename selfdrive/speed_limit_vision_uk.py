@@ -61,10 +61,14 @@ NUMERIC_TRACK_MAX_AGE = 1.50
 NUMERIC_TRACK_MAX_FRAMES = 24
 NUMERIC_TRACK_ARM_MIN_CONFIDENCE = 0.40
 NUMERIC_TRACK_MIN_CONFIDENCE = 0.52
-NUMERIC_TRACK_SEARCH_PADDING = 1.25
-NUMERIC_TRACK_MIN_SCALE = 0.50
-NUMERIC_TRACK_MAX_SCALE = 2.40
-NUMERIC_TRACK_MAX_CENTER_SHIFT = 1.75
+NUMERIC_TRACK_INITIAL_SEARCH_PADDING = 2.00
+NUMERIC_TRACK_SEARCH_PADDING = 1.00
+NUMERIC_TRACK_INITIAL_MIN_SCALE = 0.40
+NUMERIC_TRACK_INITIAL_MAX_SCALE = 3.00
+NUMERIC_TRACK_MIN_SCALE = 0.55
+NUMERIC_TRACK_MAX_SCALE = 2.20
+NUMERIC_TRACK_INITIAL_MAX_CENTER_SHIFT = 2.50
+NUMERIC_TRACK_MAX_CENTER_SHIFT = 1.50
 NUMERIC_TRACK_MIN_RING_SCORE = 0.20
 FOLLOWUP_WINDOW_SECONDS = 2.0
 TRACK_FRAME_INTERVAL = 0.10
@@ -136,6 +140,7 @@ class PendingNumeric:
   last_ocr_at: float
   frames: int = 0
   ocr_attempts: int = 0
+  tracked_once: bool = False
   first_confidence: float = 0.0
 
 
@@ -834,6 +839,7 @@ class SpeedLimitVisionUK:
       last_ocr_at=stamp,
       frames=0,
       ocr_attempts=0,
+      tracked_once=False,
       first_confidence=float(detection.confidence),
     )
     bbox_text = ",".join(str(int(v)) for v in detection.bbox)
@@ -842,7 +848,7 @@ class SpeedLimitVisionUK:
       f"confidence={detection.confidence:.3f} bbox={bbox_text}"
     )
 
-  def _find_tracked_numeric_ring(self, frame_bgr: np.ndarray, bbox):
+  def _find_tracked_numeric_ring(self, frame_bgr: np.ndarray, bbox, initial: bool = False):
     """Follow the already-detected red ring in a small local ROI.
 
     This is intentionally not a second full-frame detector. Candidate geometry
@@ -850,8 +856,13 @@ class SpeedLimitVisionUK:
     sign and must still pass the normal UK red-ring scorer.
     """
     frame_h, frame_w = frame_bgr.shape[:2]
+    search_padding = NUMERIC_TRACK_INITIAL_SEARCH_PADDING if initial else NUMERIC_TRACK_SEARCH_PADDING
+    min_scale = NUMERIC_TRACK_INITIAL_MIN_SCALE if initial else NUMERIC_TRACK_MIN_SCALE
+    max_scale = NUMERIC_TRACK_INITIAL_MAX_SCALE if initial else NUMERIC_TRACK_MAX_SCALE
+    max_shift = NUMERIC_TRACK_INITIAL_MAX_CENTER_SHIFT if initial else NUMERIC_TRACK_MAX_CENTER_SHIFT
+
     search_bbox = self._expand_bbox(
-      bbox, frame_w, frame_h, NUMERIC_TRACK_SEARCH_PADDING
+      bbox, frame_w, frame_h, search_padding
     )
     if search_bbox is None:
       return None
@@ -899,8 +910,8 @@ class SpeedLimitVisionUK:
       scale_w = cw / float(prev_w)
       scale_h = ch / float(prev_h)
       if not (
-        NUMERIC_TRACK_MIN_SCALE <= scale_w <= NUMERIC_TRACK_MAX_SCALE and
-        NUMERIC_TRACK_MIN_SCALE <= scale_h <= NUMERIC_TRACK_MAX_SCALE
+        min_scale <= scale_w <= max_scale and
+        min_scale <= scale_h <= max_scale
       ):
         continue
 
@@ -908,7 +919,7 @@ class SpeedLimitVisionUK:
       cy = (gy1 + gy2) * 0.5
       dx = abs(cx - prev_cx) / float(prev_w)
       dy = abs(cy - prev_cy) / float(prev_h)
-      if dx > NUMERIC_TRACK_MAX_CENTER_SHIFT or dy > NUMERIC_TRACK_MAX_CENTER_SHIFT:
+      if dx > max_shift or dy > max_shift:
         continue
 
       # Add a little white margin around the red contour so ring/centre
@@ -929,7 +940,7 @@ class SpeedLimitVisionUK:
         continue
 
       motion = float(np.hypot(dx, dy))
-      proximity = max(0.0, 1.0 - motion / max(NUMERIC_TRACK_MAX_CENTER_SHIFT * 1.414, 1e-3))
+      proximity = max(0.0, 1.0 - motion / max(max_shift * 1.414, 1e-3))
       squareness = min(aspect, 1.0 / max(aspect, 1e-6))
       rank = float(ring) * 0.70 + proximity * 0.20 + squareness * 0.10
       if rank > best_rank:
@@ -955,7 +966,9 @@ class SpeedLimitVisionUK:
     pending.last_track_at = float(now)
     pending.frames += 1
 
-    found = self._find_tracked_numeric_ring(frame_bgr, pending.bbox)
+    found = self._find_tracked_numeric_ring(
+      frame_bgr, pending.bbox, initial=not pending.tracked_once
+    )
     if found is None:
       if pending.frames <= 3 or pending.frames % 5 == 0:
         cloudlog.info(
@@ -968,6 +981,7 @@ class SpeedLimitVisionUK:
 
     tracked_bbox, ring = found
     pending.bbox = tracked_bbox
+    pending.tracked_once = True
     bbox_text = ",".join(str(int(v)) for v in tracked_bbox)
 
     # Track at up to 20 Hz, but the template digit reader is the more expensive
