@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.5-UK
+# XNOR Vision Speed Limit V1.6-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,11 +29,11 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# V1.5 adds a short-lived fresh-frame numeric reacquisition path. After a valid
-# first numeric read, subsequent camera frames search a small position/scale
-# window around that physical sign and rerun the UK ring + value readers. This
-# preserves independent-frame 2/2 confirmation without requiring ONNX to
-# rediscover the same sign on the second frame.
+# V1.6 recentres numeric sign crops on the dominant red ring before geometry
+# scoring/OCR. This makes yellow-backed UK terminal signs behave like ordinary
+# circular signs without loosening the red-ring gate. CarState V1.6 also gives
+# confirmed camera limits decaying authority instead of an unconditional
+# five-minute override.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -53,6 +53,8 @@ NORMAL_INFERENCE_INTERVAL = 0.40
 FOLLOWUP_INFERENCE_INTERVAL = 0.20
 NUMERIC_NMS_IOU_THRESHOLD = 0.55
 NUMERIC_RING_RETRY_PADDING = 0.18
+NUMERIC_RING_RECENTER_PADDING = 0.08
+NUMERIC_RING_MIN_BOX_RATIO = 0.035
 NUMERIC_REACQUIRE_MIN_DELAY = 0.08
 NUMERIC_REACQUIRE_INTERVAL = 0.10
 NUMERIC_REACQUIRE_MAX_AGE = 1.25
@@ -384,7 +386,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.5: ready")
+      self._set_status("UK vision V1.6: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -468,7 +470,79 @@ class SpeedLimitVisionUK:
     result = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
     return result, ratio, left, top
 
+  def _normalize_numeric_sign_crop(self, sign_crop):
+    """Recenter a proposal on its dominant near-square red ring.
+
+    UK terminal signs are sometimes mounted on a much larger yellow backing
+    board. The legacy detector can include some of that board in its proposal,
+    which distorts geometry measured against the full crop. Isolate the actual
+    circular red-ring component first, then score/read that normalized crop.
+    """
+    if sign_crop is None or sign_crop.size == 0:
+      return sign_crop
+
+    h, w = sign_crop.shape[:2]
+    if h < 12 or w < 12:
+      return sign_crop
+
+    try:
+      hsv = self.cv2.cvtColor(sign_crop, self.cv2.COLOR_BGR2HSV)
+      hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+      red = (
+        (((hue <= 12) | (hue >= 168))) &
+        (sat >= 65) &
+        (val >= 50)
+      ).astype(np.uint8) * 255
+      red = self.cv2.morphologyEx(
+        red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
+      )
+      contours, _hier = self.cv2.findContours(
+        red, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
+      )
+    except Exception:
+      return sign_crop
+
+    best = None
+    best_score = 0.0
+    crop_area = float(max(w * h, 1))
+    for contour in contours:
+      x, y, cw, ch = self.cv2.boundingRect(contour)
+      if cw < 8 or ch < 8:
+        continue
+      aspect = cw / max(ch, 1)
+      if aspect < 0.55 or aspect > 1.65:
+        continue
+      box_ratio = float(cw * ch) / crop_area
+      if box_ratio < NUMERIC_RING_MIN_BOX_RATIO:
+        continue
+
+      # Prefer the largest near-square red structure. The later white/dark
+      # centre checks still reject lamps, reflectors and unrelated red objects.
+      squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+      score = float(cw * ch) * (0.75 + 0.25 * squareness)
+      if score > best_score:
+        best_score = score
+        best = (x, y, cw, ch)
+
+    if best is None:
+      return sign_crop
+
+    x, y, cw, ch = best
+    pad_x = max(int(round(cw * NUMERIC_RING_RECENTER_PADDING)), 2)
+    pad_y = max(int(round(ch * NUMERIC_RING_RECENTER_PADDING)), 2)
+    x1 = max(x - pad_x, 0)
+    y1 = max(y - pad_y, 0)
+    x2 = min(x + cw + pad_x, w)
+    y2 = min(y + ch + pad_y, h)
+    if x2 <= x1 or y2 <= y1:
+      return sign_crop
+    return sign_crop[y1:y2, x1:x2]
+
   def _uk_red_ring_score(self, sign_crop) -> float:
+    if sign_crop is None or sign_crop.size == 0:
+      return 0.0
+
+    sign_crop = self._normalize_numeric_sign_crop(sign_crop)
     if sign_crop is None or sign_crop.size == 0:
       return 0.0
 
@@ -872,7 +946,7 @@ class SpeedLimitVisionUK:
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
       return
-    # V1.5 confirmation comes only from independent detector passes on fresh
+    # V1.6 confirmation comes only from independent detector passes on fresh
     # camera frames. The previous numeric optical-flow path could fail before
     # 2/2 even after a strong first read, while tracking one bad object could
     # also make confirmation less independent.
@@ -1242,7 +1316,7 @@ class SpeedLimitVisionUK:
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
-    # V1.5: an independently confirmed higher camera sign is authoritative.
+    # V1.6: an independently confirmed higher camera sign is authoritative.
     # Numeric signs require the normal 2/2 plus a strong confidence floor;
     # NSL already requires 3/3 and its stricter 0.78 geometry threshold.
     higher_confidence_ok = is_national or best_conf >= HIGHER_CHANGE_CONFIDENCE

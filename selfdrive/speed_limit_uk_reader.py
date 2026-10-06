@@ -147,6 +147,12 @@ class UKSpeedValueReader:
     return best_label, float(best_score), float(best_score - runner_up)
 
   def _find_ring_bbox(self, sign_crop: np.ndarray):
+    """Locate the dominant red circular sign inside a possibly larger board.
+
+    Bounding all red pixels together is fragile when a detector crop includes
+    a yellow backing panel, other road furniture, or small red artefacts. Use
+    the largest plausible near-square red component instead.
+    """
     hsv = self.cv2.cvtColor(sign_crop, self.cv2.COLOR_BGR2HSV)
     hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
     red = (
@@ -154,17 +160,33 @@ class UKSpeedValueReader:
       (sat >= 65) &
       (val >= 50)
     ).astype(np.uint8) * 255
-    red = self.cv2.morphologyEx(red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8))
-    points = self.cv2.findNonZero(red)
-    if points is None or len(points) < 8:
-      return None
-    x, y, w, h = self.cv2.boundingRect(points)
-    if w < 8 or h < 8:
-      return None
-    aspect = w / max(h, 1)
-    if aspect < 0.55 or aspect > 1.65:
-      return None
-    return x, y, w, h
+    red = self.cv2.morphologyEx(
+      red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
+    )
+
+    contours, _hier = self.cv2.findContours(
+      red, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
+    )
+    crop_h, crop_w = sign_crop.shape[:2]
+    crop_area = float(max(crop_w * crop_h, 1))
+    best = None
+    best_score = 0.0
+    for contour in contours:
+      x, y, w, h = self.cv2.boundingRect(contour)
+      if w < 8 or h < 8:
+        continue
+      aspect = w / max(h, 1)
+      if aspect < 0.55 or aspect > 1.65:
+        continue
+      if float(w * h) / crop_area < 0.025:
+        continue
+      squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+      score = float(w * h) * (0.75 + 0.25 * squareness)
+      if score > best_score:
+        best_score = score
+        best = (x, y, w, h)
+
+    return best
 
   def _extract_digit_mask(self, sign_crop: np.ndarray):
     if sign_crop is None or sign_crop.size == 0:
