@@ -40,13 +40,15 @@ class CarState(CarStateBase):
   DOUBLE_PULL_WINDOW_MS = 750
   XNOR_CRUISE_SET_HOLD_MS = 8_000
 
-  # V1.6 camera/map arbitration. A camera observation is strongest immediately
+  # V1.7 camera/map arbitration. A camera observation is strongest immediately
   # after it is seen, but must not remain an unconditional five-minute truth
   # after the vehicle has moved onto another road/estate.
   VISION_MAP_MATCH_TOLERANCE_MPH = 1.5
   VISION_MAP_SYNC_SECONDS = 2.0
-  VISION_SYNCED_RELEASE_SECONDS = 4.0
-  VISION_SYNCED_RELEASE_DISTANCE_M = 20.0
+  VISION_SYNCED_HIGHER_RELEASE_SECONDS = 4.0
+  VISION_SYNCED_HIGHER_RELEASE_DISTANCE_M = 20.0
+  VISION_SYNCED_LOWER_RELEASE_SECONDS = 1.5
+  VISION_SYNCED_LOWER_RELEASE_DISTANCE_M = 5.0
   VISION_UNSYNC_RELEASE_SECONDS = 60.0
   VISION_UNSYNC_RELEASE_DISTANCE_M = 300.0
   VISION_HARD_RELEASE_SECONDS = 90.0
@@ -156,7 +158,7 @@ class CarState(CarStateBase):
     self._vision_lower_latched_until = 0.0
     self._vision_speed_limit_last_read_frame = -100000
 
-    # V1.6 camera-limit aging / map synchronisation state.
+    # V1.7 camera-limit aging / map synchronisation state.
     self._vision_ignored_timestamp = 0.0
     self._vision_observation_timestamp = 0.0
     self._vision_observation_distance_m = 0.0
@@ -612,9 +614,9 @@ class CarState(CarStateBase):
 
 
   def _get_vision_speed_limit_ms(self) -> float:
-    """Return a fresh confirmed V1.6-UK camera limit in m/s.
+    """Return a fresh confirmed V1.7-UK camera limit in m/s.
 
-    V1.6 also samples a provisional lower candidate. That candidate is never
+    V1.7 also samples a provisional lower candidate. That candidate is never
     allowed to raise speed: CarState only latches it when it is already below
     the current trusted Tesla/map limit at the moment it is first observed.
     """
@@ -680,7 +682,7 @@ class CarState(CarStateBase):
   def _get_latched_vision_lower_candidate_ms(self, current_limit_ms: float) -> float:
     """Latch a newly-seen camera candidate only when it lowers a trusted limit.
 
-    A single unconfirmed read is deliberately short lived in V1.6. Reacquisition
+    A single unconfirmed read is deliberately short lived in V1.7. Reacquisition
     should either promote it to a confirmed 2/2 sign or allow it to expire; it
     must not suppress speed for five minutes after the road context changes.
     """
@@ -750,12 +752,12 @@ class CarState(CarStateBase):
   def _confirmed_vision_is_authoritative(self, vision_ms: float, map_ms: float, v_ego_ms: float) -> bool:
     """Give a confirmed camera sign strong but decaying authority.
 
-    Once Tesla map and Vision have agreed, a later stable map transition plus
-    physical travel is strong evidence that the car moved onto a new segment.
-    If they never agree, the camera observation can still age out after enough
-    time and distance rather than suppressing speed for five minutes.
+    A newly confirmed camera value remains authoritative against a map that was
+    already stale. Once map and Vision have subsequently agreed, however, a new
+    stable map transition is evidence of a road/segment change. Lower map
+    transitions release faster than higher ones; higher transitions retain the
+    conservative 4 s / 20 m debounce.
     """
-    self._update_vision_distance(v_ego_ms)
     if vision_ms <= 0.0:
       return False
 
@@ -765,11 +767,16 @@ class CarState(CarStateBase):
       return False
 
     if timestamp != float(self._vision_observation_timestamp):
+      # Start distance integration at this observation. Do not charge a new
+      # camera sign for time/distance elapsed while no Vision limit was active.
+      self._vision_distance_last_update = now
       self._reset_vision_map_arbitration(timestamp)
       cloudlog.info(
         f"[XNOR_VSL_V12UK] vision_anchor={vision_ms * CV.MS_TO_MPH:.0f}mph "
         f"confidence={float(self._vision_speed_limit_confidence):.3f}"
       )
+    else:
+      self._update_vision_distance(v_ego_ms)
 
     age_s = max(now - timestamp, 0.0)
     distance_m = max(
@@ -783,7 +790,8 @@ class CarState(CarStateBase):
       return True
 
     tolerance_ms = self.VISION_MAP_MATCH_TOLERANCE_MPH * CV.MPH_TO_MS
-    map_matches = abs(float(map_ms) - float(vision_ms)) <= tolerance_ms
+    delta_ms = float(map_ms) - float(vision_ms)
+    map_matches = abs(delta_ms) <= tolerance_ms
 
     if map_matches:
       self._vision_map_disagree_since = 0.0
@@ -809,16 +817,32 @@ class CarState(CarStateBase):
       0.0,
     )
 
-    if (
-      self._vision_map_synced and
-      disagree_s >= self.VISION_SYNCED_RELEASE_SECONDS and
-      disagree_distance_m >= self.VISION_SYNCED_RELEASE_DISTANCE_M
-    ):
-      self._release_confirmed_vision(
-        f"synced map transition to {map_ms * CV.MS_TO_MPH:.0f}mph "
-        f"stable={disagree_s:.1f}s travel={disagree_distance_m:.0f}m"
-      )
-      return False
+    # Important asymmetry retained from the original conservative design:
+    # a higher map value must work harder to displace a lower confirmed camera
+    # limit. A lower map transition after proven synchronization releases more
+    # quickly, but a map that was already lower before camera confirmation does
+    # not defeat the new camera value because _vision_map_synced is still false.
+    if self._vision_map_synced and delta_ms < -tolerance_ms:
+      if (
+        disagree_s >= self.VISION_SYNCED_LOWER_RELEASE_SECONDS and
+        disagree_distance_m >= self.VISION_SYNCED_LOWER_RELEASE_DISTANCE_M
+      ):
+        self._release_confirmed_vision(
+          f"synced lower map transition to {map_ms * CV.MS_TO_MPH:.0f}mph "
+          f"stable={disagree_s:.1f}s travel={disagree_distance_m:.0f}m"
+        )
+        return False
+
+    if self._vision_map_synced and delta_ms > tolerance_ms:
+      if (
+        disagree_s >= self.VISION_SYNCED_HIGHER_RELEASE_SECONDS and
+        disagree_distance_m >= self.VISION_SYNCED_HIGHER_RELEASE_DISTANCE_M
+      ):
+        self._release_confirmed_vision(
+          f"synced higher map transition to {map_ms * CV.MS_TO_MPH:.0f}mph "
+          f"stable={disagree_s:.1f}s travel={disagree_distance_m:.0f}m"
+        )
+        return False
 
     if (
       not self._vision_map_synced and
@@ -940,7 +964,7 @@ class CarState(CarStateBase):
     # Use DAS as fallback only, never as a cap.
     chosen = speed_limit_ms if speed_limit_ms > 0.0 else speed_limit_ms_das
 
-    # XNOR Vision Speed Limit V1.6-UK:
+    # XNOR Vision Speed Limit V1.7-UK:
     # - Confirmed camera signs are initially authoritative but age with time and
     #   distance. A stable map transition after prior map/Vision agreement can
     #   release an old camera observation instead of holding it for five minutes.
