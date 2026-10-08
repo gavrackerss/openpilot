@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.8-UK
+# XNOR Vision Speed Limit V1.9-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,10 +29,10 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# V1.8 hardens numeric digit reading without relaxing confirmation. It keeps
-# the V1.7 20 Hz local tracker/10 Hz reread, but adds ring-normalized ROI
-# variants, multiple threshold masks and projection segmentation so strong UK
-# red-ring proposals are less likely to fail before reaching the first 1/2.
+# V1.9 preserves V1.8 numeric recognition but makes OCR bounded and staged.
+# Template shifts are precomputed, cheap segmentation paths run first, expensive
+# fallbacks are capped, and elapsed OCR time/method are logged so the V1.7
+# 20 Hz tracker can arm while the physical sign is still in view.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -397,7 +397,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.8: ready")
+      self._set_status("UK vision V1.9: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -1000,6 +1000,9 @@ class SpeedLimitVisionUK:
     crop = frame_bgr[y1:y2, x1:x2]
     read = self.value_reader.read(crop) if self.value_reader is not None else None
 
+    if read is not None:
+      self._log_ocr_accept("numeric_track", read, tracked_bbox)
+
     if read is None:
       cloudlog.info(
         f"[XNOR_VSL_V12UK] numeric_track_read_miss speed={pending.speed_limit_mph}mph "
@@ -1066,7 +1069,7 @@ class SpeedLimitVisionUK:
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
       return
-    # V1.8 confirmation comes only from independent detector passes on fresh
+    # V1.9 confirmation comes only from independent detector passes on fresh
     # camera frames. The previous numeric optical-flow path could fail before
     # 2/2 even after a strong first read, while tracking one bad object could
     # also make confirmation less independent.
@@ -1237,10 +1240,23 @@ class SpeedLimitVisionUK:
     debug = str(getattr(self.value_reader, "last_debug", "") or "")
     if not reason and not debug:
       return
+    elapsed_ms = float(getattr(self.value_reader, "last_elapsed_ms", 0.0) or 0.0)
     bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
     cloudlog.info(
       f"[XNOR_VSL_V12UK] ocr_reject source={source} bbox={bbox_text} "
-      f"reason={reason} debug={debug}"
+      f"elapsedMs={elapsed_ms:.1f} reason={reason} debug={debug}"
+    )
+
+  def _log_ocr_accept(self, source: str, read, bbox=None) -> None:
+    if read is None or self.value_reader is None:
+      return
+    elapsed_ms = float(getattr(self.value_reader, "last_elapsed_ms", 0.0) or 0.0)
+    method = str(getattr(read, "method", "") or "legacy")
+    bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] ocr_accept source={source} speed={int(read.speed_limit_mph)}mph "
+      f"confidence={float(read.confidence):.3f} method={method} "
+      f"elapsedMs={elapsed_ms:.1f} bbox={bbox_text}"
     )
 
   def _detect(self, frame_bgr):
@@ -1354,6 +1370,7 @@ class SpeedLimitVisionUK:
         self._log_ocr_reject("detector", bbox)
         continue
 
+      self._log_ocr_accept("detector", value_read, bbox)
       final_speed_mph = int(value_read.speed_limit_mph)
       value_conf = float(value_read.confidence)
       confidence = float(np.clip(
@@ -1450,7 +1467,7 @@ class SpeedLimitVisionUK:
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
-    # V1.8: an independently confirmed higher camera sign is authoritative.
+    # V1.9: an independently confirmed higher camera sign is authoritative.
     # Numeric signs require the normal 2/2 plus a strong confidence floor;
     # NSL already requires 3/3 and its stricter 0.78 geometry threshold.
     higher_confidence_ok = is_national or best_conf >= HIGHER_CHANGE_CONFIDENCE
