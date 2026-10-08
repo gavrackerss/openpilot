@@ -199,46 +199,86 @@ class UKSpeedValueReader:
     return templates
 
   def _find_ring_bbox(self, sign_crop: np.ndarray):
-    """Locate the dominant red circular sign inside a possibly larger board.
-
-    Bounding all red pixels together is fragile when a detector crop includes
-    a yellow backing panel, other road furniture, or small red artefacts. Use
-    the largest plausible near-square red component instead.
-    """
+    """Locate the dominant whole or fragmented red ring inside a proposal."""
     hsv = self.cv2.cvtColor(sign_crop, self.cv2.COLOR_BGR2HSV)
     hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
     red = (
       (((hue <= 12) | (hue >= 168))) &
-      (sat >= 65) &
-      (val >= 50)
+      (sat >= 60) &
+      (val >= 48)
     ).astype(np.uint8) * 255
-    red = self.cv2.morphologyEx(
-      red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
-    )
 
-    contours, _hier = self.cv2.findContours(
-      red, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
-    )
     crop_h, crop_w = sign_crop.shape[:2]
     crop_area = float(max(crop_w * crop_h, 1))
-    best = None
-    best_score = 0.0
+    candidates = []
+
+    close3 = self.cv2.morphologyEx(
+      red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
+    )
+    contours, _hier = self.cv2.findContours(
+      close3, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
+    )
+
     for contour in contours:
       x, y, w, h = self.cv2.boundingRect(contour)
-      if w < 8 or h < 8:
+      if w < 6 or h < 6:
         continue
       aspect = w / max(h, 1)
-      if aspect < 0.55 or aspect > 1.65:
-        continue
-      if float(w * h) / crop_area < 0.025:
-        continue
-      squareness = min(aspect, 1.0 / max(aspect, 1e-6))
-      score = float(w * h) * (0.75 + 0.25 * squareness)
-      if score > best_score:
-        best_score = score
-        best = (x, y, w, h)
+      ratio = float(w * h) / crop_area
+      if 0.50 <= aspect <= 1.80 and ratio >= 0.025:
+        squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+        candidates.append((
+          float(w * h) * (0.75 + 0.25 * squareness),
+          (x, y, w, h),
+        ))
 
-    return best
+    significant = []
+    min_piece_area = max(crop_area * 0.0015, 2.0)
+    for contour in contours:
+      area = float(self.cv2.contourArea(contour))
+      if area < min_piece_area:
+        continue
+      x, y, w, h = self.cv2.boundingRect(contour)
+      significant.append((x, y, w, h, area))
+
+    if len(significant) >= 2:
+      x1 = min(x for x, _y, _w, _h, _a in significant)
+      y1 = min(y for _x, y, _w, _h, _a in significant)
+      x2 = max(x + w for x, _y, w, _h, _a in significant)
+      y2 = max(y + h for _x, y, _w, h, _a in significant)
+      w, h = x2 - x1, y2 - y1
+      aspect = w / max(h, 1)
+      ratio = float(w * h) / crop_area
+      if 0.50 <= aspect <= 1.80 and 0.025 <= ratio <= 0.95:
+        squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+        candidates.append((
+          float(w * h) * (0.60 + 0.40 * squareness),
+          (x1, y1, w, h),
+        ))
+
+    k = 5 if min(crop_h, crop_w) >= 32 else 3
+    kernel = self.cv2.getStructuringElement(self.cv2.MORPH_ELLIPSE, (k, k))
+    joined = self.cv2.morphologyEx(red, self.cv2.MORPH_CLOSE, kernel)
+    joined_contours, _hier = self.cv2.findContours(
+      joined, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
+    )
+    for contour in joined_contours:
+      x, y, w, h = self.cv2.boundingRect(contour)
+      if w < 7 or h < 7:
+        continue
+      aspect = w / max(h, 1)
+      ratio = float(w * h) / crop_area
+      if 0.50 <= aspect <= 1.80 and 0.025 <= ratio <= 0.95:
+        squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+        candidates.append((
+          float(w * h) * (0.65 + 0.35 * squareness),
+          (x, y, w, h),
+        ))
+
+    if not candidates:
+      return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
   def _digit_roi_variants(self, sign_crop: np.ndarray):
     """Return normalized centre regions likely to contain the two digits.
