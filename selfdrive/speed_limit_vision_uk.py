@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.7-UK
+# XNOR Vision Speed Limit V1.8-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,10 +29,10 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# V1.7 replaces the coarse fixed-box numeric reacquirer with a lightweight
-# 20 Hz local red-ring tracker and 10 Hz digit reread. It activates only after
-# one fully accepted numeric detection and can confirm only that same value on
-# a later camera frame, preserving the original independent 2/2 rule.
+# V1.8 hardens numeric digit reading without relaxing confirmation. It keeps
+# the V1.7 20 Hz local tracker/10 Hz reread, but adds ring-normalized ROI
+# variants, multiple threshold masks and projection segmentation so strong UK
+# red-ring proposals are less likely to fail before reaching the first 1/2.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -397,7 +397,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.7: ready")
+      self._set_status("UK vision V1.8: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -1005,6 +1005,7 @@ class SpeedLimitVisionUK:
         f"[XNOR_VSL_V12UK] numeric_track_read_miss speed={pending.speed_limit_mph}mph "
         f"frame={pending.frames} ocr={pending.ocr_attempts} ring={ring:.3f}"
       )
+      self._log_ocr_reject("numeric_track", tracked_bbox)
       return None
 
     value_conf = float(read.confidence)
@@ -1065,7 +1066,7 @@ class SpeedLimitVisionUK:
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
       return
-    # V1.7 confirmation comes only from independent detector passes on fresh
+    # V1.8 confirmation comes only from independent detector passes on fresh
     # camera frames. The previous numeric optical-flow path could fail before
     # 2/2 even after a strong first read, while tracking one bad object could
     # also make confirmation less independent.
@@ -1229,6 +1230,19 @@ class SpeedLimitVisionUK:
     )
     return detection
 
+  def _log_ocr_reject(self, source: str, bbox=None) -> None:
+    if self.value_reader is None:
+      return
+    reason = str(getattr(self.value_reader, "last_reject_reason", "") or "")
+    debug = str(getattr(self.value_reader, "last_debug", "") or "")
+    if not reason and not debug:
+      return
+    bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] ocr_reject source={source} bbox={bbox_text} "
+      f"reason={reason} debug={debug}"
+    )
+
   def _detect(self, frame_bgr):
     if self.net is None:
       return None
@@ -1337,6 +1351,7 @@ class SpeedLimitVisionUK:
         self._log_raw_proposal(
           "value_reject", speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
         )
+        self._log_ocr_reject("detector", bbox)
         continue
 
       final_speed_mph = int(value_read.speed_limit_mph)
@@ -1435,7 +1450,7 @@ class SpeedLimitVisionUK:
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
-    # V1.7: an independently confirmed higher camera sign is authoritative.
+    # V1.8: an independently confirmed higher camera sign is authoritative.
     # Numeric signs require the normal 2/2 plus a strong confidence floor;
     # NSL already requires 3/3 and its stricter 0.78 geometry threshold.
     higher_confidence_ok = is_national or best_conf >= HIGHER_CHANGE_CONFIDENCE

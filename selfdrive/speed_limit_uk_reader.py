@@ -17,6 +17,7 @@ class UKSpeedRead:
   zero_score: float
   first_digit_margin: float
   whole_value_score: float
+  method: str = ""
 
 
 class UKSpeedValueReader:
@@ -38,6 +39,8 @@ class UKSpeedValueReader:
     self.cv2 = cv2
     self.digit_templates = self._build_digit_templates()
     self.value_templates = self._build_value_templates()
+    self.last_reject_reason = "not_read"
+    self.last_debug = ""
 
   @staticmethod
   def _shift_mask(mask: np.ndarray, dx: int, dy: int) -> np.ndarray:
@@ -188,83 +191,188 @@ class UKSpeedValueReader:
 
     return best
 
-  def _extract_digit_mask(self, sign_crop: np.ndarray):
+  def _digit_roi_variants(self, sign_crop: np.ndarray):
+    """Return normalized centre regions likely to contain the two digits.
+
+    The first variant preserves the original V1.x crop. Additional variants
+    normalize the detected red-ring bbox to a square before extracting slightly
+    different inner regions. This compensates for detector padding, yellow
+    backing boards, perspective and small off-centre crops without weakening
+    the digit acceptance thresholds.
+    """
     if sign_crop is None or sign_crop.size == 0:
-      return None, []
+      return []
+
+    h, w = sign_crop.shape[:2]
+    variants = []
 
     ring = self._find_ring_bbox(sign_crop)
-    h, w = sign_crop.shape[:2]
     if ring is not None:
       rx, ry, rw, rh = ring
+
+      # Preserve the established direct crop first.
       x1 = max(rx + int(rw * 0.17), 0)
       x2 = min(rx + int(rw * 0.83), w)
       y1 = max(ry + int(rh * 0.20), 0)
       y2 = min(ry + int(rh * 0.82), h)
+      if x2 > x1 and y2 > y1:
+        variants.append(("direct", sign_crop[y1:y2, x1:x2]))
+
+      # Normalize the actual circular sign, not any larger detector/backing box.
+      px = max(int(round(rw * 0.07)), 2)
+      py = max(int(round(rh * 0.07)), 2)
+      sx1, sy1 = max(rx-px, 0), max(ry-py, 0)
+      sx2, sy2 = min(rx+rw+px, w), min(ry+rh+py, h)
+      ring_crop = sign_crop[sy1:sy2, sx1:sx2]
+      if ring_crop.size > 0:
+        square = self.cv2.resize(ring_crop, (144, 144), interpolation=self.cv2.INTER_CUBIC)
+        for name, fx1, fy1, fx2, fy2 in (
+          ("ring_mid", 0.14, 0.16, 0.86, 0.84),
+          ("ring_wide", 0.10, 0.12, 0.90, 0.88),
+          ("ring_tight", 0.18, 0.18, 0.82, 0.82),
+        ):
+          ix1, iy1 = int(144*fx1), int(144*fy1)
+          ix2, iy2 = int(144*fx2), int(144*fy2)
+          variants.append((name, square[iy1:iy2, ix1:ix2]))
     else:
       x1, x2 = int(w * 0.17), int(w * 0.83)
       y1, y2 = int(h * 0.20), int(h * 0.82)
+      if x2 > x1 and y2 > y1:
+        variants.append(("fallback", sign_crop[y1:y2, x1:x2]))
 
-    roi = sign_crop[y1:y2, x1:x2]
-    if roi.size == 0:
-      return None, []
+    return [(name, roi) for name, roi in variants if roi is not None and roi.size > 0]
 
+  def _binary_variants(self, roi: np.ndarray):
     gray = self.cv2.cvtColor(roi, self.cv2.COLOR_BGR2GRAY)
     min_dim = max(min(gray.shape), 1)
     scale = float(np.clip(150.0 / min_dim, 2.0, 6.0))
     gray = self.cv2.resize(gray, None, fx=scale, fy=scale, interpolation=self.cv2.INTER_CUBIC)
-    gray = self.cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4)).apply(gray)
-    gray = self.cv2.GaussianBlur(gray, (3, 3), 0)
-    _, binary = self.cv2.threshold(gray, 0, 255, self.cv2.THRESH_BINARY_INV + self.cv2.THRESH_OTSU)
-    binary = self.cv2.morphologyEx(binary, self.cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+    clahe = self.cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4)).apply(gray)
+    blur = self.cv2.GaussianBlur(clahe, (3, 3), 0)
 
+    _thr, otsu = self.cv2.threshold(
+      blur, 0, 255, self.cv2.THRESH_BINARY_INV + self.cv2.THRESH_OTSU
+    )
+    kernel = np.ones((2, 2), dtype=np.uint8)
+    variants = [
+      ("otsu_open", self.cv2.morphologyEx(otsu, self.cv2.MORPH_OPEN, kernel)),
+      ("otsu_raw", otsu),
+      ("otsu_close", self.cv2.morphologyEx(otsu, self.cv2.MORPH_CLOSE, kernel)),
+    ]
+
+    # Adaptive threshold is useful when half of a small sign is shaded or
+    # motion/compression makes one digit noticeably lighter than the other.
+    block = max(15, (min(blur.shape) // 5) | 1)
+    block = min(block, 51)
+    if block % 2 == 0:
+      block += 1
+    adaptive = self.cv2.adaptiveThreshold(
+      clahe, 255, self.cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+      self.cv2.THRESH_BINARY_INV, block, 7,
+    )
+    variants.append(("adaptive", self.cv2.morphologyEx(adaptive, self.cv2.MORPH_OPEN, kernel)))
+    return variants
+
+  def _component_digit_masks(self, binary: np.ndarray):
     count, labels, stats, _ = self.cv2.connectedComponentsWithStats(binary, 8)
     roi_area = binary.shape[0] * binary.shape[1]
     components = []
     for idx in range(1, count):
       x, y, cw, ch, area = [int(v) for v in stats[idx]]
-      if area < roi_area * 0.008:
+      if area < roi_area * 0.006:
         continue
-      if ch < binary.shape[0] * 0.28:
+      if ch < binary.shape[0] * 0.25:
         continue
-      if cw < binary.shape[1] * 0.035 or cw > binary.shape[1] * 0.55:
+      if cw < binary.shape[1] * 0.025 or cw > binary.shape[1] * 0.58:
         continue
-      if y > binary.shape[0] * 0.68:
+      if y > binary.shape[0] * 0.70:
         continue
       components.append((x, y, cw, ch, area, idx))
 
     components.sort(key=lambda item: item[4] * item[3], reverse=True)
-    components = components[:2]
-    components.sort(key=lambda item: item[0])
-    if len(components) != 2:
-      return binary, []
+    components = components[:3]
 
-    a, b = components
-    if a[0] + a[2] > b[0] + int(min(a[2], b[2]) * 0.35):
-      return binary, []
-    height_ratio = min(a[3], b[3]) / max(a[3], b[3], 1)
-    if height_ratio < 0.55:
-      return binary, []
+    # Test all two-component combinations instead of assuming the two largest
+    # blobs are always the two complete digits.
+    candidates = []
+    for ai in range(len(components)):
+      for bi in range(ai + 1, len(components)):
+        pair = [components[ai], components[bi]]
+        pair.sort(key=lambda item: item[0])
+        a, b = pair
+        if a[0] + a[2] > b[0] + int(min(a[2], b[2]) * 0.35):
+          continue
+        height_ratio = min(a[3], b[3]) / max(a[3], b[3], 1)
+        if height_ratio < 0.48:
+          continue
 
-    masks = []
-    for x, y, cw, ch, _area, idx in components:
-      component = np.zeros_like(binary)
-      component[labels == idx] = 255
-      component = component[y:y + ch, x:x + cw]
-      normalized = self._normalize_mask(component, (48, 72))
-      if normalized is None:
-        return binary, []
-      masks.append(normalized)
+        masks = []
+        combined = np.zeros_like(binary)
+        valid = True
+        for x, y, cw, ch, _area, idx in pair:
+          component = np.zeros_like(binary)
+          component[labels == idx] = 255
+          combined[labels == idx] = 255
+          component = component[y:y + ch, x:x + cw]
+          normalized = self._normalize_mask(component, (48, 72))
+          if normalized is None:
+            valid = False
+            break
+          masks.append(normalized)
+        if not valid:
+          continue
+        whole = self._normalize_mask(combined, (84, 72))
+        if whole is not None:
+          candidates.append(("components", whole, masks))
 
-    combined = np.zeros_like(binary)
-    for _x, _y, _cw, _ch, _area, idx in components:
-      combined[labels == idx] = 255
-    whole = self._normalize_mask(combined, (84, 72))
-    return whole, masks
+    return candidates
 
-  def read(self, sign_crop: np.ndarray) -> UKSpeedRead | None:
-    whole_mask, digit_masks = self._extract_digit_mask(sign_crop)
+  def _projection_digit_masks(self, binary: np.ndarray):
+    """Fallback segmentation when compression fragments/merges digit blobs."""
+    points = self.cv2.findNonZero(binary)
+    if points is None:
+      return []
+
+    x, y, w, h = self.cv2.boundingRect(points)
+    if w < 6 or h < 8:
+      return []
+    src = binary[y:y+h, x:x+w]
+
+    # Find a low-ink split near the middle of the two-digit value.
+    projection = (src > 0).sum(axis=0).astype(np.float32)
+    if projection.size < 6:
+      return []
+    lo = max(int(round(projection.size * 0.30)), 1)
+    hi = min(int(round(projection.size * 0.70)), projection.size - 1)
+    if hi <= lo:
+      return []
+    split = int(lo + np.argmin(projection[lo:hi]))
+
+    # Try the best valley and two nearby cuts because blur may fill the actual
+    # inter-digit gap by a pixel or two.
+    cuts = []
+    for cut in (split, split-2, split+2):
+      if 2 <= cut <= src.shape[1]-2 and cut not in cuts:
+        cuts.append(cut)
+
+    candidates = []
+    for cut in cuts:
+      left = src[:, :cut]
+      right = src[:, cut:]
+      if int((left > 0).sum()) < 8 or int((right > 0).sum()) < 8:
+        continue
+
+      lm = self._normalize_mask(left, (48, 72))
+      rm = self._normalize_mask(right, (48, 72))
+      whole = self._normalize_mask(src, (84, 72))
+      if lm is None or rm is None or whole is None:
+        continue
+      candidates.append(("projection", whole, [lm, rm]))
+    return candidates
+
+  def _evaluate_masks(self, whole_mask: np.ndarray, digit_masks: list[np.ndarray], method: str):
     if whole_mask is None or len(digit_masks) != 2:
-      return None
+      return None, "segmentation", 0.0
 
     first_label, first_score, first_margin = self._best_template(
       digit_masks[0],
@@ -274,17 +382,23 @@ class UKSpeedValueReader:
       digit_masks[1],
       {"0": self.digit_templates["0"]},
     )
-    whole_value, whole_score, _whole_margin = self._best_template(whole_mask, self.value_templates)
+    whole_value, whole_score, _whole_margin = self._best_template(
+      whole_mask, self.value_templates
+    )
 
     if first_label is None or zero_label != "0":
-      return None
+      quality = max(float(first_score), float(zero_score))
+      return None, f"labels:first={first_label},zero={zero_label}", quality
+
     value = int(first_label) * 10
     if value not in SUPPORTED_UK_LIMITS_MPH:
-      return None
-    if first_score < self.DIGIT_MIN_SCORE or zero_score < self.ZERO_MIN_SCORE:
-      return None
+      return None, f"unsupported:{value}", 0.0
+    if first_score < self.DIGIT_MIN_SCORE:
+      return None, f"first_score:{first_score:.3f}", float(first_score)
+    if zero_score < self.ZERO_MIN_SCORE:
+      return None, f"zero_score:{zero_score:.3f}", float(zero_score)
     if first_margin < self.DIGIT_MIN_MARGIN:
-      return None
+      return None, f"margin:{first_margin:.3f}", float(first_score)
 
     whole_agrees = whole_value == value and whole_score >= self.WHOLE_MIN_SCORE
     strong_digits = (
@@ -293,7 +407,15 @@ class UKSpeedValueReader:
       zero_score >= self.STRONG_DIGIT_SCORE
     )
     if not whole_agrees and not strong_digits:
-      return None
+      quality = (
+        float(first_score) * 0.45 +
+        float(zero_score) * 0.35 +
+        float(whole_score if whole_value == value else 0.0) * 0.20
+      )
+      return None, (
+        f"agreement:value={value},whole={whole_value},wholeScore={whole_score:.3f},"
+        f"first={first_score:.3f},zero={zero_score:.3f},margin={first_margin:.3f}"
+      ), quality
 
     agreement_bonus = 0.15 if whole_agrees else 0.0
     confidence = float(np.clip(
@@ -312,7 +434,65 @@ class UKSpeedValueReader:
       zero_score=float(zero_score),
       first_digit_margin=float(first_margin),
       whole_value_score=float(whole_score if whole_agrees else 0.0),
+      method=method,
+    ), "accepted", confidence
+
+  def read(self, sign_crop: np.ndarray) -> UKSpeedRead | None:
+    self.last_reject_reason = "no_candidate"
+    self.last_debug = ""
+
+    roi_variants = self._digit_roi_variants(sign_crop)
+    if not roi_variants:
+      self.last_reject_reason = "no_digit_roi"
+      return None
+
+    best_read = None
+    best_reject_quality = -1.0
+    best_reject = "no_segmentation"
+    attempted = 0
+
+    for roi_name, roi in roi_variants:
+      for binary_name, binary in self._binary_variants(roi):
+        segmentations = self._component_digit_masks(binary)
+
+        # Preserve the established connected-component path as the first choice.
+        # Only add the projection fallback when needed, or as a second opinion
+        # for selecting the strongest valid read.
+        segmentations.extend(self._projection_digit_masks(binary))
+
+        for seg_name, whole, masks in segmentations:
+          attempted += 1
+          method = f"{roi_name}/{binary_name}/{seg_name}"
+          result, reason, quality = self._evaluate_masks(whole, masks, method)
+          if result is not None:
+            if best_read is None or result.confidence > best_read.confidence:
+              best_read = result
+          elif quality > best_reject_quality:
+            best_reject_quality = float(quality)
+            best_reject = f"{method}:{reason}"
+
+        # Fast exit when the original-style crop gives a very strong answer.
+        if best_read is not None and best_read.confidence >= 0.82:
+          break
+      if best_read is not None and best_read.confidence >= 0.82:
+        break
+
+    if best_read is not None:
+      self.last_reject_reason = ""
+      self.last_debug = (
+        f"accepted method={best_read.method} confidence={best_read.confidence:.3f} "
+        f"first={best_read.first_digit_score:.3f} zero={best_read.zero_score:.3f} "
+        f"margin={best_read.first_digit_margin:.3f} whole={best_read.whole_value_score:.3f} "
+        f"attempted={attempted}"
+      )
+      return best_read
+
+    self.last_reject_reason = best_reject
+    self.last_debug = (
+      f"rejected best={best_reject} quality={max(best_reject_quality, 0.0):.3f} "
+      f"attempted={attempted}"
     )
+    return None
 
 
 
