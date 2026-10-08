@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 import numpy as np
 
@@ -35,12 +36,25 @@ class UKSpeedValueReader:
   STRONG_DIGIT_SCORE = 0.43
   STRONG_DIGIT_MARGIN = 0.055
 
+  # V1.9 performance controls. Acceptance thresholds above are unchanged.
+  FAST_ACCEPT_CONFIDENCE = 0.78
+  MAX_READ_EVALUATIONS = 36
+
   def __init__(self, cv2):
     self.cv2 = cv2
     self.digit_templates = self._build_digit_templates()
     self.value_templates = self._build_value_templates()
+
+    # Template shifts used to be regenerated for every candidate comparison.
+    # Pre-pack every +/-2 px shift once. Similarity can then use vectorized
+    # bit intersections with the exact same Dice/IoU scoring as V1.8.
+    self._popcount_lut = np.asarray([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+    self.digit_template_cache = self._build_packed_template_cache(self.digit_templates)
+    self.value_template_cache = self._build_packed_template_cache(self.value_templates)
+
     self.last_reject_reason = "not_read"
     self.last_debug = ""
+    self.last_elapsed_ms = 0.0
 
   @staticmethod
   def _shift_mask(mask: np.ndarray, dx: int, dy: int) -> np.ndarray:
@@ -55,23 +69,72 @@ class UKSpeedValueReader:
       out[dy1:dy2, dx1:dx2] = mask[sy1:sy2, sx1:sx2]
     return out
 
-  @classmethod
-  def _mask_similarity(cls, candidate: np.ndarray, template: np.ndarray) -> float:
-    cand = candidate > 0
-    tmpl = template > 0
-    best = 0.0
-    for dy in (-2, 0, 2):
-      for dx in (-2, 0, 2):
-        shifted = cls._shift_mask(tmpl, dx, dy) > 0
-        intersection = float(np.logical_and(cand, shifted).sum())
-        total = float(cand.sum() + shifted.sum())
-        if total <= 0.0:
-          continue
-        dice = 2.0 * intersection / total
-        union = float(np.logical_or(cand, shifted).sum())
-        iou = intersection / union if union > 0.0 else 0.0
-        best = max(best, 0.70 * dice + 0.30 * iou)
-    return float(best)
+  def _build_packed_template_cache(self, templates: dict):
+    cache = {}
+    for label, label_templates in templates.items():
+      packed_rows = []
+      counts = []
+      seen = set()
+      for template in label_templates:
+        for dy in (-2, 0, 2):
+          for dx in (-2, 0, 2):
+            shifted = self._shift_mask(template, dx, dy) > 0
+            packed = np.packbits(shifted.reshape(-1).astype(np.uint8))
+            key = packed.tobytes()
+            if key in seen:
+              continue
+            seen.add(key)
+            packed_rows.append(packed)
+            counts.append(float(np.count_nonzero(shifted)))
+
+      if packed_rows:
+        cache[label] = (
+          np.stack(packed_rows, axis=0),
+          np.asarray(counts, dtype=np.float32),
+        )
+      else:
+        cache[label] = (
+          np.zeros((0, 0), dtype=np.uint8),
+          np.zeros((0,), dtype=np.float32),
+        )
+    return cache
+
+  def _best_template(self, mask: np.ndarray, cache: dict, labels=None):
+    cand = mask > 0
+    cand_count = float(np.count_nonzero(cand))
+    if cand_count <= 0.0:
+      return None, 0.0, 0.0
+
+    cand_packed = np.packbits(cand.reshape(-1).astype(np.uint8))
+    scores = {}
+    wanted = labels if labels is not None else cache.keys()
+
+    for label in wanted:
+      packed, counts = cache.get(label, (None, None))
+      if packed is None or packed.size == 0:
+        scores[label] = 0.0
+        continue
+
+      intersections = self._popcount_lut[
+        np.bitwise_and(packed, cand_packed)
+      ].sum(axis=1).astype(np.float32)
+
+      totals = cand_count + counts
+      unions = cand_count + counts - intersections
+      valid = (totals > 0.0) & (unions > 0.0)
+      similarity = np.zeros_like(intersections, dtype=np.float32)
+      similarity[valid] = (
+        0.70 * (2.0 * intersections[valid] / totals[valid]) +
+        0.30 * (intersections[valid] / unions[valid])
+      )
+      scores[label] = float(similarity.max()) if similarity.size else 0.0
+
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    if not ordered:
+      return None, 0.0, 0.0
+    best_label, best_score = ordered[0]
+    runner_up = ordered[1][1] if len(ordered) > 1 else 0.0
+    return best_label, float(best_score), float(best_score - runner_up)
 
   def _normalize_mask(self, binary: np.ndarray, size: tuple[int, int], padding: int = 5):
     points = self.cv2.findNonZero(binary)
@@ -134,20 +197,6 @@ class UKSpeedValueReader:
           if normalized is not None:
             templates[value].append(normalized)
     return templates
-
-  def _best_template(self, mask: np.ndarray, templates: dict):
-    scores = {}
-    for label, label_templates in templates.items():
-      best = 0.0
-      for template in label_templates:
-        best = max(best, self._mask_similarity(mask, template))
-      scores[label] = float(best)
-    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-    if not ordered:
-      return None, 0.0, 0.0
-    best_label, best_score = ordered[0]
-    runner_up = ordered[1][1] if len(ordered) > 1 else 0.0
-    return best_label, float(best_score), float(best_score - runner_up)
 
   def _find_ring_bbox(self, sign_crop: np.ndarray):
     """Locate the dominant red circular sign inside a possibly larger board.
@@ -242,35 +291,42 @@ class UKSpeedValueReader:
 
     return [(name, roi) for name, roi in variants if roi is not None and roi.size > 0]
 
-  def _binary_variants(self, roi: np.ndarray):
+  def _binary_variants(self, roi: np.ndarray, modes=None):
+    requested = tuple(modes or ("otsu_open", "otsu_raw", "otsu_close", "adaptive"))
+
     gray = self.cv2.cvtColor(roi, self.cv2.COLOR_BGR2GRAY)
     min_dim = max(min(gray.shape), 1)
     scale = float(np.clip(150.0 / min_dim, 2.0, 6.0))
     gray = self.cv2.resize(gray, None, fx=scale, fy=scale, interpolation=self.cv2.INTER_CUBIC)
     clahe = self.cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4)).apply(gray)
     blur = self.cv2.GaussianBlur(clahe, (3, 3), 0)
-
-    _thr, otsu = self.cv2.threshold(
-      blur, 0, 255, self.cv2.THRESH_BINARY_INV + self.cv2.THRESH_OTSU
-    )
     kernel = np.ones((2, 2), dtype=np.uint8)
-    variants = [
-      ("otsu_open", self.cv2.morphologyEx(otsu, self.cv2.MORPH_OPEN, kernel)),
-      ("otsu_raw", otsu),
-      ("otsu_close", self.cv2.morphologyEx(otsu, self.cv2.MORPH_CLOSE, kernel)),
-    ]
 
-    # Adaptive threshold is useful when half of a small sign is shaded or
-    # motion/compression makes one digit noticeably lighter than the other.
-    block = max(15, (min(blur.shape) // 5) | 1)
-    block = min(block, 51)
-    if block % 2 == 0:
-      block += 1
-    adaptive = self.cv2.adaptiveThreshold(
-      clahe, 255, self.cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-      self.cv2.THRESH_BINARY_INV, block, 7,
-    )
-    variants.append(("adaptive", self.cv2.morphologyEx(adaptive, self.cv2.MORPH_OPEN, kernel)))
+    otsu = None
+    if any(name.startswith("otsu_") for name in requested):
+      _thr, otsu = self.cv2.threshold(
+        blur, 0, 255, self.cv2.THRESH_BINARY_INV + self.cv2.THRESH_OTSU
+      )
+
+    variants = []
+    for name in requested:
+      if name == "otsu_open" and otsu is not None:
+        variants.append((name, self.cv2.morphologyEx(otsu, self.cv2.MORPH_OPEN, kernel)))
+      elif name == "otsu_raw" and otsu is not None:
+        variants.append((name, otsu))
+      elif name == "otsu_close" and otsu is not None:
+        variants.append((name, self.cv2.morphologyEx(otsu, self.cv2.MORPH_CLOSE, kernel)))
+      elif name == "adaptive":
+        block = max(15, (min(blur.shape) // 5) | 1)
+        block = min(block, 51)
+        if block % 2 == 0:
+          block += 1
+        adaptive = self.cv2.adaptiveThreshold(
+          clahe, 255, self.cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+          self.cv2.THRESH_BINARY_INV, block, 7,
+        )
+        variants.append((name, self.cv2.morphologyEx(adaptive, self.cv2.MORPH_OPEN, kernel)))
+
     return variants
 
   def _component_digit_masks(self, binary: np.ndarray):
@@ -375,30 +431,33 @@ class UKSpeedValueReader:
       return None, "segmentation", 0.0
 
     first_label, first_score, first_margin = self._best_template(
-      digit_masks[0],
-      {d: self.digit_templates[d] for d in FIRST_DIGITS},
+      digit_masks[0], self.digit_template_cache, FIRST_DIGITS
     )
-    zero_label, zero_score, _ = self._best_template(
-      digit_masks[1],
-      {"0": self.digit_templates["0"]},
-    )
-    whole_value, whole_score, _whole_margin = self._best_template(
-      whole_mask, self.value_templates
-    )
+    if first_label is None:
+      return None, "first_label:none", 0.0
+    if first_score < self.DIGIT_MIN_SCORE:
+      return None, f"first_score:{first_score:.3f}", float(first_score)
+    if first_margin < self.DIGIT_MIN_MARGIN:
+      return None, f"margin:{first_margin:.3f}", float(first_score)
 
-    if first_label is None or zero_label != "0":
+    zero_label, zero_score, _ = self._best_template(
+      digit_masks[1], self.digit_template_cache, ("0",)
+    )
+    if zero_label != "0":
       quality = max(float(first_score), float(zero_score))
-      return None, f"labels:first={first_label},zero={zero_label}", quality
+      return None, f"zero_label:{zero_label}", quality
+    if zero_score < self.ZERO_MIN_SCORE:
+      return None, f"zero_score:{zero_score:.3f}", float(zero_score)
 
     value = int(first_label) * 10
     if value not in SUPPORTED_UK_LIMITS_MPH:
       return None, f"unsupported:{value}", 0.0
-    if first_score < self.DIGIT_MIN_SCORE:
-      return None, f"first_score:{first_score:.3f}", float(first_score)
-    if zero_score < self.ZERO_MIN_SCORE:
-      return None, f"zero_score:{zero_score:.3f}", float(zero_score)
-    if first_margin < self.DIGIT_MIN_MARGIN:
-      return None, f"margin:{first_margin:.3f}", float(first_score)
+
+    # Whole-value matching is the largest template set. Only pay for it after
+    # both independently segmented digits have already passed their gates.
+    whole_value, whole_score, _whole_margin = self._best_template(
+      whole_mask, self.value_template_cache
+    )
 
     whole_agrees = whole_value == value and whole_score >= self.WHOLE_MIN_SCORE
     strong_digits = (
@@ -438,44 +497,85 @@ class UKSpeedValueReader:
     ), "accepted", confidence
 
   def read(self, sign_crop: np.ndarray) -> UKSpeedRead | None:
+    started = time.monotonic()
     self.last_reject_reason = "no_candidate"
     self.last_debug = ""
+    self.last_elapsed_ms = 0.0
 
     roi_variants = self._digit_roi_variants(sign_crop)
     if not roi_variants:
       self.last_reject_reason = "no_digit_roi"
+      self.last_elapsed_ms = (time.monotonic() - started) * 1000.0
       return None
 
+    roi_map = {name: roi for name, roi in roi_variants}
     best_read = None
     best_reject_quality = -1.0
     best_reject = "no_segmentation"
     attempted = 0
+    stop = False
 
-    for roi_name, roi in roi_variants:
-      for binary_name, binary in self._binary_variants(roi):
-        segmentations = self._component_digit_masks(binary)
+    # Staged search:
+    # 1) cheap established/ring-mid Otsu paths;
+    # 2) alternate Otsu segmentation;
+    # 3) projection/close fallback;
+    # 4) adaptive threshold only as the last resort.
+    stages = (
+      (("direct", "ring_mid"), ("otsu_open",), False),
+      (("direct", "ring_mid", "ring_wide"), ("otsu_raw",), False),
+      (("ring_mid", "ring_wide", "ring_tight", "direct"), ("otsu_close",), True),
+      (("ring_mid", "ring_wide", "ring_tight", "direct", "fallback"), ("adaptive",), True),
+    )
 
-        # Preserve the established connected-component path as the first choice.
-        # Only add the projection fallback when needed, or as a second opinion
-        # for selecting the strongest valid read.
-        segmentations.extend(self._projection_digit_masks(binary))
+    for roi_names, binary_modes, allow_projection in stages:
+      for roi_name in roi_names:
+        roi = roi_map.get(roi_name)
+        if roi is None:
+          continue
 
-        for seg_name, whole, masks in segmentations:
-          attempted += 1
-          method = f"{roi_name}/{binary_name}/{seg_name}"
-          result, reason, quality = self._evaluate_masks(whole, masks, method)
-          if result is not None:
-            if best_read is None or result.confidence > best_read.confidence:
-              best_read = result
-          elif quality > best_reject_quality:
-            best_reject_quality = float(quality)
-            best_reject = f"{method}:{reason}"
+        for binary_name, binary in self._binary_variants(roi, binary_modes):
+          segmentations = self._component_digit_masks(binary)
+          if allow_projection:
+            segmentations.extend(self._projection_digit_masks(binary))
 
-        # Fast exit when the original-style crop gives a very strong answer.
-        if best_read is not None and best_read.confidence >= 0.82:
+          for seg_name, whole, masks in segmentations:
+            if attempted >= self.MAX_READ_EVALUATIONS:
+              stop = True
+              break
+
+            attempted += 1
+            method = f"{roi_name}/{binary_name}/{seg_name}"
+            result, reason, quality = self._evaluate_masks(whole, masks, method)
+
+            if result is not None:
+              if best_read is None or result.confidence > best_read.confidence:
+                best_read = result
+
+              # A read this strong has already passed every unchanged V1.8
+              # acceptance gate. Returning now is preferable to spending
+              # seconds searching for a few more confidence points.
+              if result.confidence >= self.FAST_ACCEPT_CONFIDENCE:
+                self.last_reject_reason = ""
+                self.last_elapsed_ms = (time.monotonic() - started) * 1000.0
+                self.last_debug = (
+                  f"accepted method={result.method} confidence={result.confidence:.3f} "
+                  f"first={result.first_digit_score:.3f} zero={result.zero_score:.3f} "
+                  f"margin={result.first_digit_margin:.3f} whole={result.whole_value_score:.3f} "
+                  f"attempted={attempted} elapsedMs={self.last_elapsed_ms:.1f}"
+                )
+                return result
+            elif quality > best_reject_quality:
+              best_reject_quality = float(quality)
+              best_reject = f"{method}:{reason}"
+
+          if stop:
+            break
+        if stop:
           break
-      if best_read is not None and best_read.confidence >= 0.82:
+      if stop:
         break
+
+    self.last_elapsed_ms = (time.monotonic() - started) * 1000.0
 
     if best_read is not None:
       self.last_reject_reason = ""
@@ -483,14 +583,14 @@ class UKSpeedValueReader:
         f"accepted method={best_read.method} confidence={best_read.confidence:.3f} "
         f"first={best_read.first_digit_score:.3f} zero={best_read.zero_score:.3f} "
         f"margin={best_read.first_digit_margin:.3f} whole={best_read.whole_value_score:.3f} "
-        f"attempted={attempted}"
+        f"attempted={attempted} elapsedMs={self.last_elapsed_ms:.1f}"
       )
       return best_read
 
     self.last_reject_reason = best_reject
     self.last_debug = (
       f"rejected best={best_reject} quality={max(best_reject_quality, 0.0):.3f} "
-      f"attempted={attempted}"
+      f"attempted={attempted} elapsedMs={self.last_elapsed_ms:.1f}"
     )
     return None
 
