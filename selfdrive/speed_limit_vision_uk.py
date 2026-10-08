@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.9-UK
+# XNOR Vision Speed Limit V1.10-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -29,10 +29,10 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # scanning, conservative temporal confirmation and lower-only integration in
 # Tesla CarState. It recognises numeric 20/30/40/50/60/70 mph signs.
 #
-# V1.9 preserves V1.8 numeric recognition but makes OCR bounded and staged.
-# Template shifts are precomputed, cheap segmentation paths run first, expensive
-# fallbacks are capped, and elapsed OCR time/method are logged so the V1.7
-# 20 Hz tracker can arm while the physical sign is still in view.
+# V1.10 adds fragmented/partial red-ring handling without weakening the normal
+# strict-ring path. A proposal with >=50% ring evidence may reach OCR, but it is
+# accepted only when the digit read is exceptionally clear and internally
+# consistent; it still requires the normal independent numeric 2/2 confirmation.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 
@@ -54,6 +54,12 @@ NUMERIC_NMS_IOU_THRESHOLD = 0.55
 NUMERIC_RING_RETRY_PADDING = 0.18
 NUMERIC_RING_RECENTER_PADDING = 0.08
 NUMERIC_RING_MIN_BOX_RATIO = 0.035
+NUMERIC_PARTIAL_RING_MIN_SCORE = 0.50
+NUMERIC_PARTIAL_OCR_MIN_CONFIDENCE = 0.78
+NUMERIC_PARTIAL_FIRST_DIGIT_MIN = 0.48
+NUMERIC_PARTIAL_ZERO_MIN = 0.48
+NUMERIC_PARTIAL_MARGIN_MIN = 0.055
+NUMERIC_PARTIAL_WHOLE_MIN = 0.32
 NUMERIC_TRACK_INTERVAL = 0.05
 NUMERIC_TRACK_OCR_INTERVAL = 0.10
 NUMERIC_TRACK_MIN_DELAY = 0.08
@@ -397,7 +403,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.9: ready")
+      self._set_status("UK vision V1.10: ready")
       cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
       return True
     except Exception as exc:
@@ -481,60 +487,119 @@ class SpeedLimitVisionUK:
     result = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
     return result, ratio, left, top
 
-  def _normalize_numeric_sign_crop(self, sign_crop):
-    """Recenter a proposal on its dominant near-square red ring.
+  def _numeric_red_mask(self, sign_crop):
+    hsv = self.cv2.cvtColor(sign_crop, self.cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    return (
+      (((hue <= 12) | (hue >= 168))) &
+      (sat >= 60) &
+      (val >= 48)
+    ).astype(np.uint8) * 255
 
-    UK terminal signs are sometimes mounted on a much larger yellow backing
-    board. The legacy detector can include some of that board in its proposal,
-    which distorts geometry measured against the full crop. Isolate the actual
-    circular red-ring component first, then score/read that normalized crop.
-    """
+  def _find_numeric_red_bbox(self, sign_crop):
+    """Locate a red sign perimeter, including fragmented red arcs."""
+    if sign_crop is None or sign_crop.size == 0:
+      return None, "none"
+
+    h, w = sign_crop.shape[:2]
+    if h < 12 or w < 12:
+      return None, "small"
+
+    try:
+      red = self._numeric_red_mask(sign_crop)
+      close3 = self.cv2.morphologyEx(
+        red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
+      )
+      contours, _hier = self.cv2.findContours(
+        close3, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
+      )
+    except Exception:
+      return None, "error"
+
+    crop_area = float(max(w * h, 1))
+    candidates = []
+
+    # Existing behaviour: a single plausible near-square red component.
+    for contour in contours:
+      x, y, cw, ch = self.cv2.boundingRect(contour)
+      if cw < 6 or ch < 6:
+        continue
+      aspect = cw / max(ch, 1)
+      ratio = float(cw * ch) / crop_area
+      if 0.50 <= aspect <= 1.80 and ratio >= NUMERIC_RING_MIN_BOX_RATIO:
+        squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+        candidates.append((
+          float(cw * ch) * (0.75 + 0.25 * squareness),
+          (x, y, cw, ch),
+          "single",
+        ))
+
+    # V1.10: join nearby red arcs before giving up. This is deliberately local
+    # to an ONNX sign proposal; it does not perform a new full-frame search.
+    significant = []
+    min_piece_area = max(crop_area * 0.0015, 2.0)
+    for contour in contours:
+      area = float(self.cv2.contourArea(contour))
+      if area < min_piece_area:
+        continue
+      x, y, cw, ch = self.cv2.boundingRect(contour)
+      significant.append((x, y, cw, ch, area))
+
+    if len(significant) >= 2:
+      ux1 = min(x for x, _y, _cw, _ch, _a in significant)
+      uy1 = min(y for _x, y, _cw, _ch, _a in significant)
+      ux2 = max(x + cw for x, _y, cw, _ch, _a in significant)
+      uy2 = max(y + ch for _x, y, _cw, ch, _a in significant)
+      uw, uh = ux2 - ux1, uy2 - uy1
+      aspect = uw / max(uh, 1)
+      ratio = float(uw * uh) / crop_area
+      red_area = sum(a for _x, _y, _cw, _ch, a in significant)
+      if 0.50 <= aspect <= 1.80 and NUMERIC_RING_MIN_BOX_RATIO <= ratio <= 0.95:
+        squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+        fill = min(red_area / max(float(uw * uh) * 0.20, 1.0), 1.0)
+        candidates.append((
+          float(uw * uh) * (0.60 + 0.25 * squareness + 0.15 * fill),
+          (ux1, uy1, uw, uh),
+          "fragment_union",
+        ))
+
+    # A slightly wider morphological bridge can reconnect blurred ring arcs.
+    k = 5 if min(h, w) >= 32 else 3
+    try:
+      kernel = self.cv2.getStructuringElement(self.cv2.MORPH_ELLIPSE, (k, k))
+      joined = self.cv2.morphologyEx(red, self.cv2.MORPH_CLOSE, kernel)
+      joined_contours, _hier = self.cv2.findContours(
+        joined, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
+      )
+      for contour in joined_contours:
+        x, y, cw, ch = self.cv2.boundingRect(contour)
+        if cw < 7 or ch < 7:
+          continue
+        aspect = cw / max(ch, 1)
+        ratio = float(cw * ch) / crop_area
+        if 0.50 <= aspect <= 1.80 and NUMERIC_RING_MIN_BOX_RATIO <= ratio <= 0.95:
+          squareness = min(aspect, 1.0 / max(aspect, 1e-6))
+          candidates.append((
+            float(cw * ch) * (0.65 + 0.35 * squareness),
+            (x, y, cw, ch),
+            "fragment_close",
+          ))
+    except Exception:
+      pass
+
+    if not candidates:
+      return None, "none"
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _score, bbox, mode = candidates[0]
+    return bbox, mode
+
+  def _normalize_numeric_sign_crop(self, sign_crop):
+    """Recenter a proposal on a whole or reconstructed red sign perimeter."""
     if sign_crop is None or sign_crop.size == 0:
       return sign_crop
 
     h, w = sign_crop.shape[:2]
-    if h < 12 or w < 12:
-      return sign_crop
-
-    try:
-      hsv = self.cv2.cvtColor(sign_crop, self.cv2.COLOR_BGR2HSV)
-      hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-      red = (
-        (((hue <= 12) | (hue >= 168))) &
-        (sat >= 65) &
-        (val >= 50)
-      ).astype(np.uint8) * 255
-      red = self.cv2.morphologyEx(
-        red, self.cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
-      )
-      contours, _hier = self.cv2.findContours(
-        red, self.cv2.RETR_EXTERNAL, self.cv2.CHAIN_APPROX_SIMPLE
-      )
-    except Exception:
-      return sign_crop
-
-    best = None
-    best_score = 0.0
-    crop_area = float(max(w * h, 1))
-    for contour in contours:
-      x, y, cw, ch = self.cv2.boundingRect(contour)
-      if cw < 8 or ch < 8:
-        continue
-      aspect = cw / max(ch, 1)
-      if aspect < 0.55 or aspect > 1.65:
-        continue
-      box_ratio = float(cw * ch) / crop_area
-      if box_ratio < NUMERIC_RING_MIN_BOX_RATIO:
-        continue
-
-      # Prefer the largest near-square red structure. The later white/dark
-      # centre checks still reject lamps, reflectors and unrelated red objects.
-      squareness = min(aspect, 1.0 / max(aspect, 1e-6))
-      score = float(cw * ch) * (0.75 + 0.25 * squareness)
-      if score > best_score:
-        best_score = score
-        best = (x, y, cw, ch)
-
+    best, _mode = self._find_numeric_red_bbox(sign_crop)
     if best is None:
       return sign_crop
 
@@ -549,67 +614,133 @@ class SpeedLimitVisionUK:
       return sign_crop
     return sign_crop[y1:y2, x1:x2]
 
-  def _uk_red_ring_score(self, sign_crop) -> float:
+  def _uk_red_ring_assessment(self, sign_crop):
+    """Return strict score, partial evidence, reject reason and diagnostics."""
     if sign_crop is None or sign_crop.size == 0:
-      return 0.0
+      return 0.0, 0.0, "empty", "empty"
 
+    ring_bbox, ring_mode = self._find_numeric_red_bbox(sign_crop)
     sign_crop = self._normalize_numeric_sign_crop(sign_crop)
     if sign_crop is None or sign_crop.size == 0:
-      return 0.0
+      return 0.0, 0.0, "normalize", f"mode={ring_mode}"
 
     h, w = sign_crop.shape[:2]
     if h < 12 or w < 12:
-      return 0.0
+      return 0.0, 0.0, "small", f"mode={ring_mode} size={w}x{h}"
     aspect = w / max(h, 1)
-    if aspect < 0.60 or aspect > 1.50:
-      return 0.0
+    if aspect < 0.55 or aspect > 1.70:
+      return 0.0, 0.0, "aspect", f"mode={ring_mode} aspect={aspect:.2f}"
 
     hsv = self.cv2.cvtColor(sign_crop, self.cv2.COLOR_BGR2HSV)
-    hue = hsv[:, :, 0]
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
-    red = ((((hue <= 12) | (hue >= 168)) & (sat >= 70) & (val >= 55))).astype(np.uint8)
-    white = ((val >= 125) & (sat <= 85)).astype(np.uint8)
-    dark = ((val <= 120) & (sat <= 145)).astype(np.uint8)
+    red = ((((hue <= 12) | (hue >= 168)) & (sat >= 60) & (val >= 48))).astype(np.uint8)
+    white = ((val >= 120) & (sat <= 92)).astype(np.uint8)
+    dark = ((val <= 125) & (sat <= 155)).astype(np.uint8)
 
     red_ratio = float(red.mean())
     white_ratio = float(white.mean())
     dark_ratio = float(dark.mean())
-    if red_ratio < 0.025 or red_ratio > 0.50:
-      return 0.0
-    if white_ratio < 0.16 or dark_ratio < 0.004:
-      return 0.0
 
     yy, xx = np.mgrid[0:h, 0:w]
     nx = (xx - (w - 1) / 2.0) / max(w / 2.0, 1.0)
     ny = (yy - (h - 1) / 2.0) / max(h / 2.0, 1.0)
     rr = np.sqrt(nx * nx + ny * ny)
 
-    ring_zone = (rr >= 0.52) & (rr <= 1.05)
+    ring_zone = (rr >= 0.50) & (rr <= 1.06)
     centre_zone = rr <= 0.48
     if not ring_zone.any() or not centre_zone.any():
-      return 0.0
+      return 0.0, 0.0, "zones", f"mode={ring_mode}"
 
     ring_red = float(red[ring_zone].mean())
     centre_red = float(red[centre_zone].mean())
     centre_white = float(white[centre_zone].mean())
     centre_dark = float(dark[centre_zone].mean())
 
-    if ring_red < 0.055:
-      return 0.0
-    if ring_red < (centre_red * 1.35 + 0.01):
-      return 0.0
-    if centre_white < 0.18 or centre_dark < 0.006:
-      return 0.0
+    # Measure angular coverage so several disconnected arcs can still provide
+    # useful ring evidence even if no single contour is a complete circle.
+    angles = np.arctan2(ny, nx)
+    arc_bins = 16
+    arc_hits = 0
+    for idx in range(arc_bins):
+      lo = -np.pi + (2.0 * np.pi * idx / arc_bins)
+      hi = -np.pi + (2.0 * np.pi * (idx + 1) / arc_bins)
+      sector = ring_zone & (angles >= lo) & (angles < hi)
+      if sector.any() and float(red[sector].mean()) >= 0.045:
+        arc_hits += 1
+    arc_coverage = float(arc_hits) / float(arc_bins)
 
-    score = (
+    evidence = float(np.clip(
+      min(ring_red / 0.20, 1.0) * 0.40 +
+      arc_coverage * 0.22 +
+      min(centre_white / 0.58, 1.0) * 0.20 +
+      min(centre_dark / 0.14, 1.0) * 0.10 +
+      min(red_ratio / 0.18, 1.0) * 0.08,
+      0.0,
+      1.0,
+    ))
+
+    details = (
+      f"mode={ring_mode} evidence={evidence:.3f} redRatio={red_ratio:.3f} "
+      f"ringRed={ring_red:.3f} arc={arc_coverage:.3f} centreRed={centre_red:.3f} "
+      f"centreWhite={centre_white:.3f} centreDark={centre_dark:.3f} "
+      f"whiteRatio={white_ratio:.3f} darkRatio={dark_ratio:.3f}"
+    )
+
+    reason = "ok"
+    if red_ratio < 0.025 or red_ratio > 0.50:
+      reason = "red_ratio"
+    elif white_ratio < 0.16:
+      reason = "white_ratio"
+    elif dark_ratio < 0.004:
+      reason = "dark_ratio"
+    elif ring_red < 0.055:
+      reason = "ring_red"
+    elif ring_red < (centre_red * 1.35 + 0.01):
+      reason = "ring_contrast"
+    elif centre_white < 0.18:
+      reason = "centre_white"
+    elif centre_dark < 0.006:
+      reason = "centre_dark"
+
+    if reason != "ok":
+      return 0.0, evidence, reason, details
+
+    strict_score = (
       min(ring_red / 0.28, 1.0) * 0.45 +
       min(centre_white / 0.65, 1.0) * 0.30 +
       min(centre_dark / 0.18, 1.0) * 0.15 +
       min(red_ratio / 0.20, 1.0) * 0.10
     )
-    return float(np.clip(score, 0.0, 1.0))
+    return float(np.clip(strict_score, 0.0, 1.0)), evidence, "ok", details
+
+  def _uk_red_ring_score(self, sign_crop) -> float:
+    strict, _evidence, _reason, _details = self._uk_red_ring_assessment(sign_crop)
+    return float(strict)
+
+  @staticmethod
+  def _partial_numeric_read_is_clear(read) -> bool:
+    if read is None:
+      return False
+    return bool(
+      float(read.confidence) >= NUMERIC_PARTIAL_OCR_MIN_CONFIDENCE and
+      float(read.first_digit_score) >= NUMERIC_PARTIAL_FIRST_DIGIT_MIN and
+      float(read.zero_score) >= NUMERIC_PARTIAL_ZERO_MIN and
+      float(read.first_digit_margin) >= NUMERIC_PARTIAL_MARGIN_MIN and
+      float(read.whole_value_score) >= NUMERIC_PARTIAL_WHOLE_MIN
+    )
+
+  def _log_ring_assessment(self, decision: str, legacy_speed_mph: int,
+                           model_confidence: float, strict_score: float,
+                           evidence_score: float, reason: str, details: str,
+                           bbox=None) -> None:
+    bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+    cloudlog.info(
+      f"[XNOR_VSL_V12UK] ring_detail decision={decision} legacy={int(legacy_speed_mph)} "
+      f"model={float(model_confidence):.3f} strict={float(strict_score):.3f} "
+      f"evidence={float(evidence_score):.3f} reason={reason} "
+      f"bbox={bbox_text} {details}"
+    )
 
   @staticmethod
   def _resolve_national_limit_from_mapd_values(tile_loaded: bool, road_context: str,
@@ -799,7 +930,12 @@ class SpeedLimitVisionUK:
     # Ring geometry is a stronger UK-sign cue than the legacy class score.
     ordered = sorted(
       proposals,
-      key=lambda item: (float(item[2]) > 0.0, float(item[2]), float(item[0])),
+      key=lambda item: (
+        float(item[2]) > 0.0,
+        float(item[2]),
+        float(item[4]) if len(item) > 4 else 0.0,
+        float(item[0]),
+      ),
       reverse=True,
     )
     kept = []
@@ -822,7 +958,7 @@ class SpeedLimitVisionUK:
     self.pending_numeric = None
 
   def _arm_pending_numeric(self, detection: Detection, now: float | None = None) -> None:
-    if detection.bbox is None or detection.source != "numeric":
+    if detection.bbox is None or not detection.source.startswith("numeric"):
       return
     if detection.confidence < NUMERIC_TRACK_ARM_MIN_CONFIDENCE:
       return
@@ -935,8 +1071,13 @@ class SpeedLimitVisionUK:
         continue
       x1, y1, x2, y2 = candidate
       crop = frame_bgr[y1:y2, x1:x2]
-      ring = self._uk_red_ring_score(crop)
-      if ring < NUMERIC_TRACK_MIN_RING_SCORE:
+      strict_ring, partial_ring, ring_reason, _ring_details = self._uk_red_ring_assessment(crop)
+      ring = float(strict_ring if strict_ring > 0.0 else partial_ring)
+      partial = strict_ring <= 0.0
+      if partial:
+        if partial_ring < NUMERIC_PARTIAL_RING_MIN_SCORE:
+          continue
+      elif ring < NUMERIC_TRACK_MIN_RING_SCORE:
         continue
 
       motion = float(np.hypot(dx, dy))
@@ -945,7 +1086,7 @@ class SpeedLimitVisionUK:
       rank = float(ring) * 0.70 + proximity * 0.20 + squareness * 0.10
       if rank > best_rank:
         best_rank = rank
-        best = (candidate, float(ring))
+        best = (candidate, float(ring), bool(partial), str(ring_reason))
 
     return best
 
@@ -979,7 +1120,7 @@ class SpeedLimitVisionUK:
         self._clear_pending_numeric("frames")
       return None
 
-    tracked_bbox, ring = found
+    tracked_bbox, ring, ring_partial, ring_reason = found
     pending.bbox = tracked_bbox
     pending.tracked_once = True
     bbox_text = ",".join(str(int(v)) for v in tracked_bbox)
@@ -1013,6 +1154,17 @@ class SpeedLimitVisionUK:
 
     value_conf = float(read.confidence)
     read_speed = int(read.speed_limit_mph)
+
+    if ring_partial and not self._partial_numeric_read_is_clear(read):
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] numeric_track_partial_reject expected={pending.speed_limit_mph}mph "
+        f"read={read_speed}mph ring={ring:.3f} reason={ring_reason} "
+        f"valueConf={value_conf:.3f} first={float(read.first_digit_score):.3f} "
+        f"zero={float(read.zero_score):.3f} margin={float(read.first_digit_margin):.3f} "
+        f"whole={float(read.whole_value_score):.3f}"
+      )
+      return None
+
     confidence = float(np.clip(value_conf * 0.65 + ring * 0.35, 0.0, 0.99))
 
     if read_speed != int(pending.speed_limit_mph):
@@ -1037,7 +1189,7 @@ class SpeedLimitVisionUK:
       value_confidence=value_conf,
       legacy_speed_mph=0,
       bbox=tracked_bbox,
-      source="numeric_reacquire",
+      source="numeric_reacquire_partial" if ring_partial else "numeric_reacquire",
     )
     cloudlog.info(
       f"[XNOR_VSL_V12UK] numeric_reacquire speed={detection.speed_limit_mph}mph "
@@ -1069,7 +1221,7 @@ class SpeedLimitVisionUK:
   def _start_track(self, frame_bgr: np.ndarray, detection: Detection, now: float) -> None:
     if detection.bbox is None:
       return
-    # V1.9 confirmation comes only from independent detector passes on fresh
+    # V1.10 confirmation comes only from independent detector passes on fresh
     # camera frames. The previous numeric optical-flow path could fail before
     # 2/2 even after a strong first read, while tracking one bad object could
     # also make confirmation less independent.
@@ -1323,23 +1475,30 @@ class SpeedLimitVisionUK:
 
       bbox = (x1, y1, x2, y2)
       crop = frame_bgr[y1:y2, x1:x2]
-      uk_score = self._uk_red_ring_score(crop)
+      uk_score, partial_score, ring_reason, ring_details = self._uk_red_ring_assessment(crop)
 
-      # A tight model box can clip the red perimeter. Retry once with a modest
-      # expansion before classifying the proposal as a ring failure.
-      if uk_score <= 0.0:
-        retry_bbox = self._expand_bbox(
-          bbox, frame_w, frame_h, NUMERIC_RING_RETRY_PADDING
-        )
-        if retry_bbox is not None and retry_bbox != bbox:
-          rx1, ry1, rx2, ry2 = retry_bbox
-          retry_crop = frame_bgr[ry1:ry2, rx1:rx2]
-          retry_score = self._uk_red_ring_score(retry_crop)
-          if retry_score > uk_score:
-            uk_score = float(retry_score)
-            bbox = retry_bbox
+      # A tight model box can clip the perimeter. Retry once with a modest
+      # expansion and retain whichever crop has stronger total ring evidence.
+      retry_bbox = self._expand_bbox(
+        bbox, frame_w, frame_h, NUMERIC_RING_RETRY_PADDING
+      )
+      if retry_bbox is not None and retry_bbox != bbox:
+        rx1, ry1, rx2, ry2 = retry_bbox
+        retry_crop = frame_bgr[ry1:ry2, rx1:rx2]
+        retry_strict, retry_partial, retry_reason, retry_details = self._uk_red_ring_assessment(retry_crop)
+        current_rank = (float(uk_score) > 0.0, float(uk_score), float(partial_score))
+        retry_rank = (float(retry_strict) > 0.0, float(retry_strict), float(retry_partial))
+        if retry_rank > current_rank:
+          uk_score = float(retry_strict)
+          partial_score = float(retry_partial)
+          ring_reason = str(retry_reason)
+          ring_details = str(retry_details)
+          bbox = retry_bbox
 
-      raw_supported.append((model_conf, speed_mph, uk_score, bbox))
+      raw_supported.append((
+        model_conf, speed_mph, uk_score, bbox,
+        partial_score, ring_reason, ring_details,
+      ))
 
     if not raw_supported:
       return self._detect_national_sign(frame_bgr)
@@ -1350,48 +1509,90 @@ class SpeedLimitVisionUK:
         f"[XNOR_VSL_V12UK] numeric_dedupe raw={len(raw_supported)} kept={len(proposals)}"
       )
 
-    # Stage 2: expensive digit OCR only on spatially distinct sign proposals.
+    # Stage 2: digit OCR only on spatially distinct proposals. Strict-ring
+    # candidates follow the established path. Partial-ring candidates may reach
+    # OCR at >=0.50 evidence, but require the stronger clear-read gate.
     candidates = []
-    for model_conf, speed_mph, uk_score, bbox in proposals:
+    for model_conf, speed_mph, uk_score, bbox, partial_score, ring_reason, ring_details in proposals:
       x1, y1, x2, y2 = bbox
       crop = frame_bgr[y1:y2, x1:x2]
 
-      if uk_score <= 0.0:
+      partial_path = uk_score <= 0.0 and partial_score >= NUMERIC_PARTIAL_RING_MIN_SCORE
+      if uk_score <= 0.0 and not partial_path:
         self._log_raw_proposal(
           "ring_reject", speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
+        )
+        self._log_ring_assessment(
+          "reject", speed_mph, model_conf, uk_score, partial_score,
+          ring_reason, ring_details, bbox,
         )
         continue
 
       value_read = self.value_reader.read(crop) if self.value_reader is not None else None
       if value_read is None:
         self._log_raw_proposal(
-          "value_reject", speed_mph, model_conf, uk_score, 0, 0.0, 0.0, bbox
+          "partial_value_reject" if partial_path else "value_reject",
+          speed_mph, model_conf, partial_score if partial_path else uk_score,
+          0, 0.0, 0.0, bbox,
         )
-        self._log_ocr_reject("detector", bbox)
+        if partial_path:
+          self._log_ring_assessment(
+            "partial_ocr_reject", speed_mph, model_conf, uk_score, partial_score,
+            ring_reason, ring_details, bbox,
+          )
+        self._log_ocr_reject("detector_partial" if partial_path else "detector", bbox)
         continue
 
-      self._log_ocr_accept("detector", value_read, bbox)
+      self._log_ocr_accept("detector_partial" if partial_path else "detector", value_read, bbox)
+
+      if partial_path and not self._partial_numeric_read_is_clear(value_read):
+        self._log_raw_proposal(
+          "partial_clear_reject", speed_mph, model_conf, partial_score,
+          int(value_read.speed_limit_mph), float(value_read.confidence), 0.0, bbox,
+        )
+        self._log_ring_assessment(
+          "partial_clear_reject", speed_mph, model_conf, uk_score, partial_score,
+          ring_reason, ring_details, bbox,
+        )
+        cloudlog.info(
+          f"[XNOR_VSL_V12UK] partial_clear_reject read={int(value_read.speed_limit_mph)}mph "
+          f"valueConf={float(value_read.confidence):.3f} "
+          f"first={float(value_read.first_digit_score):.3f} "
+          f"zero={float(value_read.zero_score):.3f} "
+          f"margin={float(value_read.first_digit_margin):.3f} "
+          f"whole={float(value_read.whole_value_score):.3f}"
+        )
+        continue
+
       final_speed_mph = int(value_read.speed_limit_mph)
       value_conf = float(value_read.confidence)
+      effective_ring = float(partial_score if partial_path else uk_score)
       confidence = float(np.clip(
         value_conf * 0.60 +
-        uk_score * 0.30 +
+        effective_ring * 0.30 +
         model_conf * 0.10,
         0.0,
         0.99,
       ))
       self._log_raw_proposal(
-        "value_accept", speed_mph, model_conf, uk_score,
+        "partial_value_accept" if partial_path else "value_accept",
+        speed_mph, model_conf, effective_ring,
         final_speed_mph, value_conf, confidence, bbox,
       )
+      if partial_path:
+        self._log_ring_assessment(
+          "partial_accept", speed_mph, model_conf, uk_score, partial_score,
+          ring_reason, ring_details, bbox,
+        )
       candidates.append(Detection(
         final_speed_mph,
         confidence,
         model_conf,
-        uk_score,
+        effective_ring,
         value_conf,
         speed_mph,
         bbox,
+        "numeric_partial" if partial_path else "numeric",
       ))
 
     if not candidates:
@@ -1467,7 +1668,7 @@ class SpeedLimitVisionUK:
         self._set_status(f"UK lower candidate: {detection.speed_limit_mph} mph ({count}/{change_required})")
       return
 
-    # V1.9: an independently confirmed higher camera sign is authoritative.
+    # V1.10: an independently confirmed higher camera sign is authoritative.
     # Numeric signs require the normal 2/2 plus a strong confidence floor;
     # NSL already requires 3/3 and its stricter 0.78 geometry threshold.
     higher_confidence_ok = is_national or best_conf >= HIGHER_CHANGE_CONFIDENCE
