@@ -1,0 +1,38 @@
+name: V2 UK Speed Classifier POC
+
+on:
+  push:
+    branches:
+      - xnor-v2-uk-speed-classifier-poc
+    paths:
+      - tools/v2_speed_classifier_poc.py
+      - .github/workflows/v2-speed-classifier-poc.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy<2.0" opencv-python-headless pillow requests onnx
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - name: Train real-photo + canonical UK classifier
+        run: |
+          python tools/v2_speed_classifier_poc.py
+      - name: Upload classifier and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-uk-speed-classifier-poc
+          path: v2_poc_output/
+          if-no-files-found: error
