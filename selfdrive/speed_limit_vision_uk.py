@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.10-UK
+# XNOR Vision Speed Limit V1.11-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -33,8 +33,20 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # strict-ring path. A proposal with >=50% ring evidence may reach OCR, but it is
 # accepted only when the digit read is exceptionally clear and internally
 # consistent; it still requires the normal independent numeric 2/2 confirmation.
+#
+# V1.11 adds the drive-trained V3 classifier in SHADOW-ONLY mode. V3 receives
+# the same sign crops/proposals that the authoritative V1.10 pipeline already
+# considers, but its result is telemetry only: it cannot publish a limit,
+# create a lower candidate, change temporal confirmation, or affect arbitration.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
+SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
+SHADOW_INPUT_SIZE = 128
+SHADOW_CLASSES = ("20", "30", "40", "50", "60", "70", "NSL", "OTHER")
+SHADOW_MEAN = np.array((0.485, 0.456, 0.406), dtype=np.float32)
+SHADOW_STD = np.array((0.229, 0.224, 0.225), dtype=np.float32)
+SHADOW_MAX_PROPOSALS = 4
+SHADOW_LOG_REPEAT_SECONDS = 0.8
 
 # The comma/AGNOS Python environment does not automatically re-resolve
 # pyproject.toml when a changed-files overlay is installed. Carry a pinned
@@ -165,6 +177,8 @@ class SpeedLimitVisionUK:
     self.VisionIpcClient = None
     self.VisionStreamType = None
     self.net = None
+    self.shadow_net = None
+    self._shadow_last_log_by_key = {}
     self.value_reader = None
     self.national_reader = None
     self.client = None
@@ -400,11 +414,37 @@ class SpeedLimitVisionUK:
       self.net = self.cv2.dnn.readNetFromONNX(str(MODEL_PATH))
       self.net.setPreferableBackend(self.cv2.dnn.DNN_BACKEND_OPENCV)
       self.net.setPreferableTarget(self.cv2.dnn.DNN_TARGET_CPU)
+
+      # V3 is deliberately non-authoritative. A missing/incompatible shadow
+      # model must never stop the established V1.10 detector from running.
+      self.shadow_net = None
+      if SHADOW_MODEL_PATH.is_file():
+        try:
+          self.shadow_net = self.cv2.dnn.readNetFromONNX(str(SHADOW_MODEL_PATH))
+          self.shadow_net.setPreferableBackend(self.cv2.dnn.DNN_BACKEND_OPENCV)
+          self.shadow_net.setPreferableTarget(self.cv2.dnn.DNN_TARGET_CPU)
+          cloudlog.info(
+            f"[XNOR_VSL_V3_SHADOW] loaded classifier {SHADOW_MODEL_PATH}; authoritative=0"
+          )
+        except Exception:
+          self.shadow_net = None
+          cloudlog.exception(
+            "[XNOR_VSL_V3_SHADOW] classifier load failed; legacy VSL remains authoritative"
+          )
+      else:
+        cloudlog.warning(
+          f"[XNOR_VSL_V3_SHADOW] classifier missing: {SHADOW_MODEL_PATH}; "
+          "legacy VSL remains authoritative"
+        )
+
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.10: ready")
-      cloudlog.info(f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; UK crop/tracking/national readers active")
+      self._set_status("UK vision V1.11: ready")
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
+        "UK crop/tracking/national readers active"
+      )
       return True
     except Exception as exc:
       self.runtime_error = f"Vision model load failed: {type(exc).__name__}"
@@ -795,6 +835,123 @@ class SpeedLimitVisionUK:
     except Exception:
       return 0, "map_unavailable", "unknown", False, 0, ""
 
+
+  def _shadow_preprocess(self, crop):
+    """Match the V3 ImageNet-normalized 128x128 centre-crop input."""
+    if self.shadow_net is None or crop is None or crop.size == 0:
+      return None
+    h, w = crop.shape[:2]
+    side = min(h, w)
+    if side < 8:
+      return None
+    x0 = max((w - side) // 2, 0)
+    y0 = max((h - side) // 2, 0)
+    square = crop[y0:y0 + side, x0:x0 + side]
+    interpolation = self.cv2.INTER_AREA if side > SHADOW_INPUT_SIZE else self.cv2.INTER_LINEAR
+    rgb = self.cv2.cvtColor(
+      self.cv2.resize(square, (SHADOW_INPUT_SIZE, SHADOW_INPUT_SIZE), interpolation=interpolation),
+      self.cv2.COLOR_BGR2RGB,
+    )
+    tensor = rgb.astype(np.float32) / 255.0
+    tensor = (tensor - SHADOW_MEAN) / SHADOW_STD
+    tensor = np.transpose(tensor, (2, 0, 1))[None, ...]
+    return np.ascontiguousarray(tensor, dtype=np.float32)
+
+  @staticmethod
+  def _shadow_softmax(logits):
+    values = np.asarray(logits, dtype=np.float32).reshape(-1)
+    values = values - float(np.max(values))
+    exp = np.exp(values)
+    denom = float(np.sum(exp))
+    return exp / max(denom, 1e-12)
+
+  def _log_shadow_prediction(self, source: str, class_name: str, confidence: float,
+                             legacy_speed_mph: int, model_confidence: float,
+                             ring_score: float, bbox, elapsed_ms: float) -> None:
+    now = time.monotonic()
+    bucket = tuple(int(v) // 16 for v in bbox) if bbox is not None else ()
+    key = (
+      str(source), str(class_name), int(legacy_speed_mph),
+      round(float(confidence), 2), bucket,
+    )
+    last = float(self._shadow_last_log_by_key.get(key, -1e9))
+    if now - last < SHADOW_LOG_REPEAT_SECONDS:
+      return
+    self._shadow_last_log_by_key[key] = now
+    # Bound this diagnostic cache for long drives.
+    if len(self._shadow_last_log_by_key) > 256:
+      cutoff = now - 8.0
+      self._shadow_last_log_by_key = {
+        k: v for k, v in self._shadow_last_log_by_key.items() if v >= cutoff
+      }
+
+    bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+    cloudlog.info(
+      f"[XNOR_VSL_V3_SHADOW] source={source} class={class_name} "
+      f"confidence={float(confidence):.3f} legacy={int(legacy_speed_mph)} "
+      f"model={float(model_confidence):.3f} ring={float(ring_score):.3f} "
+      f"batchMs={float(elapsed_ms):.1f} bbox={bbox_text} authoritative=0"
+    )
+
+  def _shadow_classify_entries(self, frame_bgr, entries, source: str) -> None:
+    """Classify existing VSL crops without feeding any result back into control."""
+    if self.shadow_net is None or not entries:
+      return
+
+    tensors = []
+    metadata = []
+    frame_h, frame_w = frame_bgr.shape[:2]
+    for bbox, legacy_speed_mph, model_confidence, ring_score in entries[:SHADOW_MAX_PROPOSALS]:
+      clipped = self._clamp_bbox(bbox, frame_w, frame_h)
+      if clipped is None:
+        continue
+      x1, y1, x2, y2 = clipped
+      tensor = self._shadow_preprocess(frame_bgr[y1:y2, x1:x2])
+      if tensor is None:
+        continue
+      tensors.append(tensor)
+      metadata.append((
+        clipped, int(legacy_speed_mph), float(model_confidence), float(ring_score)
+      ))
+
+    if not tensors:
+      return
+
+    try:
+      batch = np.concatenate(tensors, axis=0)
+      started = time.perf_counter()
+      self.shadow_net.setInput(batch)
+      logits = np.asarray(self.shadow_net.forward())
+      elapsed_ms = (time.perf_counter() - started) * 1000.0
+      if logits.ndim == 1:
+        logits = logits[None, ...]
+      logits = logits.reshape(len(metadata), -1)
+      if logits.shape[1] != len(SHADOW_CLASSES):
+        raise RuntimeError(
+          f"unexpected V3 output shape {tuple(logits.shape)} expected (*,{len(SHADOW_CLASSES)})"
+        )
+
+      for row, (bbox, legacy_speed_mph, model_confidence, ring_score) in zip(logits, metadata):
+        probs = self._shadow_softmax(row)
+        class_id = int(np.argmax(probs))
+        self._log_shadow_prediction(
+          source,
+          SHADOW_CLASSES[class_id],
+          float(probs[class_id]),
+          legacy_speed_mph,
+          model_confidence,
+          ring_score,
+          bbox,
+          elapsed_ms,
+        )
+    except Exception:
+      # Disable only V3 for the remainder of this process. The authoritative
+      # detector/OCR/NSL pipeline continues untouched.
+      self.shadow_net = None
+      cloudlog.exception(
+        "[XNOR_VSL_V3_SHADOW] inference failed; shadow disabled, legacy VSL remains authoritative"
+      )
+
   def _detect_national_sign(self, frame_bgr) -> Detection | None:
     if self.national_reader is None:
       return None
@@ -861,6 +1018,12 @@ class SpeedLimitVisionUK:
       national = self.national_reader.read(crop)
       if national is None or national.confidence < NATIONAL_MIN_SCORE:
         continue
+
+      self._shadow_classify_entries(
+        frame_bgr,
+        [((x1, y1, x2, y2), int(resolved_mph), 0.0, float(national.confidence))],
+        "national_accept",
+      )
 
       detection = Detection(
         speed_limit_mph=int(resolved_mph),
@@ -1508,6 +1671,22 @@ class SpeedLimitVisionUK:
       cloudlog.info(
         f"[XNOR_VSL_V12UK] numeric_dedupe raw={len(raw_supported)} kept={len(proposals)}"
       )
+
+    # V3 observes the deduplicated detector proposals before OCR/ring acceptance.
+    # Its predictions are telemetry-only and never modify the authoritative list.
+    self._shadow_classify_entries(
+      frame_bgr,
+      [
+        (
+          proposal[3],
+          int(proposal[1]),
+          float(proposal[0]),
+          float(max(proposal[2], proposal[4])),
+        )
+        for proposal in proposals
+      ],
+      "numeric_proposal",
+    )
 
     # Stage 2: digit OCR only on spatially distinct proposals. Strict-ring
     # candidates follow the established path. Partial-ring candidates may reach
