@@ -50,16 +50,29 @@ CLEAN_FILES = {
 }
 
 
-def request_json(session: requests.Session, params: dict, attempts: int = 3):
+def request_json(session: requests.Session, params: dict, attempts: int = 6):
+    """Polite Commons API access with explicit 429 handling."""
     last = None
     for i in range(attempts):
         try:
-            r = session.get(COMMONS_API, params=params, timeout=30)
+            r = session.get(COMMONS_API, params=params, timeout=40)
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait = float(retry_after) if retry_after else 8.0 * (i + 1)
+                except Exception:
+                    wait = 8.0 * (i + 1)
+                wait = max(wait, 5.0)
+                print(f"Commons API 429; sleeping {wait:.1f}s")
+                time.sleep(wait)
+                continue
             r.raise_for_status()
-            return r.json()
+            data = r.json()
+            time.sleep(0.18)
+            return data
         except Exception as e:
             last = e
-            time.sleep(1.5 * (i + 1))
+            time.sleep(min(4.0 * (i + 1), 20.0))
     raise RuntimeError(f"Commons API failed: {last}")
 
 
@@ -97,31 +110,55 @@ def commons_category_files(session, category: str, max_files: int = 45, max_dept
     return list(dict.fromkeys(out))[:max_files]
 
 
+def commons_thumb_urls(session, file_titles, width: int = 1280, batch_size: int = 36):
+    """Resolve thumbnail URLs in batches instead of one API call per image."""
+    result = {}
+    titles = list(dict.fromkeys(file_titles))
+    for start in range(0, len(titles), batch_size):
+        chunk = titles[start:start + batch_size]
+        data = request_json(session, {
+            "action": "query", "format": "json", "titles": "|".join(chunk),
+            "prop": "imageinfo", "iiprop": "url|mime", "iiurlwidth": str(width),
+        })
+        pages = data.get("query", {}).get("pages", {})
+        for page in pages.values():
+            title = page.get("title", "")
+            ii = page.get("imageinfo", [])
+            if not title or not ii:
+                continue
+            info = ii[0]
+            result[title] = (
+                info.get("thumburl") or info.get("url"),
+                info.get("mime", ""),
+            )
+    return result
+
+
 def commons_thumb_url(session, file_title: str, width: int = 1280):
-    data = request_json(session, {
-        "action": "query", "format": "json", "titles": file_title,
-        "prop": "imageinfo", "iiprop": "url|mime", "iiurlwidth": str(width),
-    })
-    pages = data.get("query", {}).get("pages", {})
-    for page in pages.values():
-        ii = page.get("imageinfo", [])
-        if not ii:
-            continue
-        info = ii[0]
-        return info.get("thumburl") or info.get("url"), info.get("mime", "")
-    return None, ""
+    return commons_thumb_urls(session, [file_title], width).get(file_title, (None, ""))
 
 
-def download_image(session, url: str):
-    try:
-        r = session.get(url, timeout=35)
-        r.raise_for_status()
-        im = Image.open(io.BytesIO(r.content)).convert("RGB")
-        if min(im.size) < 64:
-            return None
-        return im
-    except Exception:
-        return None
+def download_image(session, url: str, attempts: int = 4):
+    for i in range(attempts):
+        try:
+            r = session.get(url, timeout=45)
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait = float(retry_after) if retry_after else 3.0 * (i + 1)
+                except Exception:
+                    wait = 3.0 * (i + 1)
+                time.sleep(max(wait, 2.0))
+                continue
+            r.raise_for_status()
+            im = Image.open(io.BytesIO(r.content)).convert("RGB")
+            if min(im.size) < 64:
+                return None
+            time.sleep(0.04)
+            return im
+        except Exception:
+            time.sleep(1.5 * (i + 1))
+    return None
 
 
 def red_roundel_crop(im: Image.Image):
@@ -231,8 +268,10 @@ def centre_square(im: Image.Image):
 
 def fetch_clean_art(session, out_dir: Path):
     out={}
-    for label, filename in CLEAN_FILES.items():
-        url,_mime=commons_thumb_url(session,"File:"+filename,768)
+    title_to_label={"File:"+filename: label for label,filename in CLEAN_FILES.items()}
+    resolved=commons_thumb_urls(session,list(title_to_label.keys()),768)
+    for title,label in title_to_label.items():
+        url,_mime=resolved.get(title,(None,""))
         if not url:
             continue
         im=download_image(session,url)
@@ -245,10 +284,10 @@ def fetch_clean_art(session, out_dir: Path):
     return out
 
 
-def fetch_real_crops(session, out_root: Path, per_class=48):
+def fetch_real_crops(session, out_root: Path, per_class=34):
     manifest=[]
     for label in CLASSES:
-        wanted=per_class if label not in ("60","70") else max(per_class,65)
+        wanted=per_class
         titles=[]
         for cat in CATEGORY_MAP[label]:
             try:
@@ -258,8 +297,11 @@ def fetch_real_crops(session, out_root: Path, per_class=48):
         titles=list(dict.fromkeys(titles))[:wanted]
         d=out_root/label
         d.mkdir(parents=True,exist_ok=True)
+
+        # One imageinfo request now resolves an entire class.
+        resolved=commons_thumb_urls(session,titles,1120)
         for idx,title in enumerate(titles):
-            url,mime=commons_thumb_url(session,title,1280)
+            url,mime=resolved.get(title,(None,""))
             if not url or (mime and "image" not in mime):
                 continue
             im=download_image(session,url)
@@ -415,7 +457,7 @@ def main():
     real_dir.mkdir(parents=True,exist_ok=True)
 
     clean=fetch_clean_art(s,clean_dir)
-    manifest=fetch_real_crops(s,real_dir,per_class=48)
+    manifest=fetch_real_crops(s,real_dir,per_class=34)
     with open(out/"source_manifest.json","w") as f:
         json.dump(manifest,f,indent=2)
 
