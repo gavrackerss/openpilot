@@ -1079,8 +1079,11 @@ class SpeedLimitVisionUK:
     winner_weight = max(float(scores[winner]), 1e-9)
     aggregate_conf = float(conf_weighted[winner]) / winner_weight
     aggregate_crop = float(crop_weighted[winner]) / winner_weight
-    overall_consensus = float(np.clip(temporal_share * aggregate_crop, 0.0, 1.0))
     observations = int(counts[winner])
+    temporal_maturity = min(float(observations) / 2.0, 1.0)
+    overall_consensus = float(np.clip(
+      temporal_share * aggregate_crop * temporal_maturity, 0.0, 1.0
+    ))
 
     if (
       observations < 2 or
