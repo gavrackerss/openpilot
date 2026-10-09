@@ -42,6 +42,17 @@ CATEGORY_MAP = {
     ],
 }
 
+SEARCH_QUERY_MAP = {
+    "20": '"20 mph" speed limit road sign United Kingdom',
+    "30": '"30 mph" speed limit road sign United Kingdom',
+    "40": '"40 mph" speed limit road sign United Kingdom',
+    "50": '"50 mph" speed limit road sign United Kingdom',
+    "60": '"60 mph" speed limit road sign United Kingdom',
+    "70": '"70 mph" speed limit road sign United Kingdom',
+    "NSL": '"national speed limit" road sign United Kingdom',
+    "OTHER": 'mandatory road sign United Kingdom keep left no entry',
+}
+
 # These Commons SVGs are redraws of the official DfT/TSRGD artwork.
 CLEAN_FILES = {
     "20": "UK traffic sign 670V20.svg",
@@ -81,66 +92,78 @@ def request_json(session: requests.Session, params: dict, attempts: int = 6):
 
 
 def commons_category_files(session, category: str, max_files: int = 28, max_depth: int = 1):
-    """Bounded Commons discovery: no unbounded category/subcategory crawls."""
+    """Bounded Commons discovery using the MediaWiki categorymembers API.
+
+    HTML category pages changed enough to make the old href regex silently miss
+    some classes (notably 50/60 mph). The API gives stable File:/Category:
+    titles and explicit pagination.
+    """
     out = []
     seen_cat = set()
     queue = [(category, 0)]
     pages_read = 0
-    max_pages = 4
-    start = time.monotonic()
-    max_elapsed_seconds = 55.0
+    max_pages = 10
 
     print(f"CATEGORY start {category}", flush=True)
     while queue and len(out) < max_files and pages_read < max_pages:
-        if time.monotonic() - start >= max_elapsed_seconds:
-            print(f"CATEGORY time budget exceeded {category}; collected {len(out)}", flush=True)
-            break
-
         cat, depth = queue.pop(0)
         if cat in seen_cat:
             continue
         seen_cat.add(cat)
-        pages_read += 1
-        slug = quote(cat.replace(" ", "_"), safe="():,_-'")
-        url = "https://commons.wikimedia.org/wiki/Category:" + slug
 
-        html_text = ""
-        for attempt in range(2):
+        cmcontinue = None
+        while len(out) < max_files and pages_read < max_pages:
+            params = {
+                "action": "query", "format": "json", "list": "categorymembers",
+                "cmtitle": "Category:" + cat, "cmtype": "file|subcat",
+                "cmlimit": "50",
+            }
+            if cmcontinue:
+                params["cmcontinue"] = cmcontinue
             try:
-                r = session.get(url, timeout=(5, 12))
-                if r.status_code in (429, 503):
-                    print(f"CATEGORY throttled HTTP {r.status_code} {cat}; skipping", flush=True)
-                    break
-                r.raise_for_status()
-                html_text = r.text
+                data = request_json(session, params, attempts=4)
+            except Exception as e:
+                print(f"CATEGORY API failed {cat}: {e}", flush=True)
                 break
-            except requests.RequestException as e:
-                print(f"CATEGORY request failed {cat} try {attempt+1}: {e}", flush=True)
-                if attempt == 0:
-                    time.sleep(1.0)
+            pages_read += 1
+            for member in data.get("query", {}).get("categorymembers", []):
+                title = member.get("title", "")
+                ns = member.get("ns")
+                if ns == 6 and title.startswith("File:"):
+                    if title not in out:
+                        out.append(title)
+                        if len(out) >= max_files:
+                            break
+                elif ns == 14 and depth < max_depth and title.startswith("Category:"):
+                    subcat = title[len("Category:"):]
+                    if subcat not in seen_cat and len(queue) < 32:
+                        queue.append((subcat, depth + 1))
+            cmcontinue = data.get("continue", {}).get("cmcontinue")
+            if not cmcontinue:
+                break
 
-        if not html_text:
-            continue
-
-        # Only collect image links within this bounded set of category pages.
-        file_names = re.findall(r'href="/wiki/File:([^"#?]+)', html_text, flags=re.I)
-        for raw in file_names:
-            title = "File:" + unquote(unescape(raw)).replace("_", " ")
-            if title not in out:
-                out.append(title)
-                if len(out) >= max_files:
-                    break
-
-        if depth < max_depth and len(out) < max_files:
-            subcats = re.findall(r'href="/wiki/Category:([^"#?]+)', html_text, flags=re.I)
-            for raw in subcats:
-                subcat = unquote(unescape(raw)).replace("_", " ")
-                if subcat not in seen_cat and subcat != cat and len(queue) < 24:
-                    queue.append((subcat, depth + 1))
-
-    print(f"CATEGORY finished {category}: {len(out)} candidates in {pages_read} pages", flush=True)
+    print(f"CATEGORY finished {category}: {len(out)} candidates in {pages_read} API pages", flush=True)
     return out[:max_files]
 
+
+def commons_search_files(session, query: str, max_files: int = 28):
+    """Supplement sparse categories with tightly-scoped Commons file search."""
+    try:
+        data = request_json(session, {
+            "action": "query", "format": "json", "list": "search",
+            "srnamespace": "6", "srsearch": query,
+            "srlimit": str(min(max_files, 50)),
+        }, attempts=4)
+    except Exception as e:
+        print(f"SEARCH failed {query}: {e}", flush=True)
+        return []
+    out = []
+    for row in data.get("query", {}).get("search", []):
+        title = row.get("title", "")
+        if title.startswith("File:") and title not in out:
+            out.append(title)
+    print(f"SEARCH {query}: {len(out)} candidates", flush=True)
+    return out[:max_files]
 
 def commons_thumb_urls(session, file_titles, width: int = 1280, batch_size: int = 36):
     """Resolve thumbnail URLs in batches instead of one API call per image."""
@@ -294,6 +317,80 @@ def nsl_crop(im: Image.Image):
     return Image.fromarray(cv2.cvtColor(crop,cv2.COLOR_BGR2RGB)) if crop.size else None
 
 
+def generic_sign_crop(im: Image.Image, prefer_white: bool = False):
+    """Fallback cropper for small/low-resolution signs missed by colour rules."""
+    bgr = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
+    scale = min(1.0, 1400.0 / max(h, w))
+    if scale < 1:
+        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    hs, ws = bgr.shape[:2]
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+    red = (((hue <= 14) | (hue >= 166)) & (sat >= 45) & (val >= 40))
+    blue = ((hue >= 88) & (hue <= 135) & (sat >= 55) & (val >= 40))
+    white = ((sat <= 135) & (val >= 95))
+    mask = white if prefer_white else (red | blue | white)
+    mask = (mask.astype(np.uint8) * 255)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    best_score = -1.0
+    img_area = float(max(hs * ws, 1))
+    for c in contours:
+        x, y, cw, ch = cv2.boundingRect(c)
+        if min(cw, ch) < 9:
+            continue
+        ar = cw / max(ch, 1)
+        if ar < 0.58 or ar > 1.72:
+            continue
+        box_ratio = cw * ch / img_area
+        if box_ratio < 0.000035 or box_ratio > 0.20:
+            continue
+        area = cv2.contourArea(c)
+        fill = area / max(cw * ch, 1)
+        perimeter = cv2.arcLength(c, True)
+        circularity = 4 * math.pi * area / max(perimeter * perimeter, 1.0)
+        roi_s = sat[y:y + ch, x:x + cw]
+        roi_v = val[y:y + ch, x:x + cw]
+        white_ratio = float(((roi_s < 145) & (roi_v > 95)).mean()) if roi_s.size else 0.0
+        score = math.sqrt(cw * ch) * (
+            0.35 + min(fill, 1.0) + 0.5 * min(max(circularity, 0.0), 1.0)
+            + (0.5 * white_ratio if prefer_white else 0.15 * white_ratio)
+        )
+        if score > best_score:
+            best_score = score
+            best = (x, y, cw, ch)
+
+    if best is None:
+        # Last resort: relaxed Hough circle search, useful for NSL signs where
+        # there is no red rim.
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 1.1)
+        circles = cv2.HoughCircles(
+            gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=18,
+            param1=100, param2=18, minRadius=6,
+            maxRadius=max(10, int(min(hs, ws) * 0.22)),
+        )
+        if circles is None:
+            return None
+        cx, cy, r = max(np.round(circles[0]).astype(int), key=lambda z: z[2])
+        p = int(r * 1.35)
+        x1, y1, x2, y2 = max(cx-p, 0), max(cy-p, 0), min(cx+p, ws), min(cy+p, hs)
+    else:
+        x, y, cw, ch = best
+        pad = max(4, int(0.30 * max(cw, ch)))
+        x1, y1 = max(0, x-pad), max(0, y-pad)
+        x2, y2 = min(ws, x+cw+pad), min(hs, y+ch+pad)
+
+    crop = bgr[y1:y2, x1:x2]
+    if crop.size == 0 or min(crop.shape[:2]) < 20:
+        return None
+    return Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+
+
 def centre_square(im: Image.Image):
     w,h=im.size
     s=min(w,h)
@@ -329,12 +426,14 @@ def fetch_real_crops(session, out_root: Path, per_class=28):
             return None
         if label=="NSL":
             crop=nsl_crop(im)
-        elif label=="OTHER":
-            crop=red_roundel_crop(im)
             if crop is None:
-                crop=nsl_crop(im)
+                crop=generic_sign_crop(im, prefer_white=True)
+        elif label=="OTHER":
+            crop=generic_sign_crop(im, prefer_white=False)
         else:
             crop=red_roundel_crop(im)
+            if crop is None:
+                crop=generic_sign_crop(im, prefer_white=True)
         if crop is None or min(crop.size)<24:
             return None
         p=target_dir/f"real_{idx:03d}.jpg"
@@ -352,6 +451,12 @@ def fetch_real_crops(session, out_root: Path, per_class=28):
                 titles += commons_category_files(session,cat,max_files=per_class,max_depth=1)
             except Exception as e:
                 print(f"WARN category {cat}: {e}")
+        titles=list(dict.fromkeys(titles))
+        if len(titles) < per_class:
+            titles += commons_search_files(
+                session, SEARCH_QUERY_MAP[label],
+                max_files=max(per_class - len(titles), 8)
+            )
         titles=list(dict.fromkeys(titles))[:per_class]
         d=out_root/label
         d.mkdir(parents=True,exist_ok=True)
