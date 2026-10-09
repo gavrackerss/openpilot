@@ -1,0 +1,39 @@
+name: V239 VSL V3 shadow runtime package
+
+on:
+  push:
+    branches:
+      - xnor-dev-v239-vsl-v3-shadow
+    paths:
+      - .github/workflows/v239-shadow-runtime-package.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax-check V239 runtime
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/train_drive_classifier.py
+
+      - name: Package exact changed sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: v239-shadow-runtime-source
+          path: |
+            selfdrive/speed_limit_vision_uk.py
+            selfdrive/vsl_v3/train_drive_classifier.py
+          retention-days: 14
