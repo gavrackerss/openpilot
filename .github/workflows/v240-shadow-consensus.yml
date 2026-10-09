@@ -1,0 +1,154 @@
+name: V240 VSL V3 consensus shadow
+
+on:
+  push:
+    branches:
+      - xnor-dev-v240-vsl-v3-consensus-shadow
+    paths:
+      - .github/workflows/v240-shadow-consensus.yml
+      - selfdrive/speed_limit_vision_uk.py
+      - common/params_keys.h
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax-check V240 runtime
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+
+      - name: Verify diagnostic Params are registered and shadow-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          for key in VisionSpeedLimitV3Class VisionSpeedLimitV3Confidence VisionSpeedLimitV3Consensus VisionSpeedLimitV3Timestamp; do
+            grep -q "\"$key\"" common/params_keys.h
+          done
+          # The V3 Params may be written by the vision daemon but must not be
+          # consumed as control/arbitration inputs anywhere in the repository.
+          if git grep -nE 'get(_bool|_int)?\([^\n]*VisionSpeedLimitV3|params\.get[^\n]*VisionSpeedLimitV3' -- ':!selfdrive/speed_limit_vision_uk.py' ':!common/params_keys.h'; then
+            echo "V3 diagnostic Param is consumed outside the shadow daemon"
+            exit 1
+          fi
+          grep -q 'authoritative=0' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_CONFIRM' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_DISAGREE' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_OTHER' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_UNCERTAIN' selfdrive/speed_limit_vision_uk.py
+
+      - name: Exercise clustering and temporal consensus helpers
+        run: |
+          python - <<'PY'
+          import ast
+          from collections import Counter, deque
+          from dataclasses import dataclass
+          import numpy as np
+
+          path = "selfdrive/speed_limit_vision_uk.py"
+          tree = ast.parse(open(path).read(), path)
+          cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SpeedLimitVisionUK")
+          wanted = {
+            "_bbox_iou", "_clamp_bbox", "_expand_bbox",
+            "_shadow_bbox_union", "_shadow_same_object",
+            "_shadow_cluster_entries", "_shadow_crop_boxes",
+            "_shadow_update_temporal",
+          }
+          methods = [n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in wanted]
+          test_cls = ast.ClassDef(
+            name="T", bases=[], keywords=[], body=methods or [ast.Pass()],
+            decorator_list=[],
+          )
+          mod = ast.fix_missing_locations(ast.Module(body=[test_cls], type_ignores=[]))
+
+          @dataclass
+          class ShadowHistoryEntry:
+            class_name: str
+            confidence: float
+            crop_consensus: float
+            created_at: float
+
+          class FakeTime:
+            t = 100.0
+            @classmethod
+            def monotonic(cls):
+              return cls.t
+
+          class Cloudlog:
+            messages = []
+            @classmethod
+            def info(cls, msg):
+              cls.messages.append(msg)
+
+          ns = {
+            "np": np,
+            "Counter": Counter,
+            "deque": deque,
+            "ShadowHistoryEntry": ShadowHistoryEntry,
+            "SHADOW_MAX_PROPOSALS": 6,
+            "SHADOW_MAX_CLUSTERS": 4,
+            "SHADOW_CROP_EXPANSIONS": (0.0, 0.18, 0.35),
+            "SHADOW_TEMPORAL_SECONDS": 2.0,
+            "SHADOW_MIN_DECISION_CONFIDENCE": 0.60,
+            "SHADOW_MIN_DECISION_CONSENSUS": 0.60,
+            "SUPPORTED_UK_LIMITS_MPH": frozenset((20,30,40,50,60,70)),
+            "time": FakeTime,
+            "cloudlog": Cloudlog,
+          }
+          exec(compile(mod, path, "exec"), ns)
+          t = ns["T"]()
+
+          # Two nested boxes are the same physical sign; the distant one isn't.
+          entries = [
+            ((100,100,140,140), 30, .80, .70),
+            ((94,94,146,146), 40, .65, .55),
+            ((300,100,340,140), 50, .75, .60),
+          ]
+          clusters = t._shadow_cluster_entries(entries)
+          assert len(clusters) == 2, clusters
+          crops = t._shadow_crop_boxes(clusters[0], 640, 480)
+          assert 2 <= len(crops) <= 3, crops
+
+          # Exercise real temporal method with a capture-only Param writer.
+          t._shadow_track_bbox = None
+          t._shadow_last_observation_at = 0.0
+          t._shadow_history = deque()
+          writes = []
+          t._shadow_write_params = lambda c, conf, con, now: writes.append((c, conf, con, now))
+
+          FakeTime.t = 100.0
+          t._shadow_update_temporal("30", .92, 1.0, (100,100,140,140), 30, "numeric_proposal")
+          assert "decision=V3_UNCERTAIN" in Cloudlog.messages[-1], Cloudlog.messages[-1]
+
+          FakeTime.t = 100.3
+          t._shadow_update_temporal("30", .95, 1.0, (102,101,144,143), 30, "numeric_track")
+          assert "decision=V3_CONFIRM" in Cloudlog.messages[-1], Cloudlog.messages[-1]
+          assert writes[-1][0] == "30"
+          assert writes[-1][2] >= .99
+
+          FakeTime.t = 100.6
+          t._shadow_update_temporal("40", .90, 1.0, (103,102,146,145), 30, "numeric_track")
+          assert writes[-1][0] in {"30", "40"}
+          print("V240 helper tests: PASS")
+          PY
+
+      - name: Package changed source files
+        uses: actions/upload-artifact@v4
+        with:
+          name: v240-shadow-consensus-source
+          path: |
+            selfdrive/speed_limit_vision_uk.py
+            common/params_keys.h
+          retention-days: 14
