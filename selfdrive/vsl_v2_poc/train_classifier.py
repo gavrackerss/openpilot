@@ -198,14 +198,21 @@ def commons_redirect_url(file_title: str, width: int = 1120):
     return "https://commons.wikimedia.org/wiki/Special:Redirect/file/" + quote(name, safe="") + f"?width={int(width)}"
 
 
-def download_image(session, url: str, attempts: int = 2):
-    """Use short, bounded retries so one slow file cannot stall a class."""
+def download_image(session, url: str, attempts: int = 4):
+    """Bounded image fetch with Retry-After handling for Wikimedia throttling."""
     for i in range(attempts):
         try:
-            r = session.get(url, timeout=(5, 13))
+            r = session.get(url, timeout=(5, 15))
             if r.status_code in (429, 503):
-                print(f"IMAGE throttled HTTP {r.status_code}: {url[:105]}", flush=True)
-                return None
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait = float(retry_after) if retry_after else 5.0 * (i + 1)
+                except Exception:
+                    wait = 5.0 * (i + 1)
+                wait = min(max(wait, 5.0), 20.0)
+                print(f"IMAGE throttled HTTP {r.status_code}; retry in {wait:.1f}s: {url[:105]}", flush=True)
+                time.sleep(wait)
+                continue
             r.raise_for_status()
             im = Image.open(io.BytesIO(r.content)).convert("RGB")
             if min(im.size) < 64:
@@ -215,7 +222,7 @@ def download_image(session, url: str, attempts: int = 2):
             if i == attempts - 1:
                 print(f"IMAGE failed: {url[:105]}: {e}", flush=True)
                 return None
-            time.sleep(0.5)
+            time.sleep(min(1.5 * (i + 1), 5.0))
     return None
 
 
@@ -415,12 +422,11 @@ def fetch_clean_art(session, out_dir: Path):
 def fetch_real_crops(session, out_root: Path, per_class=28):
     manifest=[]
 
-    def fetch_one(label, idx, title, target_dir):
+    def fetch_one(label, idx, title, target_dir, url):
         # Use an independent Session per worker; requests.Session itself is not
         # guaranteed thread-safe under concurrent use.
         worker=requests.Session()
         worker.headers.update({"User-Agent":USER_AGENT})
-        url=commons_redirect_url(title,960)
         im=download_image(worker,url)
         if im is None:
             return None
@@ -461,13 +467,19 @@ def fetch_real_crops(session, out_root: Path, per_class=28):
         d=out_root/label
         d.mkdir(parents=True,exist_ok=True)
 
-        # Parallel CDN fetch/crop. Eight workers is deliberately modest to be
-        # respectful of Commons while cutting preparation time dramatically.
+        # Resolve thumbnails in one API batch, then fetch the static CDN URLs.
+        # This avoids hammering Special:Redirect, which is aggressively
+        # rate-limited for unauthenticated CI traffic.
+        resolved=commons_thumb_urls(session,titles,width=960)
+        print(f"CLASS {label}: resolved {len(resolved)}/{len(titles)} thumbnail URLs", flush=True)
         print(f"CLASS {label}: cropping {len(titles)} candidates", flush=True)
         rows=[]
-        with ThreadPoolExecutor(max_workers=6) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
             futures={
-                pool.submit(fetch_one,label,idx,title,d):(idx,title)
+                pool.submit(
+                    fetch_one,label,idx,title,d,
+                    resolved.get(title,(commons_redirect_url(title,960),""))[0]
+                ):(idx,title)
                 for idx,title in enumerate(titles)
             }
             for future in as_completed(futures):
