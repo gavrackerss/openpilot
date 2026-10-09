@@ -1,0 +1,59 @@
+name: VSL V2 drive candidate extractor smoke
+
+on:
+  push:
+    branches:
+      - xnor-dev-v2-speed-classifier-poc
+    paths:
+      - selfdrive/vsl_v2_poc/prepare_drive_candidates.py
+      - .github/workflows/vsl-v2-drive-extract-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lightweight image dependencies
+        run: pip install numpy opencv-python-headless pillow
+      - name: Compile and test ZIP ingestion with duplicated archive
+        shell: bash
+        run: |
+          python -m py_compile selfdrive/vsl_v2_poc/prepare_drive_candidates.py
+          python - <<'PY'
+          from pathlib import Path
+          import csv
+          import json
+          import zipfile
+          import cv2
+          import numpy as np
+          import subprocess
+          p=Path("fixture"); p.mkdir(exist_ok=True)
+          im=np.full((720,1280,3),155,dtype=np.uint8)
+          cv2.circle(im,(650,360),90,(255,255,255),-1)
+          cv2.circle(im,(650,360),90,(0,0,230),19)
+          cv2.putText(im,"30",(601,383),cv2.FONT_HERSHEY_SIMPLEX,2.5,(0,0,0),8,cv2.LINE_AA)
+          valid,png=cv2.imencode(".png",im)
+          assert valid
+          for name in ("0000042f--682a958432--5F.zip", "0000042f--682a958432--6F.zip"):
+            with zipfile.ZipFile(p/name,"w") as archive:
+              archive.writestr("frame.png",png.tobytes())
+          subprocess.run([
+            "python","selfdrive/vsl_v2_poc/prepare_drive_candidates.py",
+            str(p/"*.zip"),"--output","fixture-output"
+          ],check=True)
+          report=json.loads(Path("fixture-output/report.json").read_text())
+          rows=list(csv.DictReader(open("fixture-output/candidates.csv")))
+          assert report["candidate_count"] >= 1, report
+          assert report["duplicate_archives_skipped"] == 1, report
+          assert all(not row["label"] for row in rows)
+          assert len(list(Path("fixture-output/review_sheets").glob("*.jpg"))) >= 1
+          print("Smoke passed",report)
+          PY
