@@ -1,12 +1,6 @@
 name: VSL V2 classifier POC
 
 on:
-  push:
-    branches:
-      - xnor-dev-v2-speed-classifier-poc
-    paths:
-      - selfdrive/vsl_v2_poc/**
-      - .github/workflows/vsl-v2-classifier-poc.yml
   workflow_dispatch:
 
 permissions:
