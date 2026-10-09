@@ -91,16 +91,18 @@ def api(params, tries=4):
   raise last
 
 
-def category_members(category: str, recurse: int = 2):
+def category_members(category: str, recurse: int = 2, max_files: int = 220):
   files = []
   seen_cats = set()
 
   def walk(cat: str, depth: int):
-    if cat in seen_cats:
+    if cat in seen_cats or len(files) >= max_files:
       return
     seen_cats.add(cat)
     cont = None
     while True:
+      if len(files) >= max_files:
+        break
       params = {
         "action": "query", "list": "categorymembers", "cmtitle": cat,
         "cmlimit": "500", "cmtype": "file|subcat",
@@ -113,7 +115,9 @@ def category_members(category: str, recurse: int = 2):
         title = str(item.get("title", ""))
         if ns == 6:
           files.append(title)
-        elif ns == 14 and depth > 0:
+          if len(files) >= max_files:
+            break
+        elif ns == 14 and depth > 0 and len(files) < max_files:
           walk(title, depth - 1)
       cont = data.get("continue", {}).get("cmcontinue")
       if not cont:
@@ -363,15 +367,15 @@ def harvest_real():
   manifest=[]
   stats=Counter()
   for label,roots in REAL_CATEGORIES.items():
+    target=MAX_REAL[label]
     titles=[]
     for root in roots:
       try:
-        titles.extend(category_members(root,recurse=2))
+        titles.extend(category_members(root,recurse=2,max_files=max(target*3,80)))
       except Exception as e:
         print("category failed",root,e)
     titles=list(dict.fromkeys(titles))
     random.Random(SEED+LABEL_TO_IDX[label]).shuffle(titles)
-    target=MAX_REAL[label]
     print(f"{label}: discovered {len(titles)} files, target {target}")
     accepted=0
     for n,title in enumerate(titles):
