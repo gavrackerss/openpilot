@@ -1,12 +1,9 @@
 name: VSL V2 dataset prepare
 
+# Kept as an explicit diagnostic/preparation job. The classifier workflow
+# already prepares the same sources; auto-running both doubles Wikimedia
+# traffic and can trip unauthenticated rate limits.
 on:
-  push:
-    branches:
-      - xnor-dev-v2-speed-classifier-poc
-    paths:
-      - selfdrive/vsl_v2_poc/train_classifier.py
-      - .github/workflows/vsl-v2-dataset-prepare.yml
   workflow_dispatch:
 
 permissions:
