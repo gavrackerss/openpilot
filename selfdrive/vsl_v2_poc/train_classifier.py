@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import random
@@ -316,44 +317,65 @@ def fetch_clean_art(session, out_dir: Path):
 
 def fetch_real_crops(session, out_root: Path, per_class=28):
     manifest=[]
+
+    def fetch_one(label, idx, title, target_dir):
+        # Use an independent Session per worker; requests.Session itself is not
+        # guaranteed thread-safe under concurrent use.
+        worker=requests.Session()
+        worker.headers.update({"User-Agent":USER_AGENT})
+        url=commons_redirect_url(title,960)
+        im=download_image(worker,url)
+        if im is None:
+            return None
+        if label=="NSL":
+            crop=nsl_crop(im)
+        elif label=="OTHER":
+            crop=red_roundel_crop(im)
+            if crop is None:
+                crop=nsl_crop(im)
+        else:
+            crop=red_roundel_crop(im)
+        if crop is None or min(crop.size)<24:
+            return None
+        p=target_dir/f"real_{idx:03d}.jpg"
+        crop.save(p,quality=92)
+        return {
+            "label":label,"path":str(p),
+            "source_title":title,"source_url":url
+        }
+
     for label in CLASSES:
-        wanted=per_class
         titles=[]
         for cat in CATEGORY_MAP[label]:
             try:
-                titles += commons_category_files(session,cat,max_files=wanted,max_depth=3)
+                titles += commons_category_files(session,cat,max_files=per_class,max_depth=3)
             except Exception as e:
                 print(f"WARN category {cat}: {e}")
-        titles=list(dict.fromkeys(titles))[:wanted]
+        titles=list(dict.fromkeys(titles))[:per_class]
         d=out_root/label
         d.mkdir(parents=True,exist_ok=True)
 
-        # Download through Special:Redirect/file so only category enumeration
-        # uses the Commons API. This avoids shared-runner imageinfo rate limits.
-        for idx,title in enumerate(titles):
-            url=commons_redirect_url(title,1120)
-            im=download_image(session,url)
-            if im is None:
-                continue
-            if label=="NSL":
-                crop=nsl_crop(im)
-            elif label=="OTHER":
-                crop=red_roundel_crop(im)
-                if crop is None:
-                    crop=nsl_crop(im)
-            else:
-                crop=red_roundel_crop(im)
-            if crop is None or min(crop.size)<24:
-                continue
-            p=d/f"real_{idx:03d}.jpg"
-            crop.save(p,quality=94)
-            manifest.append({
-                "label":label,"path":str(p),
-                "source_title":title,"source_url":url
-            })
-        print(label,"downloaded/cropped",
-              sum(1 for m in manifest if m["label"]==label),
-              "from",len(titles),"titles")
+        # Parallel CDN fetch/crop. Eight workers is deliberately modest to be
+        # respectful of Commons while cutting preparation time dramatically.
+        rows=[]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures={
+                pool.submit(fetch_one,label,idx,title,d):(idx,title)
+                for idx,title in enumerate(titles)
+            }
+            for future in as_completed(futures):
+                try:
+                    row=future.result()
+                except Exception as e:
+                    idx,title=futures[future]
+                    print(f"WARN download/crop {label} {idx} {title}: {e}")
+                    row=None
+                if row is not None:
+                    rows.append(row)
+
+        rows.sort(key=lambda x:x["path"])
+        manifest.extend(rows)
+        print(label,"downloaded/cropped",len(rows),"from",len(titles),"titles",flush=True)
     return manifest
 
 
