@@ -5,6 +5,7 @@ on:
     branches:
       - xnor-dev-v2-speed-classifier-poc
     paths:
+      - selfdrive/vsl_v2_poc/train_classifier.py
       - .github/workflows/vsl-v2-dataset-prepare.yml
   workflow_dispatch:
 
