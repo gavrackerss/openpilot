@@ -6,6 +6,7 @@ import json
 import math
 import random
 import time
+from urllib.parse import quote
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -138,6 +139,11 @@ def commons_thumb_url(session, file_title: str, width: int = 1280):
     return commons_thumb_urls(session, [file_title], width).get(file_title, (None, ""))
 
 
+def commons_redirect_url(file_title: str, width: int = 1120):
+    name = file_title[len("File:"):] if file_title.startswith("File:") else file_title
+    return "https://commons.wikimedia.org/wiki/Special:Redirect/file/" + quote(name, safe="") + f"?width={int(width)}"
+
+
 def download_image(session, url: str, attempts: int = 4):
     for i in range(attempts):
         try:
@@ -268,13 +274,9 @@ def centre_square(im: Image.Image):
 
 def fetch_clean_art(session, out_dir: Path):
     out={}
-    title_to_label={"File:"+filename: label for label,filename in CLEAN_FILES.items()}
-    resolved=commons_thumb_urls(session,list(title_to_label.keys()),768)
-    for title,label in title_to_label.items():
-        url,_mime=resolved.get(title,(None,""))
-        if not url:
-            continue
-        im=download_image(session,url)
+    for label,filename in CLEAN_FILES.items():
+        title="File:"+filename
+        im=download_image(session,commons_redirect_url(title,768))
         if im is None:
             continue
         im=centre_square(im)
@@ -284,7 +286,7 @@ def fetch_clean_art(session, out_dir: Path):
     return out
 
 
-def fetch_real_crops(session, out_root: Path, per_class=34):
+def fetch_real_crops(session, out_root: Path, per_class=28):
     manifest=[]
     for label in CLASSES:
         wanted=per_class
@@ -298,12 +300,10 @@ def fetch_real_crops(session, out_root: Path, per_class=34):
         d=out_root/label
         d.mkdir(parents=True,exist_ok=True)
 
-        # One imageinfo request now resolves an entire class.
-        resolved=commons_thumb_urls(session,titles,1120)
+        # Download through Special:Redirect/file so only category enumeration
+        # uses the Commons API. This avoids shared-runner imageinfo rate limits.
         for idx,title in enumerate(titles):
-            url,mime=resolved.get(title,(None,""))
-            if not url or (mime and "image" not in mime):
-                continue
+            url=commons_redirect_url(title,1120)
             im=download_image(session,url)
             if im is None:
                 continue
@@ -457,7 +457,7 @@ def main():
     real_dir.mkdir(parents=True,exist_ok=True)
 
     clean=fetch_clean_art(s,clean_dir)
-    manifest=fetch_real_crops(s,real_dir,per_class=34)
+    manifest=fetch_real_crops(s,real_dir,per_class=28)
     with open(out/"source_manifest.json","w") as f:
         json.dump(manifest,f,indent=2)
 
@@ -497,11 +497,11 @@ def main():
     sample_weights=[1.0/max(counts[label],1) for _p,label in train_ds.items]
     sampler=WeightedRandomSampler(
         sample_weights,
-        num_samples=min(max(len(train_ds),1800),5200),
+        num_samples=min(max(len(train_ds),1600),3200),
         replacement=True
     )
-    train_loader=DataLoader(train_ds,batch_size=64,sampler=sampler,num_workers=2)
-    val_loader=DataLoader(val_ds,batch_size=64,shuffle=False,num_workers=2)
+    train_loader=DataLoader(train_ds,batch_size=96,sampler=sampler,num_workers=2)
+    val_loader=DataLoader(val_ds,batch_size=96,shuffle=False,num_workers=2)
 
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("DEVICE",device)
@@ -509,6 +509,12 @@ def main():
     weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
     model=models.mobilenet_v3_small(weights=weights)
     model.classifier[3]=nn.Linear(model.classifier[3].in_features,len(CLASSES))
+
+    # Keep generic low-level visual filters fixed for this first POC. The
+    # higher MobileNet blocks and classifier still adapt to UK sign numerals.
+    for block in list(model.features)[:6]:
+        for param in block.parameters():
+            param.requires_grad = False
     model.to(device)
 
     criterion=nn.CrossEntropyLoss(label_smoothing=0.04)
