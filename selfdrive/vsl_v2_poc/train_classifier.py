@@ -439,6 +439,7 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--output",default="v2_out")
     ap.add_argument("--epochs",type=int,default=8)
+    ap.add_argument("--prepare-only",action="store_true")
     args=ap.parse_args()
 
     out=Path(args.output)
@@ -460,6 +461,13 @@ def main():
     manifest=fetch_real_crops(s,real_dir,per_class=28)
     with open(out/"source_manifest.json","w") as f:
         json.dump(manifest,f,indent=2)
+
+    counts = Counter(m["label"] for m in manifest)
+    print("PREPARED_COUNTS", json.dumps(dict(counts), sort_keys=True))
+    if args.prepare_only:
+        with open(out/"prepared_counts.json","w") as f:
+            json.dump({"counts": dict(counts), "clean_classes": sorted(clean.keys())}, f, indent=2)
+        return
 
     by=defaultdict(list)
     for m in manifest:
