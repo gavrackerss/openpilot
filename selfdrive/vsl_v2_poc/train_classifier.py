@@ -80,47 +80,49 @@ def request_json(session: requests.Session, params: dict, attempts: int = 6):
     raise RuntimeError(f"Commons API failed: {last}")
 
 
-def commons_category_files(session, category: str, max_files: int = 45, max_depth: int = 2):
-    """Collect Commons files from ordinary category HTML pages.
-
-    This deliberately avoids the MediaWiki API because shared CI runner IPs
-    can be heavily throttled even for modest research workloads.
-    """
+def commons_category_files(session, category: str, max_files: int = 28, max_depth: int = 1):
+    """Bounded Commons discovery: no unbounded category/subcategory crawls."""
     out = []
     seen_cat = set()
     queue = [(category, 0)]
+    pages_read = 0
+    max_pages = 4
+    start = time.monotonic()
+    max_elapsed_seconds = 55.0
 
-    while queue and len(out) < max_files:
+    print(f"CATEGORY start {category}", flush=True)
+    while queue and len(out) < max_files and pages_read < max_pages:
+        if time.monotonic() - start >= max_elapsed_seconds:
+            print(f"CATEGORY time budget exceeded {category}; collected {len(out)}", flush=True)
+            break
+
         cat, depth = queue.pop(0)
         if cat in seen_cat:
             continue
         seen_cat.add(cat)
-
+        pages_read += 1
         slug = quote(cat.replace(" ", "_"), safe="():,_-'")
         url = "https://commons.wikimedia.org/wiki/Category:" + slug
 
         html_text = ""
-        for attempt in range(5):
+        for attempt in range(2):
             try:
-                r = session.get(url, timeout=45)
-                if r.status_code == 429:
-                    retry_after = r.headers.get("Retry-After")
-                    try:
-                        wait = float(retry_after) if retry_after else 4.0 * (attempt + 1)
-                    except Exception:
-                        wait = 4.0 * (attempt + 1)
-                    time.sleep(max(wait, 2.0))
-                    continue
+                r = session.get(url, timeout=(5, 12))
+                if r.status_code in (429, 503):
+                    print(f"CATEGORY throttled HTTP {r.status_code} {cat}; skipping", flush=True)
+                    break
                 r.raise_for_status()
                 html_text = r.text
                 break
-            except Exception:
-                time.sleep(2.0 * (attempt + 1))
+            except requests.RequestException as e:
+                print(f"CATEGORY request failed {cat} try {attempt+1}: {e}", flush=True)
+                if attempt == 0:
+                    time.sleep(1.0)
 
         if not html_text:
-            print(f"WARN unable to read Commons category HTML: {cat}")
             continue
 
+        # Only collect image links within this bounded set of category pages.
         file_names = re.findall(r'href="/wiki/File:([^"#?]+)', html_text, flags=re.I)
         for raw in file_names:
             title = "File:" + unquote(unescape(raw)).replace("_", " ")
@@ -133,12 +135,12 @@ def commons_category_files(session, category: str, max_files: int = 45, max_dept
             subcats = re.findall(r'href="/wiki/Category:([^"#?]+)', html_text, flags=re.I)
             for raw in subcats:
                 subcat = unquote(unescape(raw)).replace("_", " ")
-                if subcat not in seen_cat and subcat != cat:
+                if subcat not in seen_cat and subcat != cat and len(queue) < 24:
                     queue.append((subcat, depth + 1))
 
-        time.sleep(0.12)
-
+    print(f"CATEGORY finished {category}: {len(out)} candidates in {pages_read} pages", flush=True)
     return out[:max_files]
+
 
 def commons_thumb_urls(session, file_titles, width: int = 1280, batch_size: int = 36):
     """Resolve thumbnail URLs in batches instead of one API call per image."""
@@ -173,26 +175,24 @@ def commons_redirect_url(file_title: str, width: int = 1120):
     return "https://commons.wikimedia.org/wiki/Special:Redirect/file/" + quote(name, safe="") + f"?width={int(width)}"
 
 
-def download_image(session, url: str, attempts: int = 4):
+def download_image(session, url: str, attempts: int = 2):
+    """Use short, bounded retries so one slow file cannot stall a class."""
     for i in range(attempts):
         try:
-            r = session.get(url, timeout=45)
-            if r.status_code == 429:
-                retry_after = r.headers.get("Retry-After")
-                try:
-                    wait = float(retry_after) if retry_after else 3.0 * (i + 1)
-                except Exception:
-                    wait = 3.0 * (i + 1)
-                time.sleep(max(wait, 2.0))
-                continue
+            r = session.get(url, timeout=(5, 13))
+            if r.status_code in (429, 503):
+                print(f"IMAGE throttled HTTP {r.status_code}: {url[:105]}", flush=True)
+                return None
             r.raise_for_status()
             im = Image.open(io.BytesIO(r.content)).convert("RGB")
             if min(im.size) < 64:
                 return None
-            time.sleep(0.04)
             return im
-        except Exception:
-            time.sleep(1.5 * (i + 1))
+        except (requests.RequestException, OSError, ValueError) as e:
+            if i == attempts - 1:
+                print(f"IMAGE failed: {url[:105]}: {e}", flush=True)
+                return None
+            time.sleep(0.5)
     return None
 
 
@@ -345,10 +345,11 @@ def fetch_real_crops(session, out_root: Path, per_class=28):
         }
 
     for label in CLASSES:
+        print(f"CLASS {label}: discovering photos", flush=True)
         titles=[]
         for cat in CATEGORY_MAP[label]:
             try:
-                titles += commons_category_files(session,cat,max_files=per_class,max_depth=3)
+                titles += commons_category_files(session,cat,max_files=per_class,max_depth=1)
             except Exception as e:
                 print(f"WARN category {cat}: {e}")
         titles=list(dict.fromkeys(titles))[:per_class]
@@ -357,8 +358,9 @@ def fetch_real_crops(session, out_root: Path, per_class=28):
 
         # Parallel CDN fetch/crop. Eight workers is deliberately modest to be
         # respectful of Commons while cutting preparation time dramatically.
+        print(f"CLASS {label}: cropping {len(titles)} candidates", flush=True)
         rows=[]
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=6) as pool:
             futures={
                 pool.submit(fetch_one,label,idx,title,d):(idx,title)
                 for idx,title in enumerate(titles)
@@ -376,6 +378,9 @@ def fetch_real_crops(session, out_root: Path, per_class=28):
         rows.sort(key=lambda x:x["path"])
         manifest.extend(rows)
         print(label,"downloaded/cropped",len(rows),"from",len(titles),"titles",flush=True)
+        # Preserve progress if a later class fails or a CI run is interrupted.
+        with open(out_root.parent/"source_manifest.partial.json", "w") as f:
+            json.dump(manifest, f, indent=2)
     return manifest
 
 
