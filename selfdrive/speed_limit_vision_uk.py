@@ -465,6 +465,9 @@ class SpeedLimitVisionUK:
           "legacy VSL remains authoritative"
         )
 
+      # A process restart while on-road must not leave stale V3 diagnostics.
+      self._shadow_clear_diagnostics("startup")
+
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
@@ -918,7 +921,7 @@ class SpeedLimitVisionUK:
   def _shadow_cluster_entries(self, entries):
     """Collapse overlapping/nested detector boxes into physical sign proposals."""
     prepared = []
-    for bbox, legacy_speed_mph, model_confidence, ring_score in entries[:SHADOW_MAX_PROPOSALS]:
+    for bbox, legacy_speed_mph, model_confidence, ring_score in entries:
       prepared.append((
         bbox,
         int(legacy_speed_mph),
@@ -926,6 +929,7 @@ class SpeedLimitVisionUK:
         float(ring_score),
       ))
     prepared.sort(key=lambda e: (e[3], e[2]), reverse=True)
+    prepared = prepared[:SHADOW_MAX_PROPOSALS]
 
     clusters = []
     for entry in prepared:
@@ -1086,6 +1090,8 @@ class SpeedLimitVisionUK:
       decision = "V3_UNCERTAIN"
     elif winner == "OTHER":
       decision = "V3_OTHER"
+    elif winner == "NSL" and source.startswith("national"):
+      decision = "V3_CONFIRM"
     elif winner in {str(x) for x in SUPPORTED_UK_LIMITS_MPH} and int(winner) == int(legacy_speed_mph):
       decision = "V3_CONFIRM"
     elif winner in {str(x) for x in SUPPORTED_UK_LIMITS_MPH} and int(legacy_speed_mph) > 0:
