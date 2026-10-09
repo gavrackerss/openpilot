@@ -33,7 +33,8 @@ jobs:
 
       - name: Train classifier
         run: |
-          python selfdrive/vsl_v2_poc/train_classifier.py --output v2_out --epochs 6
+          python -m py_compile selfdrive/vsl_v2_poc/train_classifier.py
+          python -u selfdrive/vsl_v2_poc/train_classifier.py --output v2_out --epochs 6
 
       - name: Upload V2 POC artifact
         if: always()
