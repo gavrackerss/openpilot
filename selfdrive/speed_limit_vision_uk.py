@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.11-UK
+# XNOR Vision Speed Limit V1.12-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -38,6 +38,12 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # the same sign crops/proposals that the authoritative V1.10 pipeline already
 # considers, but its result is telemetry only: it cannot publish a limit,
 # create a lower candidate, change temporal confirmation, or affect arbitration.
+#
+# V1.12 / V240 keeps that safety boundary and makes the V3 observation robust:
+# overlapping detector proposals are clustered into one physical sign, each
+# sign is classified at tight/normal/wide crop scales, and repeated detector/
+# tracking observations build a short temporal consensus. Four diagnostic Params
+# expose the shadow result for live testing; none are consumed by control.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -45,8 +51,15 @@ SHADOW_INPUT_SIZE = 128
 SHADOW_CLASSES = ("20", "30", "40", "50", "60", "70", "NSL", "OTHER")
 SHADOW_MEAN = np.array((0.485, 0.456, 0.406), dtype=np.float32)
 SHADOW_STD = np.array((0.229, 0.224, 0.225), dtype=np.float32)
-SHADOW_MAX_PROPOSALS = 4
+SHADOW_MAX_PROPOSALS = 6
+SHADOW_MAX_CLUSTERS = 4
+SHADOW_CROP_EXPANSIONS = (0.0, 0.18, 0.35)
 SHADOW_LOG_REPEAT_SECONDS = 0.8
+SHADOW_TRACK_INTERVAL = 0.25
+SHADOW_TEMPORAL_SECONDS = 2.0
+SHADOW_DIAGNOSTIC_HOLD_SECONDS = 5.0
+SHADOW_MIN_DECISION_CONFIDENCE = 0.60
+SHADOW_MIN_DECISION_CONSENSUS = 0.60
 
 # The comma/AGNOS Python environment does not automatically re-resolve
 # pyproject.toml when a changed-files overlay is installed. Carry a pinned
@@ -170,6 +183,14 @@ class HistoryEntry:
   source_family: str
 
 
+@dataclass
+class ShadowHistoryEntry:
+  class_name: str
+  confidence: float
+  crop_consensus: float
+  created_at: float
+
+
 class SpeedLimitVisionUK:
   def __init__(self):
     self.params = Params()
@@ -179,6 +200,13 @@ class SpeedLimitVisionUK:
     self.net = None
     self.shadow_net = None
     self._shadow_last_log_by_key = {}
+    self._shadow_history: deque[ShadowHistoryEntry] = deque()
+    self._shadow_track_bbox = None
+    self._shadow_last_observation_at = 0.0
+    self._shadow_last_track_inference_at = -1e9
+    self._shadow_last_param_at = -1e9
+    self._shadow_last_param_signature = None
+    self._shadow_diag_active = False
     self.value_reader = None
     self.national_reader = None
     self.client = None
@@ -437,10 +465,13 @@ class SpeedLimitVisionUK:
           "legacy VSL remains authoritative"
         )
 
+      # A process restart while on-road must not leave stale V3 diagnostics.
+      self._shadow_clear_diagnostics("startup")
+
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.11: ready")
+      self._set_status("UK vision V1.12: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
@@ -865,20 +896,237 @@ class SpeedLimitVisionUK:
     denom = float(np.sum(exp))
     return exp / max(denom, 1e-12)
 
+  @staticmethod
+  def _shadow_bbox_union(boxes):
+    return (
+      min(int(b[0]) for b in boxes),
+      min(int(b[1]) for b in boxes),
+      max(int(b[2]) for b in boxes),
+      max(int(b[3]) for b in boxes),
+    )
+
+  @classmethod
+  def _shadow_same_object(cls, a, b) -> bool:
+    if a is None or b is None:
+      return False
+    if cls._bbox_iou(a, b) >= 0.12:
+      return True
+    ax = (a[0] + a[2]) * 0.5
+    ay = (a[1] + a[3]) * 0.5
+    bx = (b[0] + b[2]) * 0.5
+    by = (b[1] + b[3]) * 0.5
+    scale = max(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1], 1)
+    return float(np.hypot(ax - bx, ay - by)) <= float(scale) * 0.38
+
+  def _shadow_cluster_entries(self, entries):
+    """Collapse overlapping/nested detector boxes into physical sign proposals."""
+    prepared = []
+    for bbox, legacy_speed_mph, model_confidence, ring_score in entries:
+      prepared.append((
+        bbox,
+        int(legacy_speed_mph),
+        float(model_confidence),
+        float(ring_score),
+      ))
+    prepared.sort(key=lambda e: (e[3], e[2]), reverse=True)
+    prepared = prepared[:SHADOW_MAX_PROPOSALS]
+
+    clusters = []
+    for entry in prepared:
+      bbox = entry[0]
+      target = None
+      for cluster in clusters:
+        if self._shadow_same_object(bbox, cluster["anchor"][0]):
+          target = cluster
+          break
+      if target is None:
+        clusters.append({"anchor": entry, "members": [entry]})
+      else:
+        target["members"].append(entry)
+        # Retain the strongest geometry/model proposal as the anchor.
+        if (entry[3], entry[2]) > (target["anchor"][3], target["anchor"][2]):
+          target["anchor"] = entry
+
+    result = []
+    for cluster in clusters[:SHADOW_MAX_CLUSTERS]:
+      members = cluster["members"]
+      anchor = cluster["anchor"]
+      boxes = [m[0] for m in members]
+      smallest = min(boxes, key=lambda b: max((b[2] - b[0]) * (b[3] - b[1]), 1))
+      union = self._shadow_bbox_union(boxes)
+      result.append({
+        "bbox": anchor[0],
+        "tight_bbox": smallest,
+        "union_bbox": union,
+        "legacy_speed_mph": anchor[1],
+        "model_confidence": anchor[2],
+        "ring_score": max(m[3] for m in members),
+        "members": len(members),
+      })
+    return result
+
+  def _shadow_crop_boxes(self, cluster, frame_w: int, frame_h: int):
+    """Return tight/normal/wide crops, deduplicated after frame clipping."""
+    candidates = [cluster["tight_bbox"], cluster["bbox"]]
+    wide = self._expand_bbox(cluster["union_bbox"], frame_w, frame_h, SHADOW_CROP_EXPANSIONS[-1])
+    if wide is not None:
+      candidates.append(wide)
+
+    boxes = []
+    seen = set()
+    for bbox in candidates:
+      clipped = self._clamp_bbox(bbox, frame_w, frame_h)
+      if clipped is None:
+        continue
+      key = tuple(int(v) for v in clipped)
+      if key in seen:
+        continue
+      seen.add(key)
+      boxes.append(clipped)
+
+    # A single detector box still gets multiple spatial contexts.
+    if len(boxes) < 3 and cluster["bbox"] is not None:
+      for padding in SHADOW_CROP_EXPANSIONS[1:]:
+        expanded = self._expand_bbox(cluster["bbox"], frame_w, frame_h, padding)
+        if expanded is None:
+          continue
+        key = tuple(int(v) for v in expanded)
+        if key not in seen:
+          seen.add(key)
+          boxes.append(expanded)
+        if len(boxes) >= 3:
+          break
+    return boxes[:3]
+
+  def _shadow_write_params(self, class_name: str, confidence: float,
+                           consensus: float, now: float) -> None:
+    signature = (
+      str(class_name),
+      round(float(confidence), 2),
+      round(float(consensus), 2),
+    )
+    if (
+      signature == self._shadow_last_param_signature and
+      now - self._shadow_last_param_at < 0.20
+    ):
+      return
+    self._shadow_last_param_signature = signature
+    self._shadow_last_param_at = float(now)
+    self._shadow_diag_active = True
+    try:
+      self.params.put_nonblocking("VisionSpeedLimitV3Class", str(class_name))
+      self.params.put_nonblocking("VisionSpeedLimitV3Confidence", float(confidence))
+      self.params.put_nonblocking("VisionSpeedLimitV3Consensus", float(consensus))
+      self.params.put_nonblocking("VisionSpeedLimitV3Timestamp", float(now))
+    except Exception:
+      pass
+
+  def _shadow_clear_diagnostics(self, reason: str) -> None:
+    had = self._shadow_diag_active or bool(self._shadow_history)
+    self._shadow_history.clear()
+    self._shadow_track_bbox = None
+    self._shadow_last_observation_at = 0.0
+    self._shadow_last_param_signature = None
+    self._shadow_diag_active = False
+    try:
+      self.params.put_nonblocking("VisionSpeedLimitV3Class", "")
+      self.params.put_nonblocking("VisionSpeedLimitV3Confidence", 0.0)
+      self.params.put_nonblocking("VisionSpeedLimitV3Consensus", 0.0)
+      self.params.put_nonblocking("VisionSpeedLimitV3Timestamp", 0.0)
+    except Exception:
+      pass
+    if had:
+      cloudlog.info(f"[XNOR_VSL_V3_SHADOW] clear diagnostics reason={reason} authoritative=0")
+
+  def _shadow_update_temporal(self, class_name: str, confidence: float,
+                              crop_consensus: float, bbox,
+                              legacy_speed_mph: int, source: str) -> None:
+    now = time.monotonic()
+    if (
+      self._shadow_track_bbox is None or
+      now - self._shadow_last_observation_at > SHADOW_TEMPORAL_SECONDS or
+      not self._shadow_same_object(bbox, self._shadow_track_bbox)
+    ):
+      self._shadow_history.clear()
+
+    self._shadow_track_bbox = bbox
+    self._shadow_last_observation_at = float(now)
+    self._shadow_history.append(ShadowHistoryEntry(
+      str(class_name),
+      float(confidence),
+      float(crop_consensus),
+      float(now),
+    ))
+    while self._shadow_history and now - self._shadow_history[0].created_at > SHADOW_TEMPORAL_SECONDS:
+      self._shadow_history.popleft()
+
+    scores = Counter()
+    counts = Counter()
+    conf_weighted = Counter()
+    crop_weighted = Counter()
+    for entry in self._shadow_history:
+      weight = max(entry.confidence, 0.01) * (0.50 + 0.50 * entry.crop_consensus)
+      scores[entry.class_name] += weight
+      counts[entry.class_name] += 1
+      conf_weighted[entry.class_name] += entry.confidence * weight
+      crop_weighted[entry.class_name] += entry.crop_consensus * weight
+
+    if not scores:
+      return
+    winner, winner_score = max(scores.items(), key=lambda kv: kv[1])
+    total_score = max(float(sum(scores.values())), 1e-9)
+    temporal_share = float(winner_score) / total_score
+    winner_weight = max(float(scores[winner]), 1e-9)
+    aggregate_conf = float(conf_weighted[winner]) / winner_weight
+    aggregate_crop = float(crop_weighted[winner]) / winner_weight
+    observations = int(counts[winner])
+    temporal_maturity = min(float(observations) / 2.0, 1.0)
+    overall_consensus = float(np.clip(
+      temporal_share * aggregate_crop * temporal_maturity, 0.0, 1.0
+    ))
+
+    if (
+      observations < 2 or
+      aggregate_conf < SHADOW_MIN_DECISION_CONFIDENCE or
+      overall_consensus < SHADOW_MIN_DECISION_CONSENSUS
+    ):
+      decision = "V3_UNCERTAIN"
+    elif winner == "OTHER":
+      decision = "V3_OTHER"
+    elif winner == "NSL" and source.startswith("national"):
+      decision = "V3_CONFIRM"
+    elif winner in {str(x) for x in SUPPORTED_UK_LIMITS_MPH} and int(winner) == int(legacy_speed_mph):
+      decision = "V3_CONFIRM"
+    elif winner in {str(x) for x in SUPPORTED_UK_LIMITS_MPH} and int(legacy_speed_mph) > 0:
+      decision = "V3_DISAGREE"
+    else:
+      decision = "V3_UNCERTAIN"
+
+    self._shadow_write_params(winner, aggregate_conf, overall_consensus, now)
+    bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+    cloudlog.info(
+      f"[XNOR_VSL_V3_CONSENSUS] source={source} class={winner} "
+      f"confidence={aggregate_conf:.3f} consensus={overall_consensus:.3f} "
+      f"observations={observations} history={len(self._shadow_history)} "
+      f"legacy={int(legacy_speed_mph)} decision={decision} "
+      f"bbox={bbox_text} authoritative=0"
+    )
+
   def _log_shadow_prediction(self, source: str, class_name: str, confidence: float,
+                             crop_consensus: float, crops: int,
                              legacy_speed_mph: int, model_confidence: float,
-                             ring_score: float, bbox, elapsed_ms: float) -> None:
+                             ring_score: float, bbox, elapsed_ms: float,
+                             members: int) -> None:
     now = time.monotonic()
     bucket = tuple(int(v) // 16 for v in bbox) if bbox is not None else ()
     key = (
       str(source), str(class_name), int(legacy_speed_mph),
-      round(float(confidence), 2), bucket,
+      round(float(confidence), 2), round(float(crop_consensus), 2), bucket,
     )
     last = float(self._shadow_last_log_by_key.get(key, -1e9))
     if now - last < SHADOW_LOG_REPEAT_SECONDS:
       return
     self._shadow_last_log_by_key[key] = now
-    # Bound this diagnostic cache for long drives.
     if len(self._shadow_last_log_by_key) > 256:
       cutoff = now - 8.0
       self._shadow_last_log_by_key = {
@@ -888,31 +1136,35 @@ class SpeedLimitVisionUK:
     bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
     cloudlog.info(
       f"[XNOR_VSL_V3_SHADOW] source={source} class={class_name} "
-      f"confidence={float(confidence):.3f} legacy={int(legacy_speed_mph)} "
+      f"confidence={float(confidence):.3f} cropConsensus={float(crop_consensus):.3f} "
+      f"crops={int(crops)} members={int(members)} legacy={int(legacy_speed_mph)} "
       f"model={float(model_confidence):.3f} ring={float(ring_score):.3f} "
       f"batchMs={float(elapsed_ms):.1f} bbox={bbox_text} authoritative=0"
     )
 
   def _shadow_classify_entries(self, frame_bgr, entries, source: str) -> None:
-    """Classify existing VSL crops without feeding any result back into control."""
+    """Multi-crop V3 inference; results are diagnostic only."""
     if self.shadow_net is None or not entries:
       return
 
-    tensors = []
-    metadata = []
     frame_h, frame_w = frame_bgr.shape[:2]
-    for bbox, legacy_speed_mph, model_confidence, ring_score in entries[:SHADOW_MAX_PROPOSALS]:
-      clipped = self._clamp_bbox(bbox, frame_w, frame_h)
-      if clipped is None:
-        continue
-      x1, y1, x2, y2 = clipped
-      tensor = self._shadow_preprocess(frame_bgr[y1:y2, x1:x2])
-      if tensor is None:
-        continue
-      tensors.append(tensor)
-      metadata.append((
-        clipped, int(legacy_speed_mph), float(model_confidence), float(ring_score)
-      ))
+    clusters = self._shadow_cluster_entries(entries)
+    if not clusters:
+      return
+
+    tensors = []
+    tensor_meta = []
+    cluster_boxes = []
+    for cluster_idx, cluster in enumerate(clusters):
+      crop_boxes = self._shadow_crop_boxes(cluster, frame_w, frame_h)
+      cluster_boxes.append(crop_boxes)
+      for bbox in crop_boxes:
+        x1, y1, x2, y2 = bbox
+        tensor = self._shadow_preprocess(frame_bgr[y1:y2, x1:x2])
+        if tensor is None:
+          continue
+        tensors.append(tensor)
+        tensor_meta.append(cluster_idx)
 
     if not tensors:
       return
@@ -925,29 +1177,57 @@ class SpeedLimitVisionUK:
       elapsed_ms = (time.perf_counter() - started) * 1000.0
       if logits.ndim == 1:
         logits = logits[None, ...]
-      logits = logits.reshape(len(metadata), -1)
+      logits = logits.reshape(len(tensor_meta), -1)
       if logits.shape[1] != len(SHADOW_CLASSES):
         raise RuntimeError(
           f"unexpected V3 output shape {tuple(logits.shape)} expected (*,{len(SHADOW_CLASSES)})"
         )
 
-      for row, (bbox, legacy_speed_mph, model_confidence, ring_score) in zip(logits, metadata):
-        probs = self._shadow_softmax(row)
-        class_id = int(np.argmax(probs))
+      per_cluster = [[] for _ in clusters]
+      for row, cluster_idx in zip(logits, tensor_meta):
+        per_cluster[cluster_idx].append(self._shadow_softmax(row))
+
+      results = []
+      for cluster, crop_probs in zip(clusters, per_cluster):
+        if not crop_probs:
+          continue
+        stack = np.stack(crop_probs, axis=0)
+        mean_probs = np.mean(stack, axis=0)
+        class_id = int(np.argmax(mean_probs))
+        crop_votes = np.argmax(stack, axis=1)
+        crop_consensus = float(np.mean(crop_votes == class_id))
+        class_name = SHADOW_CLASSES[class_id]
+        confidence = float(mean_probs[class_id])
+        result = {
+          "class_name": class_name,
+          "confidence": confidence,
+          "crop_consensus": crop_consensus,
+          "bbox": cluster["bbox"],
+          "legacy_speed_mph": cluster["legacy_speed_mph"],
+          "model_confidence": cluster["model_confidence"],
+          "ring_score": cluster["ring_score"],
+          "members": cluster["members"],
+          "crops": len(crop_probs),
+        }
+        results.append(result)
         self._log_shadow_prediction(
-          source,
-          SHADOW_CLASSES[class_id],
-          float(probs[class_id]),
-          legacy_speed_mph,
-          model_confidence,
-          ring_score,
-          bbox,
-          elapsed_ms,
+          source, class_name, confidence, crop_consensus, len(crop_probs),
+          cluster["legacy_speed_mph"], cluster["model_confidence"],
+          cluster["ring_score"], cluster["bbox"], elapsed_ms, cluster["members"],
+        )
+
+      if results:
+        best = max(
+          results,
+          key=lambda r: r["confidence"] * (0.50 + 0.50 * r["crop_consensus"]),
+        )
+        self._shadow_update_temporal(
+          best["class_name"], best["confidence"], best["crop_consensus"],
+          best["bbox"], best["legacy_speed_mph"], source,
         )
     except Exception:
-      # Disable only V3 for the remainder of this process. The authoritative
-      # detector/OCR/NSL pipeline continues untouched.
       self.shadow_net = None
+      self._shadow_clear_diagnostics("inference_error")
       cloudlog.exception(
         "[XNOR_VSL_V3_SHADOW] inference failed; shadow disabled, legacy VSL remains authoritative"
       )
@@ -1287,6 +1567,19 @@ class SpeedLimitVisionUK:
     pending.bbox = tracked_bbox
     pending.tracked_once = True
     bbox_text = ",".join(str(int(v)) for v in tracked_bbox)
+
+    # V240: let V3 observe fresh tracked crops at 4 Hz. This is diagnostic-only;
+    # its result is not read by the authoritative OCR/temporal path below.
+    if (
+      self.shadow_net is not None and
+      now - self._shadow_last_track_inference_at >= SHADOW_TRACK_INTERVAL
+    ):
+      self._shadow_last_track_inference_at = float(now)
+      self._shadow_classify_entries(
+        frame_bgr,
+        [(tracked_bbox, int(pending.speed_limit_mph), 0.0, float(ring))],
+        "numeric_track",
+      )
 
     # Track at up to 20 Hz, but the template digit reader is the more expensive
     # part. Re-read digits at up to 10 Hz on the best continuously-followed box.
@@ -1884,6 +2177,13 @@ class SpeedLimitVisionUK:
 
       if self.last_candidate_at > 0.0 and now - self.last_candidate_at > PUBLISHED_HOLD_SECONDS:
         self._clear_lower_candidate("stale")
+
+      if (
+        self._shadow_diag_active and
+        self._shadow_last_observation_at > 0.0 and
+        now - self._shadow_last_observation_at > SHADOW_DIAGNOSTIC_HOLD_SECONDS
+      ):
+        self._shadow_clear_diagnostics("stale")
 
       if self.published_speed_limit_mph > 0 and now - self.last_detection_at > PUBLISHED_HOLD_SECONDS:
         self._clear_publish("stale")
