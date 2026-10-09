@@ -5,8 +5,10 @@ import io
 import json
 import math
 import random
+import re
 import time
-from urllib.parse import quote
+from html import unescape
+from urllib.parse import quote, unquote
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -78,38 +80,64 @@ def request_json(session: requests.Session, params: dict, attempts: int = 6):
 
 
 def commons_category_files(session, category: str, max_files: int = 45, max_depth: int = 2):
+    """Collect Commons files from ordinary category HTML pages.
+
+    This deliberately avoids the MediaWiki API because shared CI runner IPs
+    can be heavily throttled even for modest research workloads.
+    """
     out = []
     seen_cat = set()
     queue = [(category, 0)]
+
     while queue and len(out) < max_files:
         cat, depth = queue.pop(0)
         if cat in seen_cat:
             continue
         seen_cat.add(cat)
-        cont = None
-        while len(out) < max_files:
-            params = {
-                "action": "query", "format": "json", "list": "categorymembers",
-                "cmtitle": "Category:" + cat, "cmlimit": "500", "cmtype": "file|subcat",
-            }
-            if cont:
-                params["cmcontinue"] = cont
-            data = request_json(session, params)
-            members = data.get("query", {}).get("categorymembers", [])
-            for m in members:
-                title = m.get("title", "")
-                ns = int(m.get("ns", -1))
-                if ns == 6 and title.startswith("File:"):
-                    out.append(title)
-                    if len(out) >= max_files:
-                        break
-                elif ns == 14 and depth < max_depth and title.startswith("Category:"):
-                    queue.append((title[len("Category:"):], depth + 1))
-            cont = data.get("continue", {}).get("cmcontinue")
-            if not cont:
-                break
-    return list(dict.fromkeys(out))[:max_files]
 
+        slug = quote(cat.replace(" ", "_"), safe="():,_-'")
+        url = "https://commons.wikimedia.org/wiki/Category:" + slug
+
+        html_text = ""
+        for attempt in range(5):
+            try:
+                r = session.get(url, timeout=45)
+                if r.status_code == 429:
+                    retry_after = r.headers.get("Retry-After")
+                    try:
+                        wait = float(retry_after) if retry_after else 4.0 * (attempt + 1)
+                    except Exception:
+                        wait = 4.0 * (attempt + 1)
+                    time.sleep(max(wait, 2.0))
+                    continue
+                r.raise_for_status()
+                html_text = r.text
+                break
+            except Exception:
+                time.sleep(2.0 * (attempt + 1))
+
+        if not html_text:
+            print(f"WARN unable to read Commons category HTML: {cat}")
+            continue
+
+        file_names = re.findall(r'href="/wiki/File:([^"#?]+)', html_text, flags=re.I)
+        for raw in file_names:
+            title = "File:" + unquote(unescape(raw)).replace("_", " ")
+            if title not in out:
+                out.append(title)
+                if len(out) >= max_files:
+                    break
+
+        if depth < max_depth and len(out) < max_files:
+            subcats = re.findall(r'href="/wiki/Category:([^"#?]+)', html_text, flags=re.I)
+            for raw in subcats:
+                subcat = unquote(unescape(raw)).replace("_", " ")
+                if subcat not in seen_cat and subcat != cat:
+                    queue.append((subcat, depth + 1))
+
+        time.sleep(0.12)
+
+    return out[:max_files]
 
 def commons_thumb_urls(session, file_titles, width: int = 1280, batch_size: int = 36):
     """Resolve thumbnail URLs in batches instead of one API call per image."""
