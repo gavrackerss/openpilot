@@ -7,12 +7,13 @@ import json
 import zipfile
 from pathlib import Path
 
-DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v241")
-DEFAULT_OUTPUT = Path("/data/media/0/v241_shadow_samples.zip")
+DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v242")
+DEFAULT_OUTPUT = Path("/data/media/0/v242_shadow_samples.zip")
 
 
 def suggested_label(row: dict) -> tuple[str, str]:
   decision = str(row.get("decision", ""))
+  reason = str(row.get("capture_reason", decision))
   v3_class = str(row.get("v3_class", ""))
   try:
     ocr_speed = int(row.get("ocr_speed_mph", 0) or 0)
@@ -25,8 +26,14 @@ def suggested_label(row: dict) -> tuple[str, str]:
     return str(ocr_speed), "repeated_ocr_conflict"
   if decision == "V3_RESCUE" and ocr_count >= 1 and str(ocr_speed) == v3_class:
     return v3_class, "v3_matches_raw_ocr"
-  if decision == "V3_OTHER":
+  if reason in ("V3_OTHER", "V3_SINGLE_OTHER"):
     return "OTHER", "high_confidence_other"
+  if reason == "V3_OCR_AGREE" and ocr_speed > 0 and str(ocr_speed) == v3_class:
+    return v3_class, "single_v3_ocr_agreement"
+  if reason == "V3_OCR_CONFLICT":
+    return "", "single_v3_ocr_conflict_review"
+  if reason == "V3_SINGLE_STRONG":
+    return "", "strong_v3_without_ocr_review"
   return "", "manual_review"
 
 
@@ -62,7 +69,7 @@ def main() -> None:
 
   args.output.parent.mkdir(parents=True, exist_ok=True)
   review_fields = [
-    "file", "decision", "v3_class", "v3_confidence", "v3_consensus",
+    "file", "decision", "capture_reason", "v3_class", "v3_confidence", "v3_consensus",
     "ocr_speed_mph", "ocr_count", "ocr_confidence", "legacy_speed_mph",
     "published_speed_mph", "source", "suggested_label", "suggestion_reason",
     "verified_label",
@@ -91,7 +98,7 @@ def main() -> None:
       p = args.source / str(row["file"])
       zf.write(p, f"crops/{p.name}")
 
-  print(f"V241 shadow samples: {len(rows)}")
+  print(f"V242 shadow samples: {len(rows)}")
   print(f"Review CSV: {review_csv}")
   print(f"Package: {args.output}")
 
