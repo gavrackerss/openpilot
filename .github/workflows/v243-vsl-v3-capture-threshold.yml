@@ -1,0 +1,75 @@
+name: V243 VSL V3 capture threshold
+
+on:
+  push:
+    branches:
+      - xnor-dev-v243-vsl-v3-capture-threshold
+    paths:
+      - .github/workflows/v243-vsl-v3-capture-threshold.yml
+      - selfdrive/speed_limit_vision_uk.py
+      - selfdrive/vsl_v3/export_shadow_samples.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax check
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify V243 is capture-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'V1.15 / V243' selfdrive/speed_limit_vision_uk.py
+          grep -q 'SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE = 0.85' selfdrive/speed_limit_vision_uk.py
+          grep -q 'xnor_vsl_shadow_samples/v243' selfdrive/speed_limit_vision_uk.py
+          grep -q 'v243_shadow_samples.zip' selfdrive/vsl_v3/export_shadow_samples.py
+          grep -q 'UK vision V1.15: ready' selfdrive/speed_limit_vision_uk.py
+          # No control/arbitration files or classifier changed from V242.
+          changed="$(git diff --name-only xnor-dev-v242-vsl-v3-capture-fix...HEAD | grep -v '^.github/workflows/' || true)"
+          expected=$'selfdrive/speed_limit_vision_uk.py\nselfdrive/vsl_v3/export_shadow_samples.py'
+          test "$changed" = "$expected"
+
+      - name: Verify threshold semantics
+        run: |
+          python - <<'PY'
+          import ast
+          p = "selfdrive/speed_limit_vision_uk.py"
+          tree = ast.parse(open(p).read(), p)
+          vals = {}
+          for n in tree.body:
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+              if n.targets[0].id.startswith("SHADOW_CAPTURE_"):
+                try:
+                  vals[n.targets[0].id] = ast.literal_eval(n.value)
+                except Exception:
+                  pass
+          assert vals["SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE"] == 0.85, vals
+          assert vals["SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS"] == 0.99, vals
+          assert vals["SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE"] == 0.84, vals
+          print("V243 capture threshold checks: PASS")
+          PY
+
+      - name: Package changed sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: v243-vsl-v3-capture-threshold-source
+          path: |
+            selfdrive/speed_limit_vision_uk.py
+            selfdrive/vsl_v3/export_shadow_samples.py
+          retention-days: 14
