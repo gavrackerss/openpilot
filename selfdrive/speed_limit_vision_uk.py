@@ -1117,7 +1117,8 @@ class SpeedLimitVisionUK:
   def _shadow_capture_sample(self, frame_bgr, bbox, decision: str,
                              class_name: str, confidence: float,
                              consensus: float, ocr_speed: int,
-                             ocr_count: int, source: str) -> None:
+                             ocr_count: int, ocr_confidence: float,
+                             legacy_speed_mph: int, source: str) -> None:
     if frame_bgr is None or bbox is None:
       return
     now = time.monotonic()
@@ -1184,6 +1185,9 @@ class SpeedLimitVisionUK:
             "v3_consensus": round(float(consensus), 5),
             "ocr_speed_mph": int(ocr_speed),
             "ocr_count": int(ocr_count),
+            "ocr_confidence": round(float(ocr_confidence), 5),
+            "legacy_speed_mph": int(legacy_speed_mph),
+            "published_speed_mph": int(self.published_speed_limit_mph),
             "source": str(source),
             "monotonic": round(float(now), 5),
           }, separators=(",", ":")) + "\n")
@@ -1192,7 +1196,8 @@ class SpeedLimitVisionUK:
       cloudlog.info(
         f"[XNOR_VSL_V3_CAPTURE] file={name} decision={decision} "
         f"class={class_name} confidence={confidence:.3f} consensus={consensus:.3f} "
-        f"ocr={int(ocr_speed)}x{int(ocr_count)} count={self._shadow_capture_count}"
+        f"ocr={int(ocr_speed)}x{int(ocr_count)} ocrConf={float(ocr_confidence):.3f} "
+        f"legacy={int(legacy_speed_mph)} count={self._shadow_capture_count}"
       )
     except Exception:
       cloudlog.exception("[XNOR_VSL_V3_CAPTURE] crop capture failed")
@@ -1310,6 +1315,7 @@ class SpeedLimitVisionUK:
       "ocr_speed": ocr_speed,
       "ocr_count": ocr_count,
       "ocr_confidence": ocr_conf,
+      "legacy_speed_mph": int(legacy_speed_mph),
     }
 
   def _log_shadow_prediction(self, source: str, class_name: str, confidence: float,
@@ -1430,7 +1436,8 @@ class SpeedLimitVisionUK:
             frame_bgr, best["bbox"], temporal["decision"],
             temporal["class_name"], temporal["confidence"],
             temporal["consensus"], temporal["ocr_speed"],
-            temporal["ocr_count"], source,
+            temporal["ocr_count"], temporal["ocr_confidence"],
+            temporal["legacy_speed_mph"], source,
           )
     except Exception:
       self.shadow_net = None
