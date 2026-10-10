@@ -8,6 +8,7 @@ on:
       - .github/workflows/v241-shadow-conflict-capture.yml
       - selfdrive/speed_limit_vision_uk.py
       - common/params_keys.h
+      - selfdrive/vsl_v3/export_shadow_samples.py
   workflow_dispatch:
 
 permissions:
@@ -30,7 +31,9 @@ jobs:
         run: python -m pip install --disable-pip-version-check numpy
 
       - name: Syntax-check V241 runtime
-        run: python -m py_compile selfdrive/speed_limit_vision_uk.py
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/export_shadow_samples.py
 
       - name: Verify Params and shadow-only boundary
         shell: bash
@@ -168,4 +171,5 @@ jobs:
           path: |
             selfdrive/speed_limit_vision_uk.py
             common/params_keys.h
+            selfdrive/vsl_v3/export_shadow_samples.py
           retention-days: 14
