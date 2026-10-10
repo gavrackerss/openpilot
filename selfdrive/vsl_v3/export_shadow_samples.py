@@ -7,8 +7,8 @@ import json
 import zipfile
 from pathlib import Path
 
-DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v242")
-DEFAULT_OUTPUT = Path("/data/media/0/v242_shadow_samples.zip")
+DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v243")
+DEFAULT_OUTPUT = Path("/data/media/0/v243_shadow_samples.zip")
 
 
 def suggested_label(row: dict) -> tuple[str, str]:
@@ -98,7 +98,7 @@ def main() -> None:
       p = args.source / str(row["file"])
       zf.write(p, f"crops/{p.name}")
 
-  print(f"V242 shadow samples: {len(rows)}")
+  print(f"V243 shadow samples: {len(rows)}")
   print(f"Review CSV: {review_csv}")
   print(f"Package: {args.output}")
 
