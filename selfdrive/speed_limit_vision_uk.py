@@ -22,7 +22,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.13-UK
+# XNOR Vision Speed Limit V1.14-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -51,6 +51,13 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # mature V3 agreement with a raw OCR read that the authoritative path did not
 # publish is V3_RESCUE. Selected sign crops only (never full frames) are stored
 # locally for the next real-data retraining pass. V3 remains shadow-only.
+#
+# V1.14 / V242 fixes hard-example collection after V241 road logs showed that
+# real signs are often observed only once by the temporal tracker. Mature decision
+# thresholds are unchanged, but capture may now save high-value single observations:
+# strong OTHER, V3/OCR conflicts, strong V3/OCR agreement, and strong numeric V3
+# results when OCR/ring gating cannot produce a value. These samples remain review
+# data only and still have zero influence on speed-limit arbitration or control.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -70,11 +77,19 @@ SHADOW_MIN_DECISION_CONSENSUS = 0.60
 SHADOW_OCR_SECONDS = 2.5
 SHADOW_OCR_REQUIRED = 2
 SHADOW_OCR_MIN_CONFIDENCE = 0.72
-SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v241")
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v242")
 SHADOW_CAPTURE_MAX_FILES = 160
 SHADOW_CAPTURE_INTERVAL = 0.75
 SHADOW_CAPTURE_MAX_SIDE = 256
 SHADOW_CAPTURE_JPEG_QUALITY = 88
+SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE = 0.84
+SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE = 0.90
+SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS = 0.99
+SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE = 0.45
+SHADOW_CAPTURE_OCR_MIN_CONFIDENCE = 0.55
+SHADOW_CAPTURE_OCR_CROP_CONSENSUS = 0.66
+SHADOW_CAPTURE_AGREE_V3_CONFIDENCE = 0.70
+SHADOW_CAPTURE_AGREE_OCR_CONFIDENCE = 0.72
 
 # The comma/AGNOS Python environment does not automatically re-resolve
 # pyproject.toml when a changed-files overlay is installed. Carry a pinned
@@ -235,6 +250,7 @@ class SpeedLimitVisionUK:
     self._shadow_diag_active = False
     self._shadow_last_capture_at = -1e9
     self._shadow_capture_count = 0
+    self._shadow_last_results = []
     self.value_reader = None
     self.national_reader = None
     self.client = None
@@ -499,7 +515,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.13: ready")
+      self._set_status("UK vision V1.14: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
@@ -1118,18 +1134,25 @@ class SpeedLimitVisionUK:
                              class_name: str, confidence: float,
                              consensus: float, ocr_speed: int,
                              ocr_count: int, ocr_confidence: float,
-                             legacy_speed_mph: int, source: str) -> None:
+                             legacy_speed_mph: int, source: str,
+                             capture_reason: str = "") -> None:
     if frame_bgr is None or bbox is None:
       return
     now = time.monotonic()
     if now - self._shadow_last_capture_at < SHADOW_CAPTURE_INTERVAL:
       return
-    if decision not in ("V3_CONFLICT", "V3_RESCUE", "V3_OTHER"):
+    reason = str(capture_reason or decision)
+    mature_reason = reason in ("V3_CONFLICT", "V3_RESCUE", "V3_OTHER")
+    single_reason = reason in (
+      "V3_SINGLE_OTHER", "V3_OCR_CONFLICT", "V3_OCR_AGREE", "V3_SINGLE_STRONG",
+    )
+    if not mature_reason and not single_reason:
       return
-    if confidence < 0.72 or consensus < 0.55:
-      return
-    if decision == "V3_OTHER" and confidence < 0.85:
-      return
+    if mature_reason:
+      if confidence < 0.72 or consensus < 0.55:
+        return
+      if reason == "V3_OTHER" and confidence < 0.85:
+        return
 
     try:
       frame_h, frame_w = frame_bgr.shape[:2]
@@ -1163,7 +1186,7 @@ class SpeedLimitVisionUK:
       stamp = int(time.time() * 1000.0)
       safe_source = "".join(c if c.isalnum() or c in "_-" else "_" for c in str(source))[:28]
       name = (
-        f"{stamp}_{decision}_{class_name}_c{confidence:.2f}_"
+        f"{stamp}_{reason}_{class_name}_c{confidence:.2f}_"
         f"k{consensus:.2f}_ocr{int(ocr_speed)}x{int(ocr_count)}_{safe_source}.jpg"
       )
       target = SHADOW_CAPTURE_DIR / name
@@ -1180,6 +1203,7 @@ class SpeedLimitVisionUK:
           mf.write(json.dumps({
             "file": name,
             "decision": decision,
+            "capture_reason": reason,
             "v3_class": class_name,
             "v3_confidence": round(float(confidence), 5),
             "v3_consensus": round(float(consensus), 5),
@@ -1194,13 +1218,98 @@ class SpeedLimitVisionUK:
       except Exception:
         pass
       cloudlog.info(
-        f"[XNOR_VSL_V3_CAPTURE] file={name} decision={decision} "
+        f"[XNOR_VSL_V3_CAPTURE] file={name} decision={decision} reason={reason} "
         f"class={class_name} confidence={confidence:.3f} consensus={consensus:.3f} "
         f"ocr={int(ocr_speed)}x{int(ocr_count)} ocrConf={float(ocr_confidence):.3f} "
         f"legacy={int(legacy_speed_mph)} count={self._shadow_capture_count}"
       )
     except Exception:
       cloudlog.exception("[XNOR_VSL_V3_CAPTURE] crop capture failed")
+
+  def _shadow_result_for_bbox(self, bbox, max_age: float = 1.5):
+    if bbox is None:
+      return None
+    now = time.monotonic()
+    best = None
+    best_rank = (-1.0, -1.0)
+    for result in self._shadow_last_results:
+      if now - float(result.get("created_at", 0.0)) > max_age:
+        continue
+      rbbox = result.get("bbox")
+      if rbbox is None or not self._shadow_same_object(bbox, rbbox):
+        continue
+      iou = float(self._bbox_iou(bbox, rbbox))
+      rank = (iou, float(result.get("confidence", 0.0)))
+      if rank > best_rank:
+        best = result
+        best_rank = rank
+    return best
+
+  def _shadow_capture_after_ocr(self, frame_bgr, bbox, read, source: str) -> None:
+    if read is None or bbox is None:
+      return
+    result = self._shadow_result_for_bbox(bbox)
+    if result is None:
+      return
+
+    class_name = str(result.get("class_name", ""))
+    if class_name not in SHADOW_CLASSES:
+      return
+    v3_conf = float(result.get("confidence", 0.0))
+    crop_consensus = float(result.get("crop_consensus", 0.0))
+    ocr_speed = int(read.speed_limit_mph)
+    ocr_conf = float(read.confidence)
+    numeric_v3 = class_name in {str(x) for x in SUPPORTED_UK_LIMITS_MPH}
+
+    reason = ""
+    if (
+      numeric_v3 and int(class_name) != ocr_speed and
+      v3_conf >= SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE and
+      ocr_conf >= SHADOW_CAPTURE_OCR_MIN_CONFIDENCE and
+      crop_consensus >= SHADOW_CAPTURE_OCR_CROP_CONSENSUS
+    ):
+      reason = "V3_OCR_CONFLICT"
+    elif (
+      numeric_v3 and int(class_name) == ocr_speed and
+      v3_conf >= SHADOW_CAPTURE_AGREE_V3_CONFIDENCE and
+      ocr_conf >= SHADOW_CAPTURE_AGREE_OCR_CONFIDENCE and
+      crop_consensus >= SHADOW_CAPTURE_OCR_CROP_CONSENSUS
+    ):
+      reason = "V3_OCR_AGREE"
+    if not reason:
+      return
+
+    now = time.monotonic()
+    ocr_consensus_speed, ocr_count, ocr_consensus_conf = self._shadow_ocr_consensus(now, bbox)
+    self._shadow_capture_sample(
+      frame_bgr, bbox, "V3_UNCERTAIN",
+      class_name, v3_conf, crop_consensus,
+      ocr_consensus_speed or ocr_speed, max(ocr_count, 1),
+      ocr_consensus_conf or ocr_conf,
+      int(result.get("legacy_speed_mph", 0)), source,
+      capture_reason=reason,
+    )
+
+  def _shadow_capture_without_ocr(self, frame_bgr, bbox, source: str) -> None:
+    result = self._shadow_result_for_bbox(bbox)
+    if result is None:
+      return
+    class_name = str(result.get("class_name", ""))
+    if class_name not in {str(x) for x in SUPPORTED_UK_LIMITS_MPH}:
+      return
+    v3_conf = float(result.get("confidence", 0.0))
+    crop_consensus = float(result.get("crop_consensus", 0.0))
+    if (
+      v3_conf < SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE or
+      crop_consensus < SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS
+    ):
+      return
+    self._shadow_capture_sample(
+      frame_bgr, bbox, "V3_UNCERTAIN",
+      class_name, v3_conf, crop_consensus,
+      0, 0, 0.0, int(result.get("legacy_speed_mph", 0)), source,
+      capture_reason="V3_SINGLE_STRONG",
+    )
 
   def _shadow_update_temporal(self, class_name: str, confidence: float,
                               crop_consensus: float, bbox,
@@ -1408,6 +1517,7 @@ class SpeedLimitVisionUK:
           "class_name": class_name,
           "confidence": confidence,
           "crop_consensus": crop_consensus,
+          "created_at": time.monotonic(),
           "bbox": cluster["bbox"],
           "legacy_speed_mph": cluster["legacy_speed_mph"],
           "model_confidence": cluster["model_confidence"],
@@ -1423,6 +1533,7 @@ class SpeedLimitVisionUK:
         )
 
       if results:
+        self._shadow_last_results = list(results)
         best = max(
           results,
           key=lambda r: r["confidence"] * (0.50 + 0.50 * r["crop_consensus"]),
@@ -1439,6 +1550,18 @@ class SpeedLimitVisionUK:
             temporal["ocr_count"], temporal["ocr_confidence"],
             temporal["legacy_speed_mph"], source,
           )
+          if (
+            best["class_name"] == "OTHER" and
+            best["confidence"] >= SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE and
+            best["crop_consensus"] >= SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS
+          ):
+            self._shadow_capture_sample(
+              frame_bgr, best["bbox"], temporal["decision"],
+              best["class_name"], best["confidence"], best["crop_consensus"],
+              temporal["ocr_speed"], temporal["ocr_count"],
+              temporal["ocr_confidence"], best["legacy_speed_mph"], source,
+              capture_reason="V3_SINGLE_OTHER",
+            )
     except Exception:
       self.shadow_net = None
       self._shadow_clear_diagnostics("inference_error")
@@ -2215,6 +2338,7 @@ class SpeedLimitVisionUK:
           "reject", speed_mph, model_conf, uk_score, partial_score,
           ring_reason, ring_details, bbox,
         )
+        self._shadow_capture_without_ocr(frame_bgr, bbox, "ring_reject")
         continue
 
       value_read = self.value_reader.read(crop) if self.value_reader is not None else None
@@ -2230,9 +2354,14 @@ class SpeedLimitVisionUK:
             ring_reason, ring_details, bbox,
           )
         self._log_ocr_reject("detector_partial" if partial_path else "detector", bbox)
+        self._shadow_capture_without_ocr(
+          frame_bgr, bbox, "detector_partial" if partial_path else "detector"
+        )
         continue
 
-      self._log_ocr_accept("detector_partial" if partial_path else "detector", value_read, bbox)
+      ocr_source = "detector_partial" if partial_path else "detector"
+      self._log_ocr_accept(ocr_source, value_read, bbox)
+      self._shadow_capture_after_ocr(frame_bgr, bbox, value_read, ocr_source)
 
       if partial_path and not self._partial_numeric_read_is_clear(value_read):
         self._log_raw_proposal(
