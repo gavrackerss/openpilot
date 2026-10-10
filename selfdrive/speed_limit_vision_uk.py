@@ -21,7 +21,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.12-UK
+# XNOR Vision Speed Limit V1.13-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -44,6 +44,12 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # sign is classified at tight/normal/wide crop scales, and repeated detector/
 # tracking observations build a short temporal consensus. Four diagnostic Params
 # expose the shadow result for live testing; none are consumed by control.
+#
+# V1.13 / V241 adds repeated-OCR conflict semantics and bounded hard-example
+# capture. Mature V3 disagreement with repeated OCR is explicitly V3_CONFLICT;
+# mature V3 agreement with a raw OCR read that the authoritative path did not
+# publish is V3_RESCUE. Selected sign crops only (never full frames) are stored
+# locally for the next real-data retraining pass. V3 remains shadow-only.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -60,6 +66,14 @@ SHADOW_TEMPORAL_SECONDS = 2.0
 SHADOW_DIAGNOSTIC_HOLD_SECONDS = 5.0
 SHADOW_MIN_DECISION_CONFIDENCE = 0.60
 SHADOW_MIN_DECISION_CONSENSUS = 0.60
+SHADOW_OCR_SECONDS = 2.5
+SHADOW_OCR_REQUIRED = 2
+SHADOW_OCR_MIN_CONFIDENCE = 0.72
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v241")
+SHADOW_CAPTURE_MAX_FILES = 160
+SHADOW_CAPTURE_INTERVAL = 0.75
+SHADOW_CAPTURE_MAX_SIDE = 256
+SHADOW_CAPTURE_JPEG_QUALITY = 88
 
 # The comma/AGNOS Python environment does not automatically re-resolve
 # pyproject.toml when a changed-files overlay is installed. Carry a pinned
@@ -191,6 +205,15 @@ class ShadowHistoryEntry:
   created_at: float
 
 
+@dataclass
+class ShadowOcrEntry:
+  speed_limit_mph: int
+  confidence: float
+  created_at: float
+  bbox: tuple[int, int, int, int] | None
+  source: str
+
+
 class SpeedLimitVisionUK:
   def __init__(self):
     self.params = Params()
@@ -201,12 +224,16 @@ class SpeedLimitVisionUK:
     self.shadow_net = None
     self._shadow_last_log_by_key = {}
     self._shadow_history: deque[ShadowHistoryEntry] = deque()
+    self._shadow_ocr_history: deque[ShadowOcrEntry] = deque()
     self._shadow_track_bbox = None
+    self._shadow_event_anchor_class = ""
     self._shadow_last_observation_at = 0.0
     self._shadow_last_track_inference_at = -1e9
     self._shadow_last_param_at = -1e9
     self._shadow_last_param_signature = None
     self._shadow_diag_active = False
+    self._shadow_last_capture_at = -1e9
+    self._shadow_capture_count = 0
     self.value_reader = None
     self.national_reader = None
     self.client = None
@@ -471,7 +498,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.12: ready")
+      self._set_status("UK vision V1.13: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
@@ -998,12 +1025,52 @@ class SpeedLimitVisionUK:
           break
     return boxes[:3]
 
+  def _shadow_record_ocr(self, source: str, speed_limit_mph: int,
+                         confidence: float, bbox=None) -> None:
+    now = time.monotonic()
+    entry = ShadowOcrEntry(
+      int(speed_limit_mph), float(confidence), float(now),
+      tuple(int(v) for v in bbox) if bbox is not None else None,
+      str(source),
+    )
+    self._shadow_ocr_history.append(entry)
+    while self._shadow_ocr_history and now - self._shadow_ocr_history[0].created_at > SHADOW_OCR_SECONDS:
+      self._shadow_ocr_history.popleft()
+
+  def _shadow_ocr_consensus(self, now: float, bbox=None):
+    while self._shadow_ocr_history and now - self._shadow_ocr_history[0].created_at > SHADOW_OCR_SECONDS:
+      self._shadow_ocr_history.popleft()
+    entries = []
+    for entry in self._shadow_ocr_history:
+      if bbox is not None and entry.bbox is not None and not self._shadow_same_object(bbox, entry.bbox):
+        continue
+      if entry.confidence >= SHADOW_OCR_MIN_CONFIDENCE:
+        entries.append(entry)
+    if not entries:
+      return 0, 0, 0.0
+
+    weights = Counter()
+    counts = Counter()
+    confs = Counter()
+    for entry in entries:
+      weights[entry.speed_limit_mph] += max(entry.confidence, 0.01)
+      counts[entry.speed_limit_mph] += 1
+      confs[entry.speed_limit_mph] += entry.confidence
+    speed, _score = max(weights.items(), key=lambda kv: kv[1])
+    count = int(counts[speed])
+    avg_conf = float(confs[speed]) / max(count, 1)
+    return int(speed), count, avg_conf
+
   def _shadow_write_params(self, class_name: str, confidence: float,
-                           consensus: float, now: float) -> None:
+                           consensus: float, decision: str,
+                           ocr_speed: int, ocr_count: int, now: float) -> None:
     signature = (
       str(class_name),
       round(float(confidence), 2),
       round(float(consensus), 2),
+      str(decision),
+      int(ocr_speed),
+      int(ocr_count),
     )
     if (
       signature == self._shadow_last_param_signature and
@@ -1017,14 +1084,19 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitV3Class", str(class_name))
       self.params.put_nonblocking("VisionSpeedLimitV3Confidence", float(confidence))
       self.params.put_nonblocking("VisionSpeedLimitV3Consensus", float(consensus))
+      self.params.put_nonblocking("VisionSpeedLimitV3Decision", str(decision))
+      self.params.put_nonblocking("VisionSpeedLimitV3OcrClass", str(ocr_speed) if ocr_speed > 0 else "")
+      self.params.put_nonblocking("VisionSpeedLimitV3OcrCount", int(ocr_count))
       self.params.put_nonblocking("VisionSpeedLimitV3Timestamp", float(now))
     except Exception:
       pass
 
   def _shadow_clear_diagnostics(self, reason: str) -> None:
-    had = self._shadow_diag_active or bool(self._shadow_history)
+    had = self._shadow_diag_active or bool(self._shadow_history) or bool(self._shadow_ocr_history)
     self._shadow_history.clear()
+    self._shadow_ocr_history.clear()
     self._shadow_track_bbox = None
+    self._shadow_event_anchor_class = ""
     self._shadow_last_observation_at = 0.0
     self._shadow_last_param_signature = None
     self._shadow_diag_active = False
@@ -1032,22 +1104,110 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitV3Class", "")
       self.params.put_nonblocking("VisionSpeedLimitV3Confidence", 0.0)
       self.params.put_nonblocking("VisionSpeedLimitV3Consensus", 0.0)
+      self.params.put_nonblocking("VisionSpeedLimitV3Decision", "")
+      self.params.put_nonblocking("VisionSpeedLimitV3OcrClass", "")
+      self.params.put_nonblocking("VisionSpeedLimitV3OcrCount", 0)
       self.params.put_nonblocking("VisionSpeedLimitV3Timestamp", 0.0)
     except Exception:
       pass
     if had:
       cloudlog.info(f"[XNOR_VSL_V3_SHADOW] clear diagnostics reason={reason} authoritative=0")
 
+  def _shadow_capture_sample(self, frame_bgr, bbox, decision: str,
+                             class_name: str, confidence: float,
+                             consensus: float, ocr_speed: int,
+                             ocr_count: int, source: str) -> None:
+    if frame_bgr is None or bbox is None:
+      return
+    now = time.monotonic()
+    if now - self._shadow_last_capture_at < SHADOW_CAPTURE_INTERVAL:
+      return
+    if decision not in ("V3_CONFLICT", "V3_RESCUE", "V3_OTHER"):
+      return
+    if confidence < 0.72 or consensus < 0.55:
+      return
+    if decision == "V3_OTHER" and confidence < 0.85:
+      return
+
+    try:
+      frame_h, frame_w = frame_bgr.shape[:2]
+      expanded = self._expand_bbox(bbox, frame_w, frame_h, 0.45)
+      if expanded is None:
+        return
+      x1, y1, x2, y2 = expanded
+      crop = frame_bgr[y1:y2, x1:x2]
+      if crop is None or crop.size == 0:
+        return
+      h, w = crop.shape[:2]
+      scale = min(1.0, SHADOW_CAPTURE_MAX_SIDE / max(h, w, 1))
+      if scale < 1.0:
+        crop = self.cv2.resize(
+          crop,
+          (max(int(round(w * scale)), 1), max(int(round(h * scale)), 1)),
+          interpolation=self.cv2.INTER_AREA,
+        )
+
+      SHADOW_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+      jpgs = sorted(
+        SHADOW_CAPTURE_DIR.glob("*.jpg"),
+        key=lambda p: p.stat().st_mtime,
+      )
+      while len(jpgs) >= SHADOW_CAPTURE_MAX_FILES:
+        try:
+          jpgs.pop(0).unlink()
+        except OSError:
+          break
+
+      stamp = int(time.time() * 1000.0)
+      safe_source = "".join(c if c.isalnum() or c in "_-" else "_" for c in str(source))[:28]
+      name = (
+        f"{stamp}_{decision}_{class_name}_c{confidence:.2f}_"
+        f"k{consensus:.2f}_ocr{int(ocr_speed)}x{int(ocr_count)}_{safe_source}.jpg"
+      )
+      target = SHADOW_CAPTURE_DIR / name
+      ok = self.cv2.imwrite(
+        str(target), crop,
+        [int(self.cv2.IMWRITE_JPEG_QUALITY), int(SHADOW_CAPTURE_JPEG_QUALITY)],
+      )
+      if not ok:
+        return
+      self._shadow_last_capture_at = float(now)
+      self._shadow_capture_count += 1
+      try:
+        with (SHADOW_CAPTURE_DIR / "manifest.jsonl").open("a", encoding="utf-8") as mf:
+          mf.write(json.dumps({
+            "file": name,
+            "decision": decision,
+            "v3_class": class_name,
+            "v3_confidence": round(float(confidence), 5),
+            "v3_consensus": round(float(consensus), 5),
+            "ocr_speed_mph": int(ocr_speed),
+            "ocr_count": int(ocr_count),
+            "source": str(source),
+            "monotonic": round(float(now), 5),
+          }, separators=(",", ":")) + "\n")
+      except Exception:
+        pass
+      cloudlog.info(
+        f"[XNOR_VSL_V3_CAPTURE] file={name} decision={decision} "
+        f"class={class_name} confidence={confidence:.3f} consensus={consensus:.3f} "
+        f"ocr={int(ocr_speed)}x{int(ocr_count)} count={self._shadow_capture_count}"
+      )
+    except Exception:
+      cloudlog.exception("[XNOR_VSL_V3_CAPTURE] crop capture failed")
+
   def _shadow_update_temporal(self, class_name: str, confidence: float,
                               crop_consensus: float, bbox,
-                              legacy_speed_mph: int, source: str) -> None:
+                              legacy_speed_mph: int, source: str):
     now = time.monotonic()
-    if (
+    new_object = (
       self._shadow_track_bbox is None or
       now - self._shadow_last_observation_at > SHADOW_TEMPORAL_SECONDS or
       not self._shadow_same_object(bbox, self._shadow_track_bbox)
-    ):
+    )
+    if new_object:
       self._shadow_history.clear()
+      self._shadow_event_anchor_class = ""
 
     self._shadow_track_bbox = bbox
     self._shadow_last_observation_at = float(now)
@@ -1072,7 +1232,7 @@ class SpeedLimitVisionUK:
       crop_weighted[entry.class_name] += entry.crop_consensus * weight
 
     if not scores:
-      return
+      return None
     winner, winner_score = max(scores.items(), key=lambda kv: kv[1])
     total_score = max(float(sum(scores.values())), 1e-9)
     temporal_share = float(winner_score) / total_score
@@ -1084,33 +1244,72 @@ class SpeedLimitVisionUK:
     overall_consensus = float(np.clip(
       temporal_share * aggregate_crop * temporal_maturity, 0.0, 1.0
     ))
+    ocr_speed, ocr_count, ocr_conf = self._shadow_ocr_consensus(now, bbox)
 
-    if (
-      observations < 2 or
-      aggregate_conf < SHADOW_MIN_DECISION_CONFIDENCE or
-      overall_consensus < SHADOW_MIN_DECISION_CONSENSUS
-    ):
+    mature = (
+      observations >= 2 and
+      aggregate_conf >= SHADOW_MIN_DECISION_CONFIDENCE and
+      overall_consensus >= SHADOW_MIN_DECISION_CONSENSUS
+    )
+    numeric_winner = winner in {str(x) for x in SUPPORTED_UK_LIMITS_MPH}
+
+    if not mature:
       decision = "V3_UNCERTAIN"
+    elif self._shadow_event_anchor_class and winner != self._shadow_event_anchor_class:
+      decision = "V3_CONFLICT"
+    elif (
+      numeric_winner and ocr_count >= SHADOW_OCR_REQUIRED and
+      ocr_conf >= SHADOW_OCR_MIN_CONFIDENCE and int(winner) != int(ocr_speed)
+    ):
+      decision = "V3_CONFLICT"
     elif winner == "OTHER":
       decision = "V3_OTHER"
     elif winner == "NSL" and source.startswith("national"):
       decision = "V3_CONFIRM"
-    elif winner in {str(x) for x in SUPPORTED_UK_LIMITS_MPH} and int(winner) == int(legacy_speed_mph):
+    elif (
+      numeric_winner and ocr_count >= 1 and int(winner) == int(ocr_speed) and
+      int(self.published_speed_limit_mph) != int(winner)
+    ):
+      decision = "V3_RESCUE"
+    elif numeric_winner and ocr_count >= 1 and int(winner) == int(ocr_speed):
       decision = "V3_CONFIRM"
-    elif winner in {str(x) for x in SUPPORTED_UK_LIMITS_MPH} and int(legacy_speed_mph) > 0:
+    elif numeric_winner and int(winner) == int(legacy_speed_mph):
+      decision = "V3_CONFIRM"
+    elif numeric_winner and int(legacy_speed_mph) > 0:
       decision = "V3_DISAGREE"
     else:
       decision = "V3_UNCERTAIN"
 
-    self._shadow_write_params(winner, aggregate_conf, overall_consensus, now)
+    if (
+      mature and not self._shadow_event_anchor_class and numeric_winner and
+      ((ocr_count >= SHADOW_OCR_REQUIRED and int(winner) == int(ocr_speed)) or
+       int(self.published_speed_limit_mph) == int(winner))
+    ):
+      self._shadow_event_anchor_class = str(winner)
+
+    self._shadow_write_params(
+      winner, aggregate_conf, overall_consensus, decision,
+      ocr_speed, ocr_count, now,
+    )
     bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
     cloudlog.info(
       f"[XNOR_VSL_V3_CONSENSUS] source={source} class={winner} "
       f"confidence={aggregate_conf:.3f} consensus={overall_consensus:.3f} "
       f"observations={observations} history={len(self._shadow_history)} "
-      f"legacy={int(legacy_speed_mph)} decision={decision} "
-      f"bbox={bbox_text} authoritative=0"
+      f"legacy={int(legacy_speed_mph)} ocr={int(ocr_speed)}x{int(ocr_count)} "
+      f"ocrConf={float(ocr_conf):.3f} anchor={self._shadow_event_anchor_class or 'none'} "
+      f"decision={decision} bbox={bbox_text} authoritative=0"
     )
+    return {
+      "decision": decision,
+      "class_name": winner,
+      "confidence": aggregate_conf,
+      "consensus": overall_consensus,
+      "observations": observations,
+      "ocr_speed": ocr_speed,
+      "ocr_count": ocr_count,
+      "ocr_confidence": ocr_conf,
+    }
 
   def _log_shadow_prediction(self, source: str, class_name: str, confidence: float,
                              crop_consensus: float, crops: int,
@@ -1221,10 +1420,17 @@ class SpeedLimitVisionUK:
           results,
           key=lambda r: r["confidence"] * (0.50 + 0.50 * r["crop_consensus"]),
         )
-        self._shadow_update_temporal(
+        temporal = self._shadow_update_temporal(
           best["class_name"], best["confidence"], best["crop_consensus"],
           best["bbox"], best["legacy_speed_mph"], source,
         )
+        if temporal is not None:
+          self._shadow_capture_sample(
+            frame_bgr, best["bbox"], temporal["decision"],
+            temporal["class_name"], temporal["confidence"],
+            temporal["consensus"], temporal["ocr_speed"],
+            temporal["ocr_count"], source,
+          )
     except Exception:
       self.shadow_net = None
       self._shadow_clear_diagnostics("inference_error")
@@ -1865,6 +2071,9 @@ class SpeedLimitVisionUK:
       f"[XNOR_VSL_V12UK] ocr_accept source={source} speed={int(read.speed_limit_mph)}mph "
       f"confidence={float(read.confidence):.3f} method={method} "
       f"elapsedMs={elapsed_ms:.1f} bbox={bbox_text}"
+    )
+    self._shadow_record_ocr(
+      source, int(read.speed_limit_mph), float(read.confidence), bbox
     )
 
   def _detect(self, frame_bgr):
