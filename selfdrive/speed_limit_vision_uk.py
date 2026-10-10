@@ -22,7 +22,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.14-UK
+# XNOR Vision Speed Limit V1.15-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -58,6 +58,10 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # strong OTHER, V3/OCR conflicts, strong V3/OCR agreement, and strong numeric V3
 # results when OCR/ring gating cannot produce a value. These samples remain review
 # data only and still have zero influence on speed-limit arbitration or control.
+#
+# V1.15 / V243 only widens no-OCR hard-example capture: a unanimous numeric V3
+# observation is saved from 0.85 confidence instead of 0.90. Recognition,
+# arbitration and control thresholds are unchanged.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -77,13 +81,13 @@ SHADOW_MIN_DECISION_CONSENSUS = 0.60
 SHADOW_OCR_SECONDS = 2.5
 SHADOW_OCR_REQUIRED = 2
 SHADOW_OCR_MIN_CONFIDENCE = 0.72
-SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v242")
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v243")
 SHADOW_CAPTURE_MAX_FILES = 160
 SHADOW_CAPTURE_INTERVAL = 0.75
 SHADOW_CAPTURE_MAX_SIDE = 256
 SHADOW_CAPTURE_JPEG_QUALITY = 88
 SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE = 0.84
-SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE = 0.90
+SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE = 0.85
 SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS = 0.99
 SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE = 0.45
 SHADOW_CAPTURE_OCR_MIN_CONFIDENCE = 0.55
@@ -515,7 +519,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.14: ready")
+      self._set_status("UK vision V1.15: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
