@@ -1,0 +1,139 @@
+name: V242 VSL V3 capture fix
+
+on:
+  push:
+    branches:
+      - xnor-dev-v242-vsl-v3-capture-fix
+    paths:
+      - .github/workflows/v242-vsl-v3-capture-fix.yml
+      - selfdrive/speed_limit_vision_uk.py
+      - selfdrive/vsl_v3/export_shadow_samples.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check numpy
+
+      - name: Syntax check
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify shadow-only boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'V1.14 / V242' selfdrive/speed_limit_vision_uk.py
+          grep -q 'xnor_vsl_shadow_samples/v242' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_OCR_CONFLICT' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_OCR_AGREE' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_SINGLE_OTHER' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_SINGLE_STRONG' selfdrive/speed_limit_vision_uk.py
+          # V242 must not introduce any consumer of V3 diagnostics into control.
+          if git diff xnor-dev...HEAD -- selfdrive/speed_limit_vision_uk.py selfdrive/vsl_v3/export_shadow_samples.py | grep -E '^\+.*(VisionSpeedLimit|VisionSpeedLimitCandidate).*='; then
+            echo "Unexpected authoritative speed-limit assignment added by V242"
+            exit 1
+          fi
+
+      - name: Exercise single-observation OCR capture selection
+        run: |
+          python - <<'PY'
+          import ast
+          from dataclasses import dataclass
+          import time as _time
+
+          path = "selfdrive/speed_limit_vision_uk.py"
+          tree = ast.parse(open(path).read(), path)
+          cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SpeedLimitVisionUK")
+          wanted = {"_bbox_iou", "_shadow_same_object", "_shadow_result_for_bbox", "_shadow_capture_after_ocr"}
+          methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+          mod = ast.fix_missing_locations(ast.Module(body=[
+            ast.ClassDef(name="T", bases=[], keywords=[], body=methods, decorator_list=[])
+          ], type_ignores=[]))
+
+          class FakeTime:
+            t = 100.0
+            @classmethod
+            def monotonic(cls):
+              return cls.t
+
+          class Read:
+            def __init__(self, speed, confidence):
+              self.speed_limit_mph = speed
+              self.confidence = confidence
+
+          ns = {
+            "time": FakeTime,
+            "SUPPORTED_UK_LIMITS_MPH": frozenset((20,30,40,50,60,70)),
+            "SHADOW_CLASSES": ("20","30","40","50","60","70","NSL","OTHER"),
+            "SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE": 0.45,
+            "SHADOW_CAPTURE_OCR_MIN_CONFIDENCE": 0.55,
+            "SHADOW_CAPTURE_OCR_CROP_CONSENSUS": 0.66,
+            "SHADOW_CAPTURE_AGREE_V3_CONFIDENCE": 0.70,
+            "SHADOW_CAPTURE_AGREE_OCR_CONFIDENCE": 0.72,
+          }
+          exec(compile(mod, path, "exec"), ns)
+          t = ns["T"]()
+          calls = []
+          t._shadow_capture_sample = lambda *a, **kw: calls.append((a, kw))
+          t._shadow_ocr_consensus = lambda now, bbox: (0, 0, 0.0)
+
+          box = (100,100,150,150)
+          t._shadow_last_results = [{
+            "created_at":100.0, "bbox":box, "class_name":"20", "confidence":0.739,
+            "crop_consensus":1.0, "legacy_speed_mph":40,
+          }]
+          t._shadow_capture_after_ocr(None, box, Read(40, .617), "numeric_track")
+          assert calls and calls[-1][1]["capture_reason"] == "V3_OCR_CONFLICT", calls
+
+          calls.clear()
+          t._shadow_last_results = [{
+            "created_at":100.0, "bbox":box, "class_name":"30", "confidence":0.924,
+            "crop_consensus":1.0, "legacy_speed_mph":30,
+          }]
+          t._shadow_capture_after_ocr(None, box, Read(30, .806), "detector")
+          assert calls and calls[-1][1]["capture_reason"] == "V3_OCR_AGREE", calls
+
+          calls.clear()
+          t._shadow_last_results = [{
+            "created_at":100.0, "bbox":box, "class_name":"40", "confidence":0.419,
+            "crop_consensus":.333, "legacy_speed_mph":50,
+          }]
+          t._shadow_capture_after_ocr(None, box, Read(40, .793), "detector")
+          assert not calls, calls
+
+          calls.clear()
+          FakeTime.t = 102.0
+          t._shadow_last_results = [{
+            "created_at":100.0, "bbox":box, "class_name":"20", "confidence":0.9,
+            "crop_consensus":1.0, "legacy_speed_mph":40,
+          }]
+          t._shadow_capture_after_ocr(None, box, Read(40, .9), "detector")
+          assert not calls, calls
+
+          print("V242 capture selection tests: PASS")
+          PY
+
+      - name: Package changed sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: v242-vsl-v3-capture-fix-source
+          path: |
+            selfdrive/speed_limit_vision_uk.py
+            selfdrive/vsl_v3/export_shadow_samples.py
+          retention-days: 14
