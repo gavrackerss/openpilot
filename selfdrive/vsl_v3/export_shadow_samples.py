@@ -7,8 +7,8 @@ import json
 import zipfile
 from pathlib import Path
 
-DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v243")
-DEFAULT_OUTPUT = Path("/data/media/0/v243_shadow_samples.zip")
+DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v244")
+DEFAULT_OUTPUT = Path("/data/media/0/v244_shadow_samples.zip")
 
 
 def suggested_label(row: dict) -> tuple[str, str]:
@@ -24,6 +24,8 @@ def suggested_label(row: dict) -> tuple[str, str]:
 
   if decision == "V3_CONFLICT" and ocr_count >= 2 and ocr_conf >= 0.72 and ocr_speed > 0:
     return str(ocr_speed), "repeated_ocr_conflict"
+  if decision == "V3_DISAGREE":
+    return "", "mature_v3_legacy_disagreement_review"
   if decision == "V3_RESCUE" and ocr_count >= 1 and str(ocr_speed) == v3_class:
     return v3_class, "v3_matches_raw_ocr"
   if reason in ("V3_OTHER", "V3_SINGLE_OTHER"):
@@ -98,7 +100,7 @@ def main() -> None:
       p = args.source / str(row["file"])
       zf.write(p, f"crops/{p.name}")
 
-  print(f"V243 shadow samples: {len(rows)}")
+  print(f"V244 shadow samples: {len(rows)}")
   print(f"Review CSV: {review_csv}")
   print(f"Package: {args.output}")
 

@@ -425,7 +425,11 @@ class CarController(CarControllerBase):
     if op_request:
       if native_lkas:
         return 'NATIVE_LKAS_BLOCK'
-      if coop_failed or coop_rearm or not epas_healthy:
+      # V244: on the direct OP path, match original xnor / Unity and do not
+      # deadlock ALC waiting for EAC_ACTIVE before allowing the steering
+      # trajectory that is itself needed to establish/retain EPAS authority.
+      # Genuine co-op rearm/failure remains a hard block.
+      if coop_failed or coop_rearm:
         return 'WAIT_EPAS'
       return 'OP_IDLE_CARRIER'
     return 'IDLE'
@@ -1670,7 +1674,7 @@ class CarController(CarControllerBase):
 
     alc_route = (self._v211_lane_change_route(
       native_alc_active=native_alc_owns_steer, native_lkas=native_ap_lateral_active,
-      op_request=op_alc_requested, epas_healthy=(real_epas_healthy and (native_ap_lateral_active or v212_ready)),
+      op_request=op_alc_requested, epas_healthy=real_epas_healthy,
       coop_rearm=bool(self._hybrid_coop_rearm), coop_failed=bool(self._hybrid_coop_failed))
       if hybrid_native_ap else 'IDLE')
     if op_alc_requested and alc_route == 'WAIT_EPAS':

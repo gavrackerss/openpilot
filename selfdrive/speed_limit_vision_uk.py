@@ -22,7 +22,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.15-UK
+# XNOR Vision Speed Limit V1.16-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -62,6 +62,10 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # V1.15 / V243 only widens no-OCR hard-example capture: a unanimous numeric V3
 # observation is saved from 0.85 confidence instead of 0.90. Recognition,
 # arbitration and control thresholds are unchanged.
+#
+# V1.16 / V244 starts a clean validation capture set for the hard-example
+# retrain and also retains mature V3_DISAGREE crops. The classifier remains
+# shadow-only: no V3 result can publish or arbitrate a speed limit.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -81,7 +85,7 @@ SHADOW_MIN_DECISION_CONSENSUS = 0.60
 SHADOW_OCR_SECONDS = 2.5
 SHADOW_OCR_REQUIRED = 2
 SHADOW_OCR_MIN_CONFIDENCE = 0.72
-SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v243")
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v244")
 SHADOW_CAPTURE_MAX_FILES = 160
 SHADOW_CAPTURE_INTERVAL = 0.75
 SHADOW_CAPTURE_MAX_SIDE = 256
@@ -519,7 +523,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.15: ready")
+      self._set_status("UK vision V1.16: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
@@ -1146,7 +1150,7 @@ class SpeedLimitVisionUK:
     if now - self._shadow_last_capture_at < SHADOW_CAPTURE_INTERVAL:
       return
     reason = str(capture_reason or decision)
-    mature_reason = reason in ("V3_CONFLICT", "V3_RESCUE", "V3_OTHER")
+    mature_reason = reason in ("V3_CONFLICT", "V3_RESCUE", "V3_OTHER", "V3_DISAGREE")
     single_reason = reason in (
       "V3_SINGLE_OTHER", "V3_OCR_CONFLICT", "V3_OCR_AGREE", "V3_SINGLE_STRONG",
     )
