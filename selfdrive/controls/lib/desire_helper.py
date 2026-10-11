@@ -113,6 +113,11 @@ class DesireHelper:
     # only on the existing idle native carrier / OP-only steering path.
     return not (bool(hybrid_native_ap) and bool(native_lkas))
 
+  @staticmethod
+  def _v244_direct_alc_ready(hybrid_native_ap: bool, native_lkas: bool) -> bool:
+    """Use Unity/xnor ALC flow unless native Tesla lateral is actually active."""
+    return bool((not hybrid_native_ap) or (not native_lkas))
+
   def update(self, carstate, lateral_active: bool, lane_change_prob: float) -> None:
     self._poll_tinkla_params()
 
@@ -125,7 +130,7 @@ class DesireHelper:
     # hold an OP lane change behind the EPAS handover gate. The existing
     # TinklaALCDelay still controls auto-start timing. A live native 0x488
     # remains exclusive and blocks the independent OP trajectory.
-    tesla_handover_ready = bool((not self._v211_hybrid_native_ap) or (not native_lkas))
+    tesla_handover_ready = self._v244_direct_alc_ready(self._v211_hybrid_native_ap, native_lkas)
     one_blinker = bool(physical_one_blinker and op_lane_change_allowed)
 
     if self._v211_hybrid_native_ap and tesla_handover_ready != bool(self._alc_gate_prev_ready):
