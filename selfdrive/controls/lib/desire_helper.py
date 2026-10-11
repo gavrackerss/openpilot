@@ -120,10 +120,12 @@ class DesireHelper:
     physical_one_blinker = carstate.leftBlinker != carstate.rightBlinker
     native_lkas = bool(getattr(carstate, 'stockLkas', False))
     op_lane_change_allowed = self._v211_op_lane_change_allowed(self._v211_hybrid_native_ap, native_lkas)
-    tesla_handover_ready = bool(
-      (not self._v211_hybrid_native_ap) or
-      bool(getattr(carstate, 'teslaAlcHandoverReady', False))
-    )
+    # V244: match original xnor / Unity whenever native Tesla lateral is not
+    # actually active. Hybrid being configured is not, by itself, a reason to
+    # hold an OP lane change behind the EPAS handover gate. The existing
+    # TinklaALCDelay still controls auto-start timing. A live native 0x488
+    # remains exclusive and blocks the independent OP trajectory.
+    tesla_handover_ready = bool((not self._v211_hybrid_native_ap) or (not native_lkas))
     one_blinker = bool(physical_one_blinker and op_lane_change_allowed)
 
     if self._v211_hybrid_native_ap and tesla_handover_ready != bool(self._alc_gate_prev_ready):
@@ -150,14 +152,13 @@ class DesireHelper:
     # tracking guard remains in force otherwise. No full-detent/availability spoof.
     below_lane_change_speed = v_ego < LANE_CHANGE_SPEED_MIN
 
-    # V1.1 Hybrid ALC: if physical steering readiness disappears after the
-    # model has started a lane-change desire, terminate that desire immediately.
-    # prev_one_blinker below remains true while the stalk is held, so a fresh
-    # off->on indicator edge is required before another attempt.
+    # V244: only a genuine native-lateral takeover aborts an OP lane change.
+    # EAC AVAILABLE by itself no longer cancels the Unity/xnor-style direct OP
+    # path; downstream co-op rearm/failure protection remains authoritative.
     hybrid_gate_abort = bool(
       self._v211_hybrid_native_ap and
       self.lane_change_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing) and
-      not tesla_handover_ready
+      native_lkas
     )
     if hybrid_gate_abort:
       cloudlog.warning(
@@ -208,7 +209,7 @@ class DesireHelper:
           now = time.monotonic()
           if now - self._alc_gate_last_log_t >= 1.0:
             cloudlog.warning(
-              f"[XNOR_ALC_MODEL_GATE] waiting_epas=1 "
+              f"[XNOR_ALC_MODEL_GATE] waiting_native_release=1 "
               f"direction={self.lane_change_direction} "
               f"eac={int(getattr(carstate, 'teslaEacStatus', 0))} "
               f"error={int(getattr(carstate, 'teslaEacError', 0))} "
