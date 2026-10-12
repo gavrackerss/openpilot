@@ -1595,6 +1595,10 @@ class SpeedLimitVisionUK:
               temporal["ocr_confidence"], best["legacy_speed_mph"], source,
               capture_reason="V3_SINGLE_OTHER",
             )
+          if source.startswith("national"):
+            # National-sign candidates do not pass through the numeric OCR path,
+            # so explicitly save low-confidence NSL/OTHER/numeric V3 views here.
+            self._shadow_capture_without_ocr(frame_bgr, best["bbox"], source)
     except Exception:
       self.shadow_net = None
       self._shadow_clear_diagnostics("inference_error")
