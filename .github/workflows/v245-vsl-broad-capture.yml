@@ -1,0 +1,92 @@
+name: V245 VSL broad capture
+
+on:
+  push:
+    branches:
+      - xnor-dev-v245-vsl-broad-capture
+    paths:
+      - .github/workflows/v245-vsl-broad-capture.yml
+      - selfdrive/speed_limit_vision_uk.py
+      - selfdrive/vsl_v3/export_shadow_samples.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax check
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify capture-only thresholds
+        run: |
+          python - <<'PY'
+          import ast
+          p = "selfdrive/speed_limit_vision_uk.py"
+          tree = ast.parse(open(p).read(), p)
+          vals = {}
+          for n in tree.body:
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+              name = n.targets[0].id
+              if name.startswith("SHADOW_"):
+                try:
+                  vals[name] = ast.literal_eval(n.value)
+                except Exception:
+                  pass
+
+          assert vals["SHADOW_MIN_DECISION_CONFIDENCE"] == 0.60
+          assert vals["SHADOW_MIN_DECISION_CONSENSUS"] == 0.60
+          assert vals["SHADOW_OCR_MIN_CONFIDENCE"] == 0.72
+          assert vals["SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE"] == 0.35
+          assert vals["SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE"] == 0.45
+          assert vals["SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS"] == 0.33
+          assert vals["SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE"] == 0.30
+          assert vals["SHADOW_CAPTURE_OCR_MIN_CONFIDENCE"] == 0.30
+          assert vals["SHADOW_CAPTURE_OCR_CROP_CONSENSUS"] == 0.33
+          assert vals["SHADOW_CAPTURE_MAX_FILES"] == 500
+          assert vals["SHADOW_CAPTURE_INTERVAL"] == 0.50
+          print("V245 threshold separation: PASS")
+          PY
+
+      - name: Verify broad review reasons
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'V1.17 / V245' selfdrive/speed_limit_vision_uk.py
+          grep -q 'xnor_vsl_shadow_samples/v245' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_REVIEW_NUMERIC' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_REVIEW_OTHER' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_REVIEW_NSL' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_OCR_OTHER_CONFLICT' selfdrive/speed_limit_vision_uk.py
+          grep -q 'V3_OCR_NSL_CONFLICT' selfdrive/speed_limit_vision_uk.py
+          grep -q 'authoritative=0' selfdrive/speed_limit_vision_uk.py
+          grep -q 'v245_shadow_samples.zip' selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify no VSL authority change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --unified=0 HEAD^..HEAD -- selfdrive/speed_limit_vision_uk.py >/tmp/last.diff || true
+          grep -q 'authoritative=0' selfdrive/speed_limit_vision_uk.py
+
+      - name: Package changed sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: v245-vsl-broad-capture-source
+          path: |
+            selfdrive/speed_limit_vision_uk.py
+            selfdrive/vsl_v3/export_shadow_samples.py
+          retention-days: 14
