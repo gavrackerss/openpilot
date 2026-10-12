@@ -22,7 +22,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.16-UK
+# XNOR Vision Speed Limit V1.17-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -66,6 +66,12 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # V1.16 / V244 starts a clean validation capture set for the hard-example
 # retrain and also retains mature V3_DISAGREE crops. The classifier remains
 # shadow-only: no V3 result can publish or arbitrate a speed limit.
+#
+# V1.17 / V245 deliberately broadens REVIEW capture so one or two drives can
+# yield a useful retraining batch instead of waiting for high-confidence gates.
+# Low-confidence numeric, NSL and OTHER candidates plus V3/OCR agreements and
+# disagreements are saved when there is at least one supporting crop vote.
+# This changes collection only; V3 remains authoritative=0.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -85,19 +91,19 @@ SHADOW_MIN_DECISION_CONSENSUS = 0.60
 SHADOW_OCR_SECONDS = 2.5
 SHADOW_OCR_REQUIRED = 2
 SHADOW_OCR_MIN_CONFIDENCE = 0.72
-SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v244")
-SHADOW_CAPTURE_MAX_FILES = 160
-SHADOW_CAPTURE_INTERVAL = 0.75
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v245")
+SHADOW_CAPTURE_MAX_FILES = 500
+SHADOW_CAPTURE_INTERVAL = 0.50
 SHADOW_CAPTURE_MAX_SIDE = 256
 SHADOW_CAPTURE_JPEG_QUALITY = 88
-SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE = 0.84
-SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE = 0.85
-SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS = 0.99
-SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE = 0.45
-SHADOW_CAPTURE_OCR_MIN_CONFIDENCE = 0.55
-SHADOW_CAPTURE_OCR_CROP_CONSENSUS = 0.66
-SHADOW_CAPTURE_AGREE_V3_CONFIDENCE = 0.70
-SHADOW_CAPTURE_AGREE_OCR_CONFIDENCE = 0.72
+SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE = 0.45
+SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE = 0.35
+SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS = 0.33
+SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE = 0.30
+SHADOW_CAPTURE_OCR_MIN_CONFIDENCE = 0.30
+SHADOW_CAPTURE_OCR_CROP_CONSENSUS = 0.33
+SHADOW_CAPTURE_AGREE_V3_CONFIDENCE = 0.30
+SHADOW_CAPTURE_AGREE_OCR_CONFIDENCE = 0.30
 
 # The comma/AGNOS Python environment does not automatically re-resolve
 # pyproject.toml when a changed-files overlay is installed. Carry a pinned
@@ -523,7 +529,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.16: ready")
+      self._set_status("UK vision V1.17: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
@@ -1153,6 +1159,8 @@ class SpeedLimitVisionUK:
     mature_reason = reason in ("V3_CONFLICT", "V3_RESCUE", "V3_OTHER", "V3_DISAGREE")
     single_reason = reason in (
       "V3_SINGLE_OTHER", "V3_OCR_CONFLICT", "V3_OCR_AGREE", "V3_SINGLE_STRONG",
+      "V3_OCR_OTHER_CONFLICT", "V3_OCR_NSL_CONFLICT",
+      "V3_REVIEW_NUMERIC", "V3_REVIEW_OTHER", "V3_REVIEW_NSL",
     )
     if not mature_reason and not single_reason:
       return
