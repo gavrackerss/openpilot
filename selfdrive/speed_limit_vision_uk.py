@@ -1278,12 +1278,12 @@ class SpeedLimitVisionUK:
     numeric_v3 = class_name in {str(x) for x in SUPPORTED_UK_LIMITS_MPH}
 
     reason = ""
-    if (
-      numeric_v3 and int(class_name) != ocr_speed and
+    low_pair_ok = bool(
       v3_conf >= SHADOW_CAPTURE_OCR_V3_MIN_CONFIDENCE and
       ocr_conf >= SHADOW_CAPTURE_OCR_MIN_CONFIDENCE and
       crop_consensus >= SHADOW_CAPTURE_OCR_CROP_CONSENSUS
-    ):
+    )
+    if numeric_v3 and int(class_name) != ocr_speed and low_pair_ok:
       reason = "V3_OCR_CONFLICT"
     elif (
       numeric_v3 and int(class_name) == ocr_speed and
@@ -1292,6 +1292,10 @@ class SpeedLimitVisionUK:
       crop_consensus >= SHADOW_CAPTURE_OCR_CROP_CONSENSUS
     ):
       reason = "V3_OCR_AGREE"
+    elif class_name == "OTHER" and low_pair_ok:
+      reason = "V3_OCR_OTHER_CONFLICT"
+    elif class_name == "NSL" and low_pair_ok:
+      reason = "V3_OCR_NSL_CONFLICT"
     if not reason:
       return
 
@@ -1311,20 +1315,33 @@ class SpeedLimitVisionUK:
     if result is None:
       return
     class_name = str(result.get("class_name", ""))
-    if class_name not in {str(x) for x in SUPPORTED_UK_LIMITS_MPH}:
+    if class_name not in SHADOW_CLASSES:
       return
     v3_conf = float(result.get("confidence", 0.0))
     crop_consensus = float(result.get("crop_consensus", 0.0))
-    if (
-      v3_conf < SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE or
-      crop_consensus < SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS
-    ):
+    if crop_consensus < SHADOW_CAPTURE_SINGLE_CROP_CONSENSUS:
       return
+
+    if class_name in {str(x) for x in SUPPORTED_UK_LIMITS_MPH}:
+      if v3_conf < SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE:
+        return
+      reason = "V3_REVIEW_NUMERIC"
+    elif class_name == "NSL":
+      if v3_conf < SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE:
+        return
+      reason = "V3_REVIEW_NSL"
+    elif class_name == "OTHER":
+      if v3_conf < SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE:
+        return
+      reason = "V3_REVIEW_OTHER"
+    else:
+      return
+
     self._shadow_capture_sample(
       frame_bgr, bbox, "V3_UNCERTAIN",
       class_name, v3_conf, crop_consensus,
       0, 0, 0.0, int(result.get("legacy_speed_mph", 0)), source,
-      capture_reason="V3_SINGLE_STRONG",
+      capture_reason=reason,
     )
 
   def _shadow_update_temporal(self, class_name: str, confidence: float,
