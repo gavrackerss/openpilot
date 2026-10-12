@@ -7,8 +7,8 @@ import json
 import zipfile
 from pathlib import Path
 
-DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v244")
-DEFAULT_OUTPUT = Path("/data/media/0/v244_shadow_samples.zip")
+DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v245")
+DEFAULT_OUTPUT = Path("/data/media/0/v245_shadow_samples.zip")
 
 
 def suggested_label(row: dict) -> tuple[str, str]:
@@ -36,6 +36,10 @@ def suggested_label(row: dict) -> tuple[str, str]:
     return "", "single_v3_ocr_conflict_review"
   if reason == "V3_SINGLE_STRONG":
     return "", "strong_v3_without_ocr_review"
+  if reason in ("V3_REVIEW_NUMERIC", "V3_REVIEW_OTHER", "V3_REVIEW_NSL"):
+    return "", "low_confidence_review_capture"
+  if reason in ("V3_OCR_OTHER_CONFLICT", "V3_OCR_NSL_CONFLICT"):
+    return "", "cross_class_ocr_conflict_review"
   return "", "manual_review"
 
 
@@ -60,14 +64,14 @@ def load_manifest(source: Path) -> list[dict]:
 
 
 def main() -> None:
-  ap = argparse.ArgumentParser(description="Package V241 V3 shadow hard-example sign crops for review.")
+  ap = argparse.ArgumentParser(description="Package V245 V3 broad-review sign crops for review.")
   ap.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
   ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
   args = ap.parse_args()
 
   rows = load_manifest(args.source)
   if not rows:
-    raise SystemExit(f"No captured V241 samples found under {args.source}")
+    raise SystemExit(f"No captured V245 samples found under {args.source}")
 
   args.output.parent.mkdir(parents=True, exist_ok=True)
   review_fields = [
@@ -100,7 +104,7 @@ def main() -> None:
       p = args.source / str(row["file"])
       zf.write(p, f"crops/{p.name}")
 
-  print(f"V244 shadow samples: {len(rows)}")
+  print(f"V245 shadow samples: {len(rows)}")
   print(f"Review CSV: {review_csv}")
   print(f"Package: {args.output}")
 
