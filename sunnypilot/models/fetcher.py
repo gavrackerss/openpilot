@@ -231,7 +231,10 @@ class ModelFetcher:
 
     legacy = self.model_parser.parse_models(legacy_data)
     modern = self.model_parser.parse_models(modern_data)
-    self.catalog_available = bool(legacy_data or modern_data)
+    # Only validate an existing active model against a catalog when both
+    # upstream sources are present. Otherwise trust its local verified files
+    # rather than resetting to stock after a partial HTTP failure.
+    self.catalog_available = bool(legacy_data and modern_data)
     # The old 68 entries keep their exact bundle metadata, hashes and indexes;
     # only previously unavailable refs are appended from the new catalogue.
     seen_refs = {b.ref for b in legacy}
