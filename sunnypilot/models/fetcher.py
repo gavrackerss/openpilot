@@ -6,6 +6,8 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 import time
+from datetime import datetime
+import re
 
 import requests
 from requests.exceptions import (SSLError, RequestException, HTTPError)
@@ -31,6 +33,14 @@ class ModelParser:
     artifact = custom.ModelManagerSP.Artifact()
     artifact.fileName = artifact_data.get("file_name")
     artifact.downloadUri = ModelParser._parse_download_uri(artifact_data.get("download_uri", {}))
+    # V23+ stores the digest of each separately downloadable model chunk.
+    chunks = []
+    for entry in artifact_data.get("chunks", []):
+      chunk = custom.ModelManagerSP.Chunk()
+      chunk.fileName = entry["file_name"]
+      chunk.sha256 = entry["sha256"]
+      chunks.append(chunk)
+    artifact.chunks = chunks
     return artifact
 
   @staticmethod
@@ -80,11 +90,11 @@ class ModelParser:
 class ModelCache:
   """Handles caching of model data to avoid frequent remote fetches"""
 
-  def __init__(self, params: Params, cache_timeout: int = int(3600 * 1e9)):
+  def __init__(self, params: Params, cache_timeout: int = int(3600 * 1e9), source: str = "legacy"):
     self.params = params
     self.cache_timeout = cache_timeout
-    self._LAST_SYNC_KEY = "ModelManager_LastSyncTime"
-    self._CACHE_KEY = "ModelManager_ModelsCache"
+    self._LAST_SYNC_KEY = "ModelManager_LastSyncTime" if source == "legacy" else "ModelManager_LastSyncTime_v23"
+    self._CACHE_KEY = "ModelManager_ModelsCache" if source == "legacy" else "ModelManager_ModelsCache_v23"
 
   def _is_expired(self) -> bool:
     """Checks if the cache has expired"""
@@ -122,6 +132,7 @@ class ModelFetcher:
   is valid.
   """
   MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v17.json"
+  MODEL_URL_MODERN = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v23.json"
   # This branch is a 2026 build. A wall clock older than 2026-01-01 cannot be trusted
   # for HTTPS certificate validation. The upper bound catches obviously-corrupt RTCs.
   MIN_VALID_UNIX_TIME = 1767225600.0  # 2026-01-01T00:00:00Z
@@ -132,6 +143,7 @@ class ModelFetcher:
   def __init__(self, params: Params):
     self.params = params
     self.model_cache = ModelCache(params)
+    self.modern_cache = ModelCache(params, source="modern")
     self.model_parser = ModelParser()
     self.catalog_available = False
     self._pending_force_refresh = False
@@ -172,64 +184,109 @@ class ModelFetcher:
     self._retry_index = 0
     self._next_retry_mono = 0.0
 
-  def _fetch_and_cache_models(self) -> list[custom.ModelManagerSP.ModelBundle] | None:
-    """Fetch fresh model data and update cache. None means the remote fetch failed."""
+  def _fetch_and_cache_models(self, model_url: str, model_cache: ModelCache) -> bool:
+    """Fetch one manifest, preserving the last trusted manifest on errors."""
     try:
-      response = requests.get(self.MODEL_URL, timeout=10)
-
-      if response.status_code == 404:
-        cloudlog.error(f"Models URL returned 404 Not Found: {self.MODEL_URL}")
-        raise HTTPError(f"404 Not Found: {self.MODEL_URL}", response=response)
-
+      response = requests.get(model_url, timeout=10)
       response.raise_for_status()
       json_data = response.json()
-      self.model_cache.set(json_data)
-      cloudlog.info("Successfully updated driving-model manifest cache")
-      return self.model_parser.parse_models(json_data)
+      # Never replace a good catalogue with incompatible or empty entries.
+      if not isinstance(json_data, dict) or not self.model_parser.parse_models(json_data):
+        raise ValueError(f"Model manifest has no compatible bundles: {model_url}")
+      model_cache.set(json_data)
+      cloudlog.info(f"Updated driving-model catalogue: {model_url}")
+      return True
+    except (RequestException, ValueError, KeyError, TypeError) as e:
+      cloudlog.warning(f"Model catalogue download failed: {model_url}: {e}")
+    except Exception:
+      cloudlog.exception(f"Unexpected model catalogue error: {model_url}")
+    return False
 
-    except SSLError as e:
-      # Never disable TLS verification. A not-yet-valid certificate during boot is
-      # normally the RTC/NTP settling; retry through the normal backoff path.
-      cloudlog.warning(f"SSL error while fetching models: {e}")
-    except RequestException as e:
-      cloudlog.warning(f"Request transport error while fetching models: {e}")
-    except Exception as e:
-      cloudlog.exception(f"Unexpected error fetching models: {e}")
+  @staticmethod
+  def _recent_small_model(bundle: dict) -> bool:
+    """Only contemporary standard (non-Chestnut) Gen12 20 Hz models.
 
-    return None
+    Do not treat missing is_big as False: fail closed for unknown catalogues.
+    Keep the list naturally open to future entries in this pinned v23 series.
+    """
+    if bundle.get("is_big") is not False:
+      return False
+    if str(bundle.get("runner")) != "tinygrad" or str(bundle.get("generation")) != "12":
+      return False
+    if not bundle.get("is_20hz"):
+      return False
+    match = re.search(r"\(([A-Za-z]+ \d{1,2}, 2026)\)$", bundle.get("display_name", ""))
+    if match is None:
+      return False
+    try:
+      return datetime.strptime(match.group(1), "%B %d, %Y") >= datetime(2026, 6, 1)
+    except ValueError:
+      return False
 
   def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
-    """Return cached bundles immediately and refresh remotely only when appropriate."""
+    """Compact Qualcomm-class model picker: recent standard models + fallback.
+
+    The downloaded / active legacy bundle is retained and never invalidated
+    just because earlier models have been hidden from the selector.
+    """
     self._consume_force_refresh()
-    cached_data, is_expired = self.model_cache.get()
-    self.catalog_available = bool(cached_data)
+    legacy_data, legacy_expired = self.model_cache.get()
+    modern_data, modern_expired = self.modern_cache.get()
+    needs_legacy = legacy_expired or not legacy_data or self._pending_force_refresh
+    needs_modern = modern_expired or not modern_data or self._pending_force_refresh
 
-    if cached_data and not is_expired and not self._pending_force_refresh:
-      return self.model_parser.parse_models(cached_data)
-
-    # Do not attempt HTTPS while the wall clock is known-bad. Keep an explicit
-    # refresh request pending so it fires on the first loop after time becomes sane.
-    if not self._wall_clock_valid():
+    if (needs_legacy or needs_modern) and self._wall_clock_valid():
+      if time.monotonic() >= self._next_retry_mono or self._pending_force_refresh:
+        self._pending_force_refresh = False
+        all_ok = True
+        if needs_legacy:
+          all_ok = self._fetch_and_cache_models(self.MODEL_URL, self.model_cache) and all_ok
+        if needs_modern:
+          all_ok = self._fetch_and_cache_models(self.MODEL_URL_MODERN, self.modern_cache) and all_ok
+        if all_ok:
+          self._reset_retry()
+        else:
+          self._schedule_retry()
+        legacy_data, _ = self.model_cache.get()
+        modern_data, _ = self.modern_cache.get()
+    elif needs_legacy or needs_modern:
       self._log_clock_deferred()
-      return self.model_parser.parse_models(cached_data)
 
-    now = time.monotonic()
-    if now < self._next_retry_mono and not self._pending_force_refresh:
-      return self.model_parser.parse_models(cached_data)
+    # Do not reset an active model on partial catalogue failure.
+    self.catalog_available = bool(legacy_data and modern_data)
+    legacy_all = self.model_parser.parse_models(legacy_data)
 
-    # A user refresh bypasses any existing backoff exactly once. If it fails,
-    # subsequent automatic retries return to the normal backoff schedule.
-    self._pending_force_refresh = False
-    fetched_bundles = self._fetch_and_cache_models()
-    if fetched_bundles is not None:
-      self.catalog_available = True
-      self._reset_retry()
-      return fetched_bundles
+    # Keep the current working OPM10V3 available as an explicit fallback.
+    # Its v17 metadata and hashes must NOT be substituted by the v23 build
+    # of the same ref (which has incompatible chunks and selector version).
+    fallback_ref = "7d4c295c27bc3f72727c49ec73b98e45745b588d"
+    legacy_fallback = next((b for b in legacy_all if b.ref == fallback_ref), None)
 
-    self._schedule_retry()
-    if not cached_data:
-      cloudlog.warning("No cached model manifest available; custom model list will remain empty until refresh succeeds")
-    return self.model_parser.parse_models(cached_data)
+    active_raw = self.params.get("ModelManager_ActiveBundle") or {}
+    active_ref = active_raw.get("ref") if isinstance(active_raw, dict) else None
+    active_legacy = next((b for b in legacy_all if b.ref == active_ref), None)
+
+    modern_raw = modern_data.get("bundles", []) if isinstance(modern_data, dict) else []
+    recent_data = {"bundles": [b for b in modern_raw if self._recent_small_model(b)]}
+    recent_models = self.model_parser.parse_models(recent_data)
+    recent_models.sort(key=lambda b: b.index, reverse=True)
+
+    result = []
+    refs = set()
+    # Explicit, stable, high-numbered indices avoid collisions with legacy
+    # index values and prevent stale queued downloads selecting wrong models.
+    for bundle in recent_models:
+      bundle.index = 1000 + bundle.index
+      if bundle.ref not in refs:
+        result.append(bundle)
+        refs.add(bundle.ref)
+
+    for preserved in (legacy_fallback, active_legacy):
+      if preserved is not None and preserved.ref not in refs:
+        # Preserve its original index and *all* artifact metadata unchanged.
+        result.append(preserved)
+        refs.add(preserved.ref)
+    return result
 
 if __name__ == "__main__":
   params = Params()

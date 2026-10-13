@@ -21,7 +21,7 @@ class ModelsLayout(Widget):
     self._dialog = None
     self._name_to_ref = {}
     self._current = text_item(lambda: tr("Current Model"), self._current_model_name,
-                              lambda: tr("Select from Sunnypilot driving-model bundles. Selection is available offroad only."))
+                              lambda: tr("Latest standard Sunnypilot models (2026), not Chestnut/eGPU. Offroad only."))
     self._download = text_item(lambda: tr("Download Status"), self._download_status)
     self._select = button_item(lambda: tr("Select Model"), lambda: tr("SELECT"),
                                lambda: tr("Downloads are SHA-256 verified before activation. Default always returns to the XNOR stock model."),
@@ -73,7 +73,8 @@ class ModelsLayout(Widget):
   def _cache_size(self):
     root = Paths.model_root()
     try:
-      total = sum(os.path.getsize(os.path.join(root, f)) for f in os.listdir(root) if os.path.isfile(os.path.join(root, f)))
+      total = sum(os.path.getsize(os.path.join(base, name)) for base, _, filenames in os.walk(root)
+                  for name in filenames if os.path.isfile(os.path.join(base, name)))
       return f"{total / (1024 * 1024):.1f} MB"
     except OSError:
       return "0.0 MB"

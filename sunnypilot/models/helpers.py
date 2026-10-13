@@ -18,7 +18,8 @@ from openpilot.sunnypilot.models.constants import Meta, MetaSimPose, MetaTombRai
 from openpilot.system.hardware.hw import Paths
 
 # SET ME TO THE EXACT JSON VERSION WE SET IN SUNNYPILOT_MODELS REPO
-REQUIRED_JSON_VERSION = 15
+REQUIRED_JSON_VERSION = 20
+SUPPORTED_JSON_VERSIONS = frozenset((15, 20))  # retain installed legacy bundles
 
 CUSTOM_MODEL_PATH = Paths.model_root()
 METADATA_PATH = Path(__file__).parent / '../models/supercombo_metadata.pkl'
@@ -27,10 +28,25 @@ _LAST_VALIDATED_RAW = None
 
 
 def _compute_hash(file_path: str) -> str | None:
-  from openpilot.common.file_chunker import read_file_chunked
+  """Hash files in bounded memory, including .chunkmanifest model artifacts."""
+  from openpilot.common.file_chunker import get_manifest_path, get_chunk_name
+  digest = hashlib.sha256()
+  manifest = get_manifest_path(file_path)
   try:
-    return hashlib.sha256(read_file_chunked(file_path)).hexdigest().lower()
-  except FileNotFoundError:
+    if os.path.isfile(manifest):
+      with open(manifest, encoding="utf-8") as f:
+        count = int(f.read().strip())
+      if not 0 < count < 10000:
+        return None
+      paths = (get_chunk_name(file_path, i, count) for i in range(count))
+    else:
+      paths = (file_path,)
+    for path in paths:
+      with open(path, "rb") as inp:
+        while data := inp.read(1024 * 1024):
+          digest.update(data)
+    return digest.hexdigest().lower()
+  except (OSError, ValueError):
     return None
 
 
@@ -50,22 +66,43 @@ def is_bundle_version_compatible(bundle: dict) -> bool:
   required to load the model. This function ensures that:
     the bundle MUST match the `REQUIRED_JSON_VERSION` set here in helpers.
   """
-  return bundle.get("minimumSelectorVersion", 0) == REQUIRED_JSON_VERSION
+  return int(bundle.get("minimumSelectorVersion", 0)) in SUPPORTED_JSON_VERSIONS
 
 
 def _bundle_artifacts(bundle: custom.ModelManagerSP.ModelBundle) -> list[tuple[str, str]]:
+  """Return separately hashable file entries (including modern split chunks)."""
+  from openpilot.common.file_chunker import get_chunk_name
   artifacts = []
   for model in getattr(bundle, 'models', []) or []:
     for artifact in (getattr(model, 'artifact', None), getattr(model, 'metadata', None)):
-      if artifact and getattr(artifact, 'fileName', None) and getattr(artifact, 'downloadUri', None):
-        sha256 = getattr(artifact.downloadUri, 'sha256', None)
-        if sha256:
-          artifacts.append((artifact.fileName, sha256))
+      if not artifact or not getattr(artifact, 'fileName', None):
+        continue
+      chunks = list(getattr(artifact, 'chunks', []) or [])
+      if chunks:
+        n = len(chunks)
+        artifacts.extend((get_chunk_name(artifact.fileName, i, n), chunk.sha256)
+                         for i, chunk in enumerate(chunks))
+      elif getattr(artifact, 'downloadUri', None) and getattr(artifact.downloadUri, 'sha256', None):
+        artifacts.append((artifact.fileName, artifact.downloadUri.sha256))
   return artifacts
 
 
 def _bundle_is_valid_locally(bundle: custom.ModelManagerSP.ModelBundle) -> bool:
+  from openpilot.common.file_chunker import get_manifest_path
   model_root = Paths.model_root()
+  for model in getattr(bundle, 'models', []) or []:
+    for artifact in (getattr(model, 'artifact', None), getattr(model, 'metadata', None)):
+      if not artifact or not getattr(artifact, 'fileName', None):
+        continue
+      chunks = list(getattr(artifact, 'chunks', []) or [])
+      if chunks:
+        manifest = get_manifest_path(os.path.join(model_root, artifact.fileName))
+        try:
+          with open(manifest, encoding='utf-8') as f:
+            if int(f.read().strip()) != len(chunks):
+              return False
+        except (OSError, ValueError):
+          return False
   return all(_verify_file(os.path.join(model_root, file_name), expected_hash)
              for file_name, expected_hash in _bundle_artifacts(bundle))
 

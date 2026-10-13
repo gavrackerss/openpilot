@@ -89,46 +89,73 @@ class ModelManagerSP:
         del self._download_start_times[model.fileName]
 
   async def _download_chunked(self, base_url: str, base_path: str, artifact) -> None:
+    """Download chunked PKLs with per-chunk verification and resumability.
+
+    v17 publishes a .chunkmanifest beside the model; v23+ specifies
+    individual chunk names and digests in driving_models_v23.json.
+    """
     from openpilot.common.file_chunker import get_manifest_path, get_chunk_name
-    manifest_url = get_manifest_path(base_url)
+    import hashlib
+    chunks = list(getattr(artifact, 'chunks', []) or [])
     manifest_path = get_manifest_path(base_path)
-
-    async with aiohttp.ClientSession() as session:
-      async with session.get(manifest_url) as resp:
-        if resp.status == 404:
-          raise FileNotFoundError
-        resp.raise_for_status()
-        num_chunks = int((await resp.read()).strip())
-
-    self._download_start_times[artifact.fileName] = time.monotonic()
-
-    for i in range(num_chunks):
-      chunk_url = get_chunk_name(base_url, i, num_chunks)
-      chunk_path = get_chunk_name(base_path, i, num_chunks)
-      chunk_downloaded = 0
+    if chunks:
+      num_chunks = len(chunks)
+    else:
       async with aiohttp.ClientSession() as session:
-        async with session.get(chunk_url) as response:
-          response.raise_for_status()
-          chunk_size = int(response.headers.get("content-length", 0))
-          with open(chunk_path, 'wb') as f:
-            async for data in response.content.iter_chunked(self._chunk_size):
-              f.write(data)
-              chunk_downloaded += len(data)
-              if self.params.get("ModelManager_DownloadIndex") is None:
-                raise Exception("Download cancelled")
-              intra = chunk_downloaded / max(chunk_size, 1)
-              progress = min(99, (i + intra) / num_chunks * 100)
-              artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
-              artifact.downloadProgress.progress = progress
-              artifact.downloadProgress.eta = self._calculate_eta(artifact.fileName, progress)
-              self._sync_artifact_progress(artifact)
-              self._report_status()
+        async with session.get(get_manifest_path(base_url)) as resp:
+          if resp.status == 404:
+            raise FileNotFoundError("No chunk manifest available")
+          resp.raise_for_status()
+          num_chunks = int((await resp.read()).strip())
+    if not 0 < num_chunks < 10000:
+      raise ValueError("Invalid model chunk count")
+    self._download_start_times[artifact.fileName] = time.monotonic()
+    try:
+      async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=120)) as session:
+        for i in range(num_chunks):
+          chunk_url = get_chunk_name(base_url, i, num_chunks)
+          chunk_path = get_chunk_name(base_path, i, num_chunks)
+          expected_hash = chunks[i].sha256 if chunks else None
+          if expected_hash and await verify_file(chunk_path, expected_hash):
+            continue
+          temp_path = chunk_path + ".partial"
+          digest = hashlib.sha256()
+          downloaded = 0
+          try:
+            async with session.get(chunk_url) as response:
+              response.raise_for_status()
+              with open(temp_path, 'wb') as stream:
+                async for block in response.content.iter_chunked(self._chunk_size):
+                  if self.params.get("ModelManager_DownloadIndex") is None:
+                    raise RuntimeError("Model download cancelled")
+                  stream.write(block)
+                  digest.update(block)
+                  downloaded += len(block)
+                  progress = min(99.0, 100.0 * (i + 0.5) / num_chunks)
+                  artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
+                  artifact.downloadProgress.progress = progress
+                  artifact.downloadProgress.eta = self._calculate_eta(artifact.fileName, progress)
+                  self._sync_artifact_progress(artifact)
+                  self._report_status()
+            if not downloaded or (expected_hash and digest.hexdigest().lower() != expected_hash.lower()):
+              raise ValueError(f"Model chunk {i+1}/{num_chunks} SHA-256 mismatch")
+            os.replace(temp_path, chunk_path)
+          finally:
+            if os.path.exists(temp_path):
+              os.remove(temp_path)
+    finally:
+      self._download_start_times.pop(artifact.fileName, None)
 
-    with open(manifest_path, 'w') as f:
+    # The manifest is published only after every requested chunk is available.
+    if chunks:
+      for i, chunk in enumerate(chunks):
+        if not await verify_file(get_chunk_name(base_path, i, num_chunks), chunk.sha256):
+          raise ValueError(f"Model chunk {i+1}/{num_chunks} failed verification")
+    with open(manifest_path + ".partial", 'w', encoding='utf-8') as f:
       f.write(str(num_chunks))
+    os.replace(manifest_path + ".partial", manifest_path)
     if os.path.isfile(base_path):
       os.remove(base_path)
-    del self._download_start_times[artifact.fileName]
 
   async def _process_artifact(self, artifact, destination_path: str) -> None:
     if not artifact.downloadUri.uri:
@@ -148,10 +175,15 @@ class ModelManagerSP:
         self._report_status()
         return
 
-      try:
+      # Modern models list chunk hashes in the catalogue. Never silently
+      # fall back to an unverified monolithic URL for those models.
+      if len(getattr(artifact, 'chunks', []) or []):
         await self._download_chunked(url, full_path, artifact)
-      except (FileNotFoundError, aiohttp.ClientResponseError):
-        await self._download_file(url, full_path, artifact)
+      else:
+        try:
+          await self._download_chunked(url, full_path, artifact)
+        except (FileNotFoundError, aiohttp.ClientResponseError):
+          await self._download_file(url, full_path, artifact)
 
       if not await verify_file(full_path, expected_hash):
         raise ValueError(f"Hash validation failed for {filename}")
