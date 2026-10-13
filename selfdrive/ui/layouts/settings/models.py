@@ -31,7 +31,10 @@ class ModelsLayout(Widget):
     self._clear = button_item(lambda: tr("Clear Downloaded Model Cache"), lambda: tr("CLEAR"),
                               callback=self._clear_cache, enabled=ui_state.is_offroad)
     self._cache = text_item(lambda: tr("Model Cache"), self._cache_size)
-    self._scroller = Scroller([self._current, self._download, self._select, self._refresh, self._clear, self._cache],
+    self._mountain_dew = text_item(lambda: tr("Mountain Dew (experimental cache only)"),
+                                   self._mountain_dew_status,
+                                   lambda: tr("This official comma.ai big model cannot yet run under the XNOR Qualcomm modeld."))
+    self._scroller = Scroller([self._current, self._download, self._select, self._refresh, self._clear, self._cache, self._mountain_dew],
                               line_separator=True, spacing=0)
 
   def _manager(self):
@@ -70,10 +73,14 @@ class ModelsLayout(Widget):
     except Exception:
       return tr("Ready")
 
+  def _mountain_dew_status(self):
+    return self.params.get("ModelManager_MountainDewStageStatus") or tr("Not downloaded")
+
   def _cache_size(self):
     root = Paths.model_root()
     try:
-      total = sum(os.path.getsize(os.path.join(root, f)) for f in os.listdir(root) if os.path.isfile(os.path.join(root, f)))
+      total = sum(os.path.getsize(os.path.join(base, name)) for base, _, filenames in os.walk(root)
+                  for name in filenames if os.path.isfile(os.path.join(base, name)))
       return f"{total / (1024 * 1024):.1f} MB"
     except OSError:
       return "0.0 MB"
@@ -108,6 +115,12 @@ class ModelsLayout(Widget):
         label = f"{label} [{b.index}]"
       options.append(label)
       self._name_to_ref[label] = b.ref
+    # This option stages the upstream 800 MB AMD/chestnut model only.
+    # It MUST NOT be written into ModelManager_ActiveBundle until a separate
+    # model-runtime and hardware contract has passed validation.
+    mountain_label = "Mountain Dew (OP master; stage/download only - not runnable)"
+    options.append(mountain_label)
+    self._name_to_ref[mountain_label] = "__stage_mountain_dew__"
     current = options[0]
     try:
       if mm.activeBundle and mm.activeBundle.ref:
@@ -127,6 +140,9 @@ class ModelsLayout(Widget):
     if ref == "Default":
       self.params.remove("ModelManager_ActiveBundle")
       self.params.remove("ModelRunnerTypeCache")
+    elif ref == "__stage_mountain_dew__":
+      self.params.put("ModelManager_MountainDewStageStatus", "Stage requested; current driving model unchanged")
+      self.params.put_bool("ModelManager_MountainDewStageRequested", True)
     elif ref and mm is not None:
       try:
         bundle = next((b for b in mm.availableBundles if b.ref == ref), None)
