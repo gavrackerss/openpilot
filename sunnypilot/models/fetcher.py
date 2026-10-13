@@ -275,8 +275,8 @@ class ModelFetcher:
     refs = set()
     # Explicit, stable, high-numbered indices avoid collisions with legacy
     # index values and prevent stale queued downloads selecting wrong models.
-    for next_index, bundle in enumerate(recent_models, start=1000):
-      bundle.index = next_index
+    for bundle in recent_models:
+      bundle.index = 1000 + bundle.index
       if bundle.ref not in refs:
         result.append(bundle)
         refs.add(bundle.ref)
