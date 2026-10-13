@@ -288,6 +288,16 @@ class ModelManagerSP:
               self.params.remove("ModelManager_DownloadIndex")
               self.selected_bundle = None
 
+        if self.params.get("ModelManager_MountainDewStageRequested"):
+          # Staging is intentionally distinct from ModelManager_ActiveBundle.
+          # The current model and Tesla controls never change here.
+          self.params.remove("ModelManager_MountainDewStageRequested")
+          try:
+            from openpilot.sunnypilot.models.mountain_dew import stage_mountain_dew
+            stage_mountain_dew(params=self.params)
+          except Exception:
+            cloudlog.exception("Mountain Dew experimental artifact staging failed")
+
         if self.params.get("ModelManager_ClearCache"):
           self.clear_model_cache()
           self.params.remove("ModelManager_ClearCache")
