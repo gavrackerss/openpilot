@@ -31,6 +31,13 @@ class ModelParser:
     artifact = custom.ModelManagerSP.Artifact()
     artifact.fileName = artifact_data.get("file_name")
     artifact.downloadUri = ModelParser._parse_download_uri(artifact_data.get("download_uri", {}))
+    # V23+ stores the digest of each separately downloadable model chunk.
+    artifact.chunks = []
+    for entry in artifact_data.get("chunks", []):
+      chunk = custom.ModelManagerSP.Chunk()
+      chunk.fileName = entry["file_name"]
+      chunk.sha256 = entry["sha256"]
+      artifact.chunks.append(chunk)
     return artifact
 
   @staticmethod
@@ -80,11 +87,11 @@ class ModelParser:
 class ModelCache:
   """Handles caching of model data to avoid frequent remote fetches"""
 
-  def __init__(self, params: Params, cache_timeout: int = int(3600 * 1e9)):
+  def __init__(self, params: Params, cache_timeout: int = int(3600 * 1e9), source: str = "legacy"):
     self.params = params
     self.cache_timeout = cache_timeout
-    self._LAST_SYNC_KEY = "ModelManager_LastSyncTime"
-    self._CACHE_KEY = "ModelManager_ModelsCache"
+    self._LAST_SYNC_KEY = "ModelManager_LastSyncTime" if source == "legacy" else "ModelManager_LastSyncTime_v23"
+    self._CACHE_KEY = "ModelManager_ModelsCache" if source == "legacy" else "ModelManager_ModelsCache_v23"
 
   def _is_expired(self) -> bool:
     """Checks if the cache has expired"""
@@ -122,6 +129,7 @@ class ModelFetcher:
   is valid.
   """
   MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v17.json"
+  MODEL_URL_MODERN = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v23.json"
   # This branch is a 2026 build. A wall clock older than 2026-01-01 cannot be trusted
   # for HTTPS certificate validation. The upper bound catches obviously-corrupt RTCs.
   MIN_VALID_UNIX_TIME = 1767225600.0  # 2026-01-01T00:00:00Z
@@ -132,6 +140,7 @@ class ModelFetcher:
   def __init__(self, params: Params):
     self.params = params
     self.model_cache = ModelCache(params)
+    self.modern_cache = ModelCache(params, source="modern")
     self.model_parser = ModelParser()
     self.catalog_available = False
     self._pending_force_refresh = False
@@ -172,64 +181,69 @@ class ModelFetcher:
     self._retry_index = 0
     self._next_retry_mono = 0.0
 
-  def _fetch_and_cache_models(self) -> list[custom.ModelManagerSP.ModelBundle] | None:
-    """Fetch fresh model data and update cache. None means the remote fetch failed."""
+  def _fetch_and_cache_models(self, model_url: str, model_cache: ModelCache) -> bool:
+    """Fetch one manifest, preserving the last trusted manifest on errors."""
     try:
-      response = requests.get(self.MODEL_URL, timeout=10)
-
-      if response.status_code == 404:
-        cloudlog.error(f"Models URL returned 404 Not Found: {self.MODEL_URL}")
-        raise HTTPError(f"404 Not Found: {self.MODEL_URL}", response=response)
-
+      response = requests.get(model_url, timeout=10)
       response.raise_for_status()
       json_data = response.json()
-      self.model_cache.set(json_data)
-      cloudlog.info("Successfully updated driving-model manifest cache")
-      return self.model_parser.parse_models(json_data)
-
-    except SSLError as e:
-      # Never disable TLS verification. A not-yet-valid certificate during boot is
-      # normally the RTC/NTP settling; retry through the normal backoff path.
-      cloudlog.warning(f"SSL error while fetching models: {e}")
-    except RequestException as e:
-      cloudlog.warning(f"Request transport error while fetching models: {e}")
-    except Exception as e:
-      cloudlog.exception(f"Unexpected error fetching models: {e}")
-
-    return None
+      # Never replace a good catalogue with incompatible or empty entries.
+      if not isinstance(json_data, dict) or not self.model_parser.parse_models(json_data):
+        raise ValueError(f"Model manifest has no compatible bundles: {model_url}")
+      model_cache.set(json_data)
+      cloudlog.info(f"Updated driving-model catalogue: {model_url}")
+      return True
+    except (RequestException, ValueError, KeyError, TypeError) as e:
+      cloudlog.warning(f"Model catalogue download failed: {model_url}: {e}")
+    except Exception:
+      cloudlog.exception(f"Unexpected model catalogue error: {model_url}")
+    return False
 
   def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
-    """Return cached bundles immediately and refresh remotely only when appropriate."""
+    """Keep v17 and its active bundles while exposing v23-only models.
+
+    New entries have disjoint selector indexes (1000+), preventing a cached
+    legacy download index from becoming a different model.
+    """
     self._consume_force_refresh()
-    cached_data, is_expired = self.model_cache.get()
-    self.catalog_available = bool(cached_data)
+    legacy_data, legacy_expired = self.model_cache.get()
+    modern_data, modern_expired = self.modern_cache.get()
+    needs_legacy = legacy_expired or not legacy_data or self._pending_force_refresh
+    needs_modern = modern_expired or not modern_data or self._pending_force_refresh
 
-    if cached_data and not is_expired and not self._pending_force_refresh:
-      return self.model_parser.parse_models(cached_data)
-
-    # Do not attempt HTTPS while the wall clock is known-bad. Keep an explicit
-    # refresh request pending so it fires on the first loop after time becomes sane.
-    if not self._wall_clock_valid():
+    if (needs_legacy or needs_modern) and self._wall_clock_valid():
+      if time.monotonic() >= self._next_retry_mono or self._pending_force_refresh:
+        self._pending_force_refresh = False
+        all_ok = True
+        if needs_legacy:
+          all_ok = self._fetch_and_cache_models(self.MODEL_URL, self.model_cache) and all_ok
+        if needs_modern:
+          all_ok = self._fetch_and_cache_models(self.MODEL_URL_MODERN, self.modern_cache) and all_ok
+        if all_ok:
+          self._reset_retry()
+        else:
+          self._schedule_retry()
+        legacy_data, _ = self.model_cache.get()
+        modern_data, _ = self.modern_cache.get()
+    elif needs_legacy or needs_modern:
       self._log_clock_deferred()
-      return self.model_parser.parse_models(cached_data)
 
-    now = time.monotonic()
-    if now < self._next_retry_mono and not self._pending_force_refresh:
-      return self.model_parser.parse_models(cached_data)
-
-    # A user refresh bypasses any existing backoff exactly once. If it fails,
-    # subsequent automatic retries return to the normal backoff schedule.
-    self._pending_force_refresh = False
-    fetched_bundles = self._fetch_and_cache_models()
-    if fetched_bundles is not None:
-      self.catalog_available = True
-      self._reset_retry()
-      return fetched_bundles
-
-    self._schedule_retry()
-    if not cached_data:
-      cloudlog.warning("No cached model manifest available; custom model list will remain empty until refresh succeeds")
-    return self.model_parser.parse_models(cached_data)
+    legacy = self.model_parser.parse_models(legacy_data)
+    modern = self.model_parser.parse_models(modern_data)
+    self.catalog_available = bool(legacy_data or modern_data)
+    # The old 68 entries keep their exact bundle metadata, hashes and indexes;
+    # only previously unavailable refs are appended from the new catalogue.
+    seen_refs = {b.ref for b in legacy}
+    merged = list(legacy)
+    next_index = 1000
+    for bundle in modern:
+      if bundle.ref in seen_refs:
+        continue
+      bundle.index = next_index
+      next_index += 1
+      seen_refs.add(bundle.ref)
+      merged.append(bundle)
+    return merged
 
 if __name__ == "__main__":
   params = Params()
