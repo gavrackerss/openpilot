@@ -6,6 +6,8 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 import time
+from datetime import datetime
+import re
 
 import requests
 from requests.exceptions import (SSLError, RequestException, HTTPError)
@@ -200,11 +202,32 @@ class ModelFetcher:
       cloudlog.exception(f"Unexpected model catalogue error: {model_url}")
     return False
 
-  def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
-    """Keep v17 and its active bundles while exposing v23-only models.
+  @staticmethod
+  def _recent_small_model(bundle: dict) -> bool:
+    """Only contemporary standard (non-Chestnut) Gen12 20 Hz models.
 
-    New entries have disjoint selector indexes (1000+), preventing a cached
-    legacy download index from becoming a different model.
+    Do not treat missing is_big as False: fail closed for unknown catalogues.
+    Keep the list naturally open to future entries in this pinned v23 series.
+    """
+    if bundle.get("is_big") is not False:
+      return False
+    if str(bundle.get("runner")) != "tinygrad" or str(bundle.get("generation")) != "12":
+      return False
+    if not bundle.get("is_20hz"):
+      return False
+    match = re.search(r"\(([A-Za-z]+ \d{1,2}, 2026)\)$", bundle.get("display_name", ""))
+    if match is None:
+      return False
+    try:
+      return datetime.strptime(match.group(1), "%B %d, %Y") >= datetime(2026, 6, 1)
+    except ValueError:
+      return False
+
+  def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
+    """Compact Qualcomm-class model picker: recent standard models + fallback.
+
+    The downloaded / active legacy bundle is retained and never invalidated
+    just because earlier models have been hidden from the selector.
     """
     self._consume_force_refresh()
     legacy_data, legacy_expired = self.model_cache.get()
@@ -229,25 +252,41 @@ class ModelFetcher:
     elif needs_legacy or needs_modern:
       self._log_clock_deferred()
 
-    legacy = self.model_parser.parse_models(legacy_data)
-    modern = self.model_parser.parse_models(modern_data)
-    # Only validate an existing active model against a catalog when both
-    # upstream sources are present. Otherwise trust its local verified files
-    # rather than resetting to stock after a partial HTTP failure.
+    # Do not reset an active model on partial catalogue failure.
     self.catalog_available = bool(legacy_data and modern_data)
-    # The old 68 entries keep their exact bundle metadata, hashes and indexes;
-    # only previously unavailable refs are appended from the new catalogue.
-    seen_refs = {b.ref for b in legacy}
-    merged = list(legacy)
-    next_index = 1000
-    for bundle in modern:
-      if bundle.ref in seen_refs:
-        continue
+    legacy_all = self.model_parser.parse_models(legacy_data)
+
+    # Keep the current working OPM10V3 available as an explicit fallback.
+    # Its v17 metadata and hashes must NOT be substituted by the v23 build
+    # of the same ref (which has incompatible chunks and selector version).
+    fallback_ref = "7d4c295c27bc3f72727c49ec73b98e45745b588d"
+    legacy_fallback = next((b for b in legacy_all if b.ref == fallback_ref), None)
+
+    active_raw = self.params.get("ModelManager_ActiveBundle") or {}
+    active_ref = active_raw.get("ref") if isinstance(active_raw, dict) else None
+    active_legacy = next((b for b in legacy_all if b.ref == active_ref), None)
+
+    modern_raw = modern_data.get("bundles", []) if isinstance(modern_data, dict) else []
+    recent_data = {"bundles": [b for b in modern_raw if self._recent_small_model(b)]}
+    recent_models = self.model_parser.parse_models(recent_data)
+    recent_models.sort(key=lambda b: b.index, reverse=True)
+
+    result = []
+    refs = set()
+    # Explicit, stable, high-numbered indices avoid collisions with legacy
+    # index values and prevent stale queued downloads selecting wrong models.
+    for next_index, bundle in enumerate(recent_models, start=1000):
       bundle.index = next_index
-      next_index += 1
-      seen_refs.add(bundle.ref)
-      merged.append(bundle)
-    return merged
+      if bundle.ref not in refs:
+        result.append(bundle)
+        refs.add(bundle.ref)
+
+    for preserved in (legacy_fallback, active_legacy):
+      if preserved is not None and preserved.ref not in refs:
+        # Preserve its original index and *all* artifact metadata unchanged.
+        result.append(preserved)
+        refs.add(preserved.ref)
+    return result
 
 if __name__ == "__main__":
   params = Params()
