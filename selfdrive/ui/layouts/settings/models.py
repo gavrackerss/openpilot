@@ -21,7 +21,7 @@ class ModelsLayout(Widget):
     self._dialog = None
     self._name_to_ref = {}
     self._current = text_item(lambda: tr("Current Model"), self._current_model_name,
-                              lambda: tr("Select from Sunnypilot driving-model bundles. Selection is available offroad only."))
+                              lambda: tr("Latest standard Sunnypilot models (2026), not Chestnut/eGPU. Offroad only."))
     self._download = text_item(lambda: tr("Download Status"), self._download_status)
     self._select = button_item(lambda: tr("Select Model"), lambda: tr("SELECT"),
                                lambda: tr("Downloads are SHA-256 verified before activation. Default always returns to the XNOR stock model."),
@@ -31,10 +31,7 @@ class ModelsLayout(Widget):
     self._clear = button_item(lambda: tr("Clear Downloaded Model Cache"), lambda: tr("CLEAR"),
                               callback=self._clear_cache, enabled=ui_state.is_offroad)
     self._cache = text_item(lambda: tr("Model Cache"), self._cache_size)
-    self._mountain_dew = text_item(lambda: tr("Mountain Dew (experimental cache only)"),
-                                   self._mountain_dew_status,
-                                   lambda: tr("This official comma.ai big model cannot yet run under the XNOR Qualcomm modeld."))
-    self._scroller = Scroller([self._current, self._download, self._select, self._refresh, self._clear, self._cache, self._mountain_dew],
+    self._scroller = Scroller([self._current, self._download, self._select, self._refresh, self._clear, self._cache],
                               line_separator=True, spacing=0)
 
   def _manager(self):
@@ -72,9 +69,6 @@ class ModelsLayout(Widget):
       return f"{state}: {b.internalName} {pct:.0f}%" if b.status == custom.ModelManagerSP.DownloadStatus.downloading else f"{state}: {b.internalName}"
     except Exception:
       return tr("Ready")
-
-  def _mountain_dew_status(self):
-    return self.params.get("ModelManager_MountainDewStageStatus") or tr("Not downloaded")
 
   def _cache_size(self):
     root = Paths.model_root()
@@ -115,12 +109,6 @@ class ModelsLayout(Widget):
         label = f"{label} [{b.index}]"
       options.append(label)
       self._name_to_ref[label] = b.ref
-    # This option stages the upstream 800 MB AMD/chestnut model only.
-    # It MUST NOT be written into ModelManager_ActiveBundle until a separate
-    # model-runtime and hardware contract has passed validation.
-    mountain_label = "Mountain Dew (OP master; stage/download only - not runnable)"
-    options.append(mountain_label)
-    self._name_to_ref[mountain_label] = "__stage_mountain_dew__"
     current = options[0]
     try:
       if mm.activeBundle and mm.activeBundle.ref:
@@ -140,9 +128,6 @@ class ModelsLayout(Widget):
     if ref == "Default":
       self.params.remove("ModelManager_ActiveBundle")
       self.params.remove("ModelRunnerTypeCache")
-    elif ref == "__stage_mountain_dew__":
-      self.params.put("ModelManager_MountainDewStageStatus", "Stage requested; current driving model unchanged")
-      self.params.put_bool("ModelManager_MountainDewStageRequested", True)
     elif ref and mm is not None:
       try:
         bundle = next((b for b in mm.availableBundles if b.ref == ref), None)
