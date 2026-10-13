@@ -1,62 +1,82 @@
-# XNOR model selector upgrade — October 2026
+# XNOR / comma 3X — focused Sunnypilot model selector (October 2026)
 
-Base branch: `xnor-dev` at `6911d7020740efe372e464499e38e715aa36592e`.
+Baseline: `xnor-dev` speed245 at `6911d7020740efe372e464499e38e715aa36592e`.
 
-## Changes
-- Preserve the Sunnypilot v17 / selector-15 legacy catalogue, including existing
-  local `opm19v3` model selection and hashes.
-- Fetch Sunnypilot development v23 / selector-20 catalogue separately and append
-  **new refs only** at UI/download indices >=1000. Both manifests are cached
-  independently; the model manager honours the existing offroad-only UI.
-- Add chunked models and artifact chunks to `cereal/custom.capnp`.
-- Parse chunk hashes from v23 and download/verify/resume chunks without an
-  external chunkmanifest. Keep legacy chunkmanifest handling intact.
-- Present `Mountain Dew (OP master; stage/download only - not runnable)` as an
-  explicit local selection. Selecting this only stages the checksum-pinned
-  official comma.ai 2026-10-10 big-model artifact. The previous active
-  model remains unchanged, even when the staged file is verified.
+## Scope and model sources
 
-## Mountain Dew
+This changed-files overlay ONLY updates model selection, Cap'n Proto model
+schema, manifest caching, and verified model downloads. No changes are made
+to Tesla steering, lateral/longitudinal control, CAN, ALC, vehicle interface,
+planner, VSL or UI speed-limit controls.
 
-Source: https://github.com/commaai/openpilot/pull/39047 (merged Oct 10, 2026).
-Current master blob: `big_driving_tinygrad.pkl`, SHA-256:
-`256f2178366479a211933701c03518621ed3970289e6a8a43e5a2bcb15e55b5f`,
-exactly 799,942,179 bytes. Source commit:
-`2713630e7950a61dc072467b5394a1043e34547f`.
+It reads official Sunnypilot standard model catalogue v23 (selector version
+20), the catalogue currently used by Sunnypilot dev. This catalogue contains
+the newest non-Chestnut Gen12 models through August 15, 2026. v26 lists the
+same model identities but uses a newer manifest/package selector version.
+We deliberately use v23 to match the current public Sunnypilot dev loader.
+The previous v17 catalogue is used ONLY to preserve the exact hashes,
+metadata and installed artifacts of the working OPM10V3 fallback, or an
+already active older model.
 
-Offroad UI: Models -> Select Model -> Mountain Dew (stage/download only).
+The picker displays these **11 standard (is_big=false) 20 Hz Gen12 models**,
+newest first:
 
-Or manually, from a parked device:
-```
-cd /data/openpilot
-python3 -m openpilot.sunnypilot.models.mountain_dew
-# If you already acquired the exact upstream LFS file:
-python3 -m openpilot.sunnypilot.models.mountain_dew --source /path/to/big_driving_tinygrad.pkl
-```
+| Label | Release date |
+|---|---|
+| TSFDOM — Terrible Super Fantastic Do Over | 2026-08-15 |
+| Falling Phoenix | 2026-08-14 |
+| Kumars Vibe | 2026-08-14 |
+| Terrible Super Fantastic | 2026-08-12 |
+| RDF Model V2 | 2026-08-11 |
+| RDF Model | 2026-08-05 |
+| Rebellious Hope | 2026-07-27 |
+| Get Your Hopes Up | 2026-07-25 |
+| Rebel Legion | 2026-07-22 |
+| Michael RL V2 | 2026-07-18 |
+| OP Model 16 Deep | 2026-06-03 |
 
-The staged file is under `Paths.model_root()/experimental_mountain_dew/`.
-It is **not an active model bundle** and is not passed to modeld. It requires
-a separate AMD/chestnut-capable runtime, safe package loader, model metadata
-contract check, and hardware / replay validation. The current Qualcomm
-comma 3X runner does not support it directly.
+Also displayed: OPM10V3 (April 19, 2026) as the known existing fallback,
+plus an earlier legacy model ONLY while it is the active installed model.
+The XNOR stock model option remains unchanged. Older historical models are
+hidden rather than removed from disk.
 
-## Validation
+No Chestnut / big / USBGPU model is displayed. **Mountain Dew is excluded**
+from this overlay and is neither downloaded nor activated.
 
-Local review / manual checks after deploying these files:
-1. Build the Cap'n Proto schema and check all imports on the target openpilot.
-2. Offroad, refresh the selector and verify `opm19v3` remains present.
-3. Verify nine additional July/August 2026 model refs show after the v23
-   manifest fetch; review timestamps, suffixes and model filenames.
-4. Verify existing v15 model selection, download and re-activation survive
-   upgrade; no stock fallback unless the local hashes are invalid.
-5. Verify one v23 chunked model can be fully downloaded, hashed, activated
-   and **loaded on the target device offroad before any driving**.
-6. Selecting Mountain Dew must not change ModelManager_ActiveBundle;
-   stage status should show staged only, with exact size and SHA.
-7. Run a shadow/non-controlling replay of newly loaded models and compare
-   predicted trajectories, speed, timing and errors. Do not treat a UI entry
-   as proof of usable driving model compatibility.
+## Technical behavior
 
-No new model has been verified on physical comma hardware in this change.
-There is deliberately no change to Tesla CAN control, hybrid lateral,
-longitudinal, planner, steering, or speed-limit logic.
+- Adds `ModelManagerSP.Chunk`, `Artifact.chunks`, and a `chunked`
+  model enumeration, with existing Cap'n Proto numbers unchanged.
+- Pins separate cache keys for the v17 and v23 manifests.
+- Filters from authoritative catalogue metadata: `is_big=false`,
+  `generation=12`, `runner=tinygrad`, `is_20hz=true`,
+  model date >= 2026-06-01.
+- Each new model keeps a stable `1000 + upstream index` selector index.
+- Accepts legacy selector-15 bundles and dev selector-20 bundles so the
+  user's existing verified OPM10V3 remains a valid active bundle.
+- Fetches new model chunks with per-chunk SHA-256 verification and resume.
+  Hash verification streams files with bounded memory, including
+  chunkmanifest-based PKLs. The existing download fallback remains.
+- A missing or failed remote manifest does not silently reset the previously
+  selected model.
+
+## Deployment validation (parked / offroad)
+
+1. Run `python3 -m compileall -q sunnypilot/models selfdrive/ui/layouts/settings/models.py`.
+2. Build the Cap'n Proto schema via the existing openpilot build.
+3. Refresh Models and verify **12 entries** (11 new + OPM10V3) in addition
+   to XNOR Default. Another entry may appear if a different legacy model
+   is already active.
+4. Verify Mountain Dew/Cinque Terre/BMRLNAP are **not** listed.
+5. Select and download TSFDOM only when parked. Confirm its chunk hashes.
+6. Confirm the existing OPM10V3 selection still works if TSFDOM cannot be
+   loaded. Validate modeld init, input/output compatibility, stable
+   inference rates and trajectories before any road use.
+7. Check offroad-to-onroad transitions, warnings, and logs. Use
+   shadow/non-controlling validation; **do not rely on an unvalidated model
+   for live steering or braking**.
+
+This updates model *availability* and downloader support. Neither upstream
+catalogue membership nor successful download proves that the model is fully
+compatible with the current xnor-dev modeld runtime. Device-specific
+testing is still required.
