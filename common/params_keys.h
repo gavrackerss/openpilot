@@ -165,8 +165,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ModelManager_ModelsCache", {PERSISTENT, JSON}},
     {"ModelManager_LastSyncTime_v23", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT, "0"}},
     {"ModelManager_ModelsCache_v23", {PERSISTENT, JSON}},
-    {"ModelManager_MountainDewStageRequested", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
-    {"ModelManager_MountainDewStageStatus", {PERSISTENT, STRING, "Not downloaded"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
     {"Version", {PERSISTENT, STRING}},
     // XNOR V1-UK camera speed-limit recognition
