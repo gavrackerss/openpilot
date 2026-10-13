@@ -108,34 +108,46 @@ def _bundle_is_valid_locally(bundle: custom.ModelManagerSP.ModelBundle) -> bool:
 
 
 def _bundle_needs_reset(active_bundle: custom.ModelManagerSP.ModelBundle, available_bundles: list[custom.ModelManagerSP.ModelBundle] | None) -> bool:
+  """Do not delete an installed model just because the picker catalog changed.
+
+  The focused v23 picker hides earlier model entries. Upstream can also
+  republish the same model ref with recompiled weights/metadata. Neither
+  event invalidates the previously downloaded and checksum-verified files.
+  Validate against the hashes saved with the installed bundle instead.
+  """
   if active_bundle is None:
     return False
 
   if available_bundles is not None:
-    matching_bundle = None
-    for bundle in available_bundles:
-      if getattr(active_bundle, 'ref', None) and getattr(bundle, 'ref', None):
-        if active_bundle.ref == bundle.ref:
-          matching_bundle = bundle
-          break
-      elif getattr(active_bundle, 'internalName', None) == getattr(bundle, 'internalName', None):
-        matching_bundle = bundle
-        break
+    ref = getattr(active_bundle, 'ref', None)
+    match = next((b for b in available_bundles if ref and b.ref == ref), None)
+    if match is None:
+      cloudlog.warning(f"Saved model {active_bundle.internalName} not exposed in current catalogue; preserving selection if locally verified")
+    elif (active_bundle.minimumSelectorVersion != match.minimumSelectorVersion or
+          set(_bundle_artifacts(active_bundle)) != set(_bundle_artifacts(match))):
+      cloudlog.warning(f"Saved model {active_bundle.internalName} has different catalogue metadata; retaining installed version if locally verified")
 
-    if matching_bundle is None:
-      return True
-    if active_bundle.minimumSelectorVersion != matching_bundle.minimumSelectorVersion:
-      return True
+  if _bundle_is_valid_locally(active_bundle):
+    return False
 
-    active_runner = getattr(active_bundle, 'runner', None)
-    matching_runner = getattr(matching_bundle, 'runner', None)
-    if active_runner is not None and matching_runner is not None:
-      if getattr(active_runner, 'raw', active_runner) != getattr(matching_runner, 'raw', matching_runner):
-        return True
-    if set(_bundle_artifacts(active_bundle)) != set(_bundle_artifacts(matching_bundle)):
-      return True
-
-  return not _bundle_is_valid_locally(active_bundle)
+  from openpilot.common.file_chunker import get_manifest_path
+  root = Paths.model_root()
+  for model in getattr(active_bundle, 'models', []) or []:
+    for artifact in (getattr(model, 'artifact', None), getattr(model, 'metadata', None)):
+      if not artifact or not getattr(artifact, 'fileName', None):
+        continue
+      chunks = list(getattr(artifact, 'chunks', []) or [])
+      if chunks:
+        manifest = get_manifest_path(os.path.join(root, artifact.fileName))
+        if not os.path.isfile(manifest):
+          cloudlog.error(f"Saved model missing chunk manifest: {manifest}")
+  for filename, sha256 in _bundle_artifacts(active_bundle):
+    path = os.path.join(root, filename)
+    if not os.path.isfile(path):
+      cloudlog.error(f"Saved model file missing: {path}")
+    elif not _verify_file(path, sha256):
+      cloudlog.error(f"Saved model file SHA256 mismatch: {path} (expected {sha256})")
+  return True
 
 
 def validate_active_bundle(params: Params, available_bundles: list[custom.ModelManagerSP.ModelBundle] | None = None) -> None:
@@ -149,8 +161,13 @@ def validate_active_bundle(params: Params, available_bundles: list[custom.ModelM
     return
 
   active_bundle = get_active_bundle(params, raw_bundle_dict=raw_bundle)
-  if active_bundle is None or _bundle_needs_reset(active_bundle, available_bundles):
-    cloudlog.warning("Active model bundle invalid; resetting to default")
+  if active_bundle is None:
+    cloudlog.error("Active model selection cannot be parsed; falling back to stock")
+    params.remove("ModelManager_ActiveBundle")
+    params.put("ModelRunnerTypeCache", int(custom.ModelManagerSP.Runner.stock))
+    _LAST_VALIDATED_RAW = None
+  elif _bundle_needs_reset(active_bundle, available_bundles):
+    cloudlog.error(f"Active model {active_bundle.internalName} failed LOCAL integrity verification; falling back to stock")
     params.remove("ModelManager_ActiveBundle")
     params.put("ModelRunnerTypeCache", int(custom.ModelManagerSP.Runner.stock))
     _LAST_VALIDATED_RAW = None

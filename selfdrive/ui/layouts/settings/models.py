@@ -41,12 +41,27 @@ class ModelsLayout(Widget):
       return None
 
   def _current_model_name(self):
-    mm = self._manager()
+    # The model manager only runs offroad. On the transition to onroad its
+    # message is no longer refreshed, which used to make this UI report CD210
+    # even when the persistent custom-model selection was still present.
     try:
-      if mm and mm.activeBundle and mm.activeBundle.ref:
-        return mm.activeBundle.internalName or mm.activeBundle.displayName
+      active = self.params.get("ModelManager_ActiveBundle")
+      if isinstance(active, dict) and active.get("ref"):
+        label = active.get("internalName") or active.get("displayName")
+        if label:
+          return label
     except Exception:
       pass
+
+    # During an offroad download the manager may report its new active bundle
+    # before the parameter refresh reaches the UI.
+    if ui_state.is_offroad():
+      mm = self._manager()
+      try:
+        if mm and mm.activeBundle and mm.activeBundle.ref:
+          return mm.activeBundle.internalName or mm.activeBundle.displayName
+      except Exception:
+        pass
     return "CD210 / XNOR Default"
 
   def _download_status(self):
