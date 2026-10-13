@@ -28,10 +28,25 @@ _LAST_VALIDATED_RAW = None
 
 
 def _compute_hash(file_path: str) -> str | None:
-  from openpilot.common.file_chunker import read_file_chunked
+  """Hash files in bounded memory, including .chunkmanifest model artifacts."""
+  from openpilot.common.file_chunker import get_manifest_path, get_chunk_name
+  digest = hashlib.sha256()
+  manifest = get_manifest_path(file_path)
   try:
-    return hashlib.sha256(read_file_chunked(file_path)).hexdigest().lower()
-  except FileNotFoundError:
+    if os.path.isfile(manifest):
+      with open(manifest, encoding="utf-8") as f:
+        count = int(f.read().strip())
+      if not 0 < count < 10000:
+        return None
+      paths = (get_chunk_name(file_path, i, count) for i in range(count))
+    else:
+      paths = (file_path,)
+    for path in paths:
+      with open(path, "rb") as inp:
+        while data := inp.read(1024 * 1024):
+          digest.update(data)
+    return digest.hexdigest().lower()
+  except (OSError, ValueError):
     return None
 
 
