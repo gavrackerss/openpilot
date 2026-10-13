@@ -32,12 +32,13 @@ class ModelParser:
     artifact.fileName = artifact_data.get("file_name")
     artifact.downloadUri = ModelParser._parse_download_uri(artifact_data.get("download_uri", {}))
     # V23+ stores the digest of each separately downloadable model chunk.
-    artifact.chunks = []
+    chunks = []
     for entry in artifact_data.get("chunks", []):
       chunk = custom.ModelManagerSP.Chunk()
       chunk.fileName = entry["file_name"]
       chunk.sha256 = entry["sha256"]
-      artifact.chunks.append(chunk)
+      chunks.append(chunk)
+    artifact.chunks = chunks
     return artifact
 
   @staticmethod
