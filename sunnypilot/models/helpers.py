@@ -1,14 +1,19 @@
 """
-Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
+Copyright (c) 2021-, Haibin Wen, sunnypilot, and contributors.
 
-This file is part of sunnypilot and is licensed under the MIT License.
-See the LICENSE.md file in the root directory for more details.
+XNOR model selector: v23 standard models and legacy v17 compatibility.
+
+Important: ModelManager_ActiveBundle is the user's requested selection, not a
+health-check cache. Model validation must NEVER remove this parameter. An
+invalid/unavailable artifact selects the stock *runtime* while keeping the
+requested bundle and a diagnostic explanation available for repair.
 """
 
 import hashlib
 import os
 import pickle
 from pathlib import Path
+
 import numpy as np
 
 from cereal import custom
@@ -17,203 +22,229 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.models.constants import Meta, MetaSimPose, MetaTombRaider
 from openpilot.system.hardware.hw import Paths
 
-# SET ME TO THE EXACT JSON VERSION WE SET IN SUNNYPILOT_MODELS REPO
 REQUIRED_JSON_VERSION = 20
-SUPPORTED_JSON_VERSIONS = frozenset((15, 20))  # retain installed legacy bundles
+SUPPORTED_JSON_VERSIONS = frozenset((15, 20))
 
 CUSTOM_MODEL_PATH = Paths.model_root()
 METADATA_PATH = Path(__file__).parent / '../models/supercombo_metadata.pkl'
 ModelManager = custom.ModelManagerSP
+
+# These values belong to one process. The manager and off-road model manager
+# have separate caches, and both revalidate on their first observation of a
+# new persisted model selection.
 _LAST_VALIDATED_RAW = None
+_RUNNER_EVALUATED_RAW = object()
+_RUNNER_EVALUATED_RESULT = None
 
 
 def _compute_hash(file_path: str) -> str | None:
-  """Hash files in bounded memory, including .chunkmanifest model artifacts."""
+  """Stream SHA256 for a regular or .chunkmanifest-backed file (bounded RAM)."""
   from openpilot.common.file_chunker import get_manifest_path, get_chunk_name
+
   digest = hashlib.sha256()
-  manifest = get_manifest_path(file_path)
   try:
+    manifest = get_manifest_path(file_path)
     if os.path.isfile(manifest):
-      with open(manifest, encoding="utf-8") as f:
-        count = int(f.read().strip())
-      if not 0 < count < 10000:
+      with open(manifest, encoding='utf-8') as stream:
+        count = int(stream.read().strip())
+      if count < 1 or count > 9999:
         return None
-      paths = (get_chunk_name(file_path, i, count) for i in range(count))
+      files = (get_chunk_name(file_path, i, count) for i in range(count))
     else:
-      paths = (file_path,)
-    for path in paths:
-      with open(path, "rb") as inp:
-        while data := inp.read(1024 * 1024):
-          digest.update(data)
+      files = (file_path,)
+
+    for part in files:
+      with open(part, 'rb') as stream:
+        while block := stream.read(1024 * 1024):
+          digest.update(block)
     return digest.hexdigest().lower()
   except (OSError, ValueError):
     return None
 
 
 async def verify_file(file_path: str, expected_hash: str) -> bool:
-  file_hash = _compute_hash(file_path)
-  return file_hash == expected_hash.lower() if file_hash else False
+  return _verify_file(file_path, expected_hash)
 
 
 def _verify_file(file_path: str, expected_hash: str) -> bool:
-  file_hash = _compute_hash(file_path)
-  return file_hash == expected_hash.lower() if file_hash else False
+  digest = _compute_hash(file_path)
+  return bool(digest and expected_hash and digest == str(expected_hash).lower())
 
 
 def is_bundle_version_compatible(bundle: dict) -> bool:
-  """
-  The bundle parsed from the json specifies a `minimum_selector_version`, which defines the minimum selector version
-  required to load the model. This function ensures that:
-    the bundle MUST match the `REQUIRED_JSON_VERSION` set here in helpers.
-  """
-  return int(bundle.get("minimumSelectorVersion", 0)) in SUPPORTED_JSON_VERSIONS
+  try:
+    return int(bundle.get('minimumSelectorVersion', 0)) in SUPPORTED_JSON_VERSIONS
+  except (ValueError, TypeError, AttributeError):
+    return False
 
 
 def _bundle_artifacts(bundle: custom.ModelManagerSP.ModelBundle) -> list[tuple[str, str]]:
-  """Return separately hashable file entries (including modern split chunks)."""
+  """File/digest pairs, independently verifying modern chunks or legacy PKLs."""
   from openpilot.common.file_chunker import get_chunk_name
-  artifacts = []
+
+  result = []
   for model in getattr(bundle, 'models', []) or []:
     for artifact in (getattr(model, 'artifact', None), getattr(model, 'metadata', None)):
-      if not artifact or not getattr(artifact, 'fileName', None):
+      filename = getattr(artifact, 'fileName', None) if artifact is not None else None
+      if not filename:
         continue
       chunks = list(getattr(artifact, 'chunks', []) or [])
       if chunks:
-        n = len(chunks)
-        artifacts.extend((get_chunk_name(artifact.fileName, i, n), chunk.sha256)
-                         for i, chunk in enumerate(chunks))
+        count = len(chunks)
+        result.extend((get_chunk_name(filename, i, count), chunk.sha256) for i, chunk in enumerate(chunks))
       elif getattr(artifact, 'downloadUri', None) and getattr(artifact.downloadUri, 'sha256', None):
-        artifacts.append((artifact.fileName, artifact.downloadUri.sha256))
-  return artifacts
+        result.append((filename, artifact.downloadUri.sha256))
+  return result
+
+
+def _bundle_integrity_issues(bundle: custom.ModelManagerSP.ModelBundle | None) -> list[str]:
+  """Read-only verification; never modifies Params or deletes models.
+
+  Legacy v17 artifacts can be standalone files OR have a chunkmanifest, while
+  newer v23 artifacts carry an explicit list of per-chunk SHA256 digests.
+  Refuse an empty/incomplete model definition; do not treat all([]) as valid.
+  """
+  from openpilot.common.file_chunker import get_manifest_path
+
+  if bundle is None or not getattr(bundle, 'models', None):
+    return ['Saved bundle could not be parsed or contains no models']
+
+  root = Paths.model_root()
+  issues = []
+  expected_files = _bundle_artifacts(bundle)
+  if not expected_files:
+    issues.append('Saved bundle has no model artifact checksums')
+
+  for model in bundle.models:
+    primary = getattr(model, 'artifact', None)
+    if not getattr(primary, 'fileName', None):
+      issues.append('Saved bundle has a model with no PKL filename')
+
+    for artifact in (getattr(model, 'artifact', None), getattr(model, 'metadata', None)):
+      filename = getattr(artifact, 'fileName', None) if artifact is not None else None
+      if not filename:
+        continue
+      chunks = list(getattr(artifact, 'chunks', []) or [])
+      if chunks:
+        manifest = get_manifest_path(os.path.join(root, filename))
+        try:
+          with open(manifest, encoding='utf-8') as stream:
+            count = int(stream.read().strip())
+          if count != len(chunks):
+            issues.append(f'{filename}: chunk manifest count {count} != {len(chunks)}')
+        except (OSError, ValueError):
+          issues.append(f'{filename}: chunk manifest missing/invalid')
+      elif not getattr(getattr(artifact, 'downloadUri', None), 'sha256', None):
+        issues.append(f'{filename}: SHA256 missing from saved metadata')
+
+  for filename, expected_hash in expected_files:
+    path = os.path.join(root, filename)
+    if not (os.path.isfile(path) or os.path.isfile(path + '.chunkmanifest')):
+      issues.append(f'{filename}: file missing')
+    elif not _verify_file(path, expected_hash):
+      issues.append(f'{filename}: SHA256 mismatch / incomplete chunk(s)')
+
+  return issues
 
 
 def _bundle_is_valid_locally(bundle: custom.ModelManagerSP.ModelBundle) -> bool:
-  from openpilot.common.file_chunker import get_manifest_path
-  model_root = Paths.model_root()
-  for model in getattr(bundle, 'models', []) or []:
-    for artifact in (getattr(model, 'artifact', None), getattr(model, 'metadata', None)):
-      if not artifact or not getattr(artifact, 'fileName', None):
-        continue
-      chunks = list(getattr(artifact, 'chunks', []) or [])
-      if chunks:
-        manifest = get_manifest_path(os.path.join(model_root, artifact.fileName))
-        try:
-          with open(manifest, encoding='utf-8') as f:
-            if int(f.read().strip()) != len(chunks):
-              return False
-        except (OSError, ValueError):
-          return False
-  return all(_verify_file(os.path.join(model_root, file_name), expected_hash)
-             for file_name, expected_hash in _bundle_artifacts(bundle))
+  return not _bundle_integrity_issues(bundle)
 
 
-def _bundle_needs_reset(active_bundle: custom.ModelManagerSP.ModelBundle, available_bundles: list[custom.ModelManagerSP.ModelBundle] | None) -> bool:
-  """Do not delete an installed model just because the picker catalog changed.
+def _bundle_needs_reset(active_bundle: custom.ModelManagerSP.ModelBundle, available_bundles=None) -> bool:
+  """Legacy compatibility. Only local integrity affects runtime eligibility.
 
-  The focused v23 picker hides earlier model entries. Upstream can also
-  republish the same model ref with recompiled weights/metadata. Neither
-  event invalidates the previously downloaded and checksum-verified files.
-  Validate against the hashes saved with the installed bundle instead.
+  A hidden catalogue entry or an upstream recompile is NOT grounds to erase a
+  previously installed, verified model. The caller must never delete the
+  saved selection merely because this function returns True.
   """
-  if active_bundle is None:
-    return False
-
-  if available_bundles is not None:
-    ref = getattr(active_bundle, 'ref', None)
-    match = next((b for b in available_bundles if ref and b.ref == ref), None)
-    if match is None:
-      cloudlog.warning(f"Saved model {active_bundle.internalName} not exposed in current catalogue; preserving selection if locally verified")
-    elif (active_bundle.minimumSelectorVersion != match.minimumSelectorVersion or
-          set(_bundle_artifacts(active_bundle)) != set(_bundle_artifacts(match))):
-      cloudlog.warning(f"Saved model {active_bundle.internalName} has different catalogue metadata; retaining installed version if locally verified")
-
-  if _bundle_is_valid_locally(active_bundle):
-    return False
-
-  from openpilot.common.file_chunker import get_manifest_path
-  root = Paths.model_root()
-  for model in getattr(active_bundle, 'models', []) or []:
-    for artifact in (getattr(model, 'artifact', None), getattr(model, 'metadata', None)):
-      if not artifact or not getattr(artifact, 'fileName', None):
-        continue
-      chunks = list(getattr(artifact, 'chunks', []) or [])
-      if chunks:
-        manifest = get_manifest_path(os.path.join(root, artifact.fileName))
-        if not os.path.isfile(manifest):
-          cloudlog.error(f"Saved model missing chunk manifest: {manifest}")
-  for filename, sha256 in _bundle_artifacts(active_bundle):
-    path = os.path.join(root, filename)
-    if not os.path.isfile(path):
-      cloudlog.error(f"Saved model file missing: {path}")
-    elif not _verify_file(path, sha256):
-      cloudlog.error(f"Saved model file SHA256 mismatch: {path} (expected {sha256})")
-  return True
+  return not _bundle_is_valid_locally(active_bundle)
 
 
-def validate_active_bundle(params: Params, available_bundles: list[custom.ModelManagerSP.ModelBundle] | None = None) -> None:
-  global _LAST_VALIDATED_RAW
-
-  raw_bundle = params.get("ModelManager_ActiveBundle")
-  if not raw_bundle:
-    return
-
-  if raw_bundle == _LAST_VALIDATED_RAW:
-    return
-
-  active_bundle = get_active_bundle(params, raw_bundle_dict=raw_bundle)
-  if active_bundle is None:
-    cloudlog.error("Active model selection cannot be parsed; falling back to stock")
-    params.remove("ModelManager_ActiveBundle")
-    params.put("ModelRunnerTypeCache", int(custom.ModelManagerSP.Runner.stock))
-    _LAST_VALIDATED_RAW = None
-  elif _bundle_needs_reset(active_bundle, available_bundles):
-    cloudlog.error(f"Active model {active_bundle.internalName} failed LOCAL integrity verification; falling back to stock")
-    params.remove("ModelManager_ActiveBundle")
-    params.put("ModelRunnerTypeCache", int(custom.ModelManagerSP.Runner.stock))
-    _LAST_VALIDATED_RAW = None
-  else:
-    _LAST_VALIDATED_RAW = raw_bundle
-
-
-def get_active_bundle(params: Params | None = None, raw_bundle_dict: dict | bytes | None = None) -> "custom.ModelManagerSP.ModelBundle | None":
+def get_active_bundle(params: Params | None = None, raw_bundle_dict: dict | bytes | None = None) -> 'custom.ModelManagerSP.ModelBundle | None':
   params = params or Params()
   try:
-    active_bundle_dict = raw_bundle_dict if raw_bundle_dict is not None else (params.get("ModelManager_ActiveBundle") or {})
-    if active_bundle_dict and is_bundle_version_compatible(active_bundle_dict):
-      return custom.ModelManagerSP.ModelBundle(**active_bundle_dict)
-  except Exception:
-    pass
+    raw = raw_bundle_dict if raw_bundle_dict is not None else (params.get('ModelManager_ActiveBundle') or {})
+    if raw and is_bundle_version_compatible(raw):
+      return custom.ModelManagerSP.ModelBundle(**raw)
+  except Exception as exc:
+    cloudlog.error(f'Unable to parse saved ModelManager_ActiveBundle: {exc}')
   return None
 
 
+def validate_active_bundle(params: Params, available_bundles=None) -> None:
+  """Log diagnostics once per selected bundle without ever deleting it.
+
+  Safety is enforced by get_active_model_runner, which chooses stock if file
+  checks fail. Avoid overwriting ModelRunnerTypeCache here: this function
+  executes in the off-road process while the actual runner decision belongs
+  to the manager process.
+  """
+  global _LAST_VALIDATED_RAW
+  raw = params.get('ModelManager_ActiveBundle')
+  if not raw:
+    _LAST_VALIDATED_RAW = None
+    return
+  if raw == _LAST_VALIDATED_RAW:
+    return
+
+  bundle = get_active_bundle(params, raw_bundle_dict=raw)
+  issues = _bundle_integrity_issues(bundle)
+  if issues:
+    cloudlog.error('Saved model selection PRESERVED, but runtime must use stock until integrity is repaired: ' + '; '.join(issues[:8]))
+  else:
+    cloudlog.info(f'Saved model selection verified: {bundle.internalName} ({bundle.ref})')
+  _LAST_VALIDATED_RAW = raw
+
+
 def get_active_model_runner(params: Params | None = None, force_check: bool = False) -> int:
+  """Independently gate custom model execution on verified installed files.
+
+  The process-config manager calls this every loop, and ModelRunnerTypeCache
+  is cleared at an on-road transition. We memoize the *result* per saved
+  selection so on-road transitions do not repeatedly hash large files.
+  A new saved selection is always rechecked, even if the old runner cache
+  has not yet expired. A cleared runner cache forces another integrity check
+  at an on-road transition.
+  """
+  global _RUNNER_EVALUATED_RAW, _RUNNER_EVALUATED_RESULT
   params = params or Params()
-  cached_runner_type = params.get("ModelRunnerTypeCache")
-  if cached_runner_type is not None and not force_check:
-    return cached_runner_type
-  runner_type = custom.ModelManagerSP.Runner.stock
-  if active_bundle := get_active_bundle(params):
-    runner_type = active_bundle.runner.raw
+  raw = params.get('ModelManager_ActiveBundle')
+  stored_cache = params.get('ModelRunnerTypeCache')
 
-  if cached_runner_type != runner_type:
-    params.put("ModelRunnerTypeCache", int(runner_type))
+  if raw == _RUNNER_EVALUATED_RAW and _RUNNER_EVALUATED_RESULT is not None and stored_cache is not None:
+    runner = _RUNNER_EVALUATED_RESULT
+  else:
+    runner = int(custom.ModelManagerSP.Runner.stock)
+    if raw:
+      bundle = get_active_bundle(params, raw_bundle_dict=raw)
+      issues = _bundle_integrity_issues(bundle)
+      if bundle is not None and not issues:
+        runner = int(bundle.runner.raw)
+      else:
+        cloudlog.error('Custom model is selected but NOT runnable; using stock while preserving selection: ' + '; '.join(issues[:8]))
+    _RUNNER_EVALUATED_RAW = raw
+    _RUNNER_EVALUATED_RESULT = runner
 
-  return runner_type
+  # Re-establish the cleared runner cache after an on-road transition. Do
+  # not trust a stale cached tinygrad value for a different selected bundle.
+  if stored_cache != runner:
+    params.put('ModelRunnerTypeCache', runner)
+  return runner
 
 
 def _get_model():
   if bundle := get_active_bundle():
-    drive_model = next(model for model in bundle.models if model.type == ModelManager.Model.Type.supercombo)
-    return drive_model
+    return next((m for m in bundle.models if m.type == ModelManager.Model.Type.supercombo), None)
   return None
 
 
 def load_metadata():
   model = _get_model()
-  metadata_path = f"{CUSTOM_MODEL_PATH}/{model.metadata.fileName}" if model else METADATA_PATH
-
-  with open(metadata_path, 'rb') as f:
-    return pickle.load(f)
+  metadata_name = model.metadata.fileName if model and model.metadata.fileName else None
+  metadata_path = os.path.join(CUSTOM_MODEL_PATH, metadata_name) if metadata_name else METADATA_PATH
+  with open(metadata_path, 'rb') as stream:
+    return pickle.load(stream)
 
 
 def prepare_inputs(model_metadata: dict) -> dict[str, np.ndarray]:
@@ -225,36 +256,27 @@ def prepare_inputs(model_metadata: dict) -> dict[str, np.ndarray]:
 
 
 def load_meta_constants(model_metadata: dict):
-  """ Loads the appropriate meta model class based on key shapes"""
   if 'sim_pose' in model_metadata['input_shapes']:
     return MetaSimPose
-
   meta_slice = model_metadata['output_slices']['meta']
   if (meta_slice.start, meta_slice.stop, meta_slice.step) == (5868, 5921, None):
     return MetaTombRaider
-
   return Meta
 
 
-# The following method(s) are modeld helper methods
 def plan_x_idxs_helper(constants, plan, model_output) -> list[float]:
-  # times at X_IDXS according to plan.
   LINE_T_IDXS = [np.nan] * constants.IDX_N
   LINE_T_IDXS[0] = 0.0
   plan_x = model_output['plan'][0, :, plan.POSITION][:, 0].tolist()
   for xidx in range(1, constants.IDX_N):
     tidx = 0
-    # increment tidx until we find an element that's further away than the current xidx
-    while tidx < constants.IDX_N - 1 and plan_x[tidx + 1] < constants.X_IDXS[xidx]:
+    while tidx < constants.IDX_N - 1 and model_output['plan'][0, tidx + 1, plan.POSITION][0] < constants.X_IDXS[xidx]:
       tidx += 1
     if tidx == constants.IDX_N - 1:
-      # if the plan doesn't extend far enough, set plan_t to the max value (10s), then break
       LINE_T_IDXS[xidx] = constants.T_IDXS[constants.IDX_N - 1]
       break
-    # interpolate to find `t` for the current xidx
-    current_x_val = plan_x[tidx]
-    next_x_val = plan_x[tidx + 1]
-    p = (constants.X_IDXS[xidx] - current_x_val) / (next_x_val - current_x_val) if abs(
-      next_x_val - current_x_val) > 1e-9 else float('nan')
+    current_x_val = model_output['plan'][0, tidx, plan.POSITION][0]
+    next_x_val = model_output['plan'][0, tidx + 1, plan.POSITION][0]
+    p = (constants.X_IDXS[xidx] - current_x_val) / (next_x_val - current_x_val) if abs(next_x_val - current_x_val) > 1e-9 else float('nan')
     LINE_T_IDXS[xidx] = p * constants.T_IDXS[tidx + 1] + (1 - p) * constants.T_IDXS[tidx]
   return LINE_T_IDXS
