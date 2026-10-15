@@ -1,0 +1,73 @@
+name: V246 VSL V3.2 shadow validation
+
+on:
+  push:
+    branches:
+      - xnor-dev-v246-vsl-v32-shadow
+    paths:
+      - .github/workflows/v246-vsl-v32-shadow.yml
+      - selfdrive/speed_limit_vision_uk.py
+      - selfdrive/vsl_v3/export_shadow_samples.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax check
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify V246 shadow-only source
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'V1.18 / V246' selfdrive/speed_limit_vision_uk.py
+          grep -q 'xnor_vsl_shadow_samples/v246' selfdrive/speed_limit_vision_uk.py
+          grep -q 'UK vision V1.18: ready' selfdrive/speed_limit_vision_uk.py
+          grep -q 'authoritative=0' selfdrive/speed_limit_vision_uk.py
+          grep -q 'v246_shadow_samples.zip' selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify authority and broad-capture thresholds unchanged
+        run: |
+          python - <<'PY'
+          import ast
+          p = "selfdrive/speed_limit_vision_uk.py"
+          tree = ast.parse(open(p).read(), p)
+          vals = {}
+          for n in tree.body:
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+              try:
+                vals[n.targets[0].id] = ast.literal_eval(n.value)
+              except Exception:
+                pass
+          assert vals["SHADOW_MIN_DECISION_CONFIDENCE"] == 0.60
+          assert vals["SHADOW_MIN_DECISION_CONSENSUS"] == 0.60
+          assert vals["SHADOW_OCR_MIN_CONFIDENCE"] == 0.72
+          assert vals["SHADOW_CAPTURE_SINGLE_NUMERIC_CONFIDENCE"] == 0.35
+          assert vals["SHADOW_CAPTURE_SINGLE_OTHER_CONFIDENCE"] == 0.45
+          assert vals["SHADOW_CAPTURE_MAX_FILES"] == 500
+          print("V246 source checks: PASS")
+          PY
+
+      - name: Package changed sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: v246-vsl-v32-shadow-source
+          path: |
+            selfdrive/speed_limit_vision_uk.py
+            selfdrive/vsl_v3/export_shadow_samples.py
+          retention-days: 14
