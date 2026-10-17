@@ -22,7 +22,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.18-UK
+# XNOR Vision Speed Limit V1.19-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -77,6 +77,10 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # visually verified V244/V245 hard examples plus runtime-like nested crop views
 # so the fitted inputs better match the three-crop road inference path. V3.2 is
 # still shadow-only; this build starts a clean v246 validation capture set.
+#
+# V1.19 / V247 carries the V3.3 retrain using the reviewed V246 road batch,
+# including newly verified 20/50/60 signs and restriction-sign OTHER examples.
+# V3.3 remains shadow-only and starts a clean v247 validation capture set.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -96,7 +100,7 @@ SHADOW_MIN_DECISION_CONSENSUS = 0.60
 SHADOW_OCR_SECONDS = 2.5
 SHADOW_OCR_REQUIRED = 2
 SHADOW_OCR_MIN_CONFIDENCE = 0.72
-SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v246")
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v247")
 SHADOW_CAPTURE_MAX_FILES = 500
 SHADOW_CAPTURE_INTERVAL = 0.50
 SHADOW_CAPTURE_MAX_SIDE = 256
@@ -534,7 +538,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.18: ready")
+      self._set_status("UK vision V1.19: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
