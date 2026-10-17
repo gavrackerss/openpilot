@@ -3,7 +3,7 @@ name: V247 EPAS 10Hz and VSL V3.3
 on:
   push:
     branches:
-      - xnor-dev-v247-epas10hz-vsl-v33-shadow
+      - xnor-dev-v247-epas10hz-vsl-v33-final
     paths:
       - .github/workflows/v247-epas10hz-vsl-v33.yml
       - opendbc_repo/opendbc/car/tesla/carcontroller.py
