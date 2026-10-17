@@ -1,0 +1,47 @@
+name: V247 EPAS 10Hz and VSL V3.3
+
+on:
+  push:
+    branches:
+      - xnor-dev-v247-epas10hz-vsl-v33-shadow
+    paths:
+      - .github/workflows/v247-epas10hz-vsl-v33.yml
+      - opendbc_repo/opendbc/car/tesla/carcontroller.py
+      - selfdrive/speed_limit_vision_uk.py
+      - selfdrive/vsl_v3/export_shadow_samples.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Syntax
+        run: |
+          python -m py_compile opendbc_repo/opendbc/car/tesla/carcontroller.py
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/export_shadow_samples.py
+      - name: Verify original-xnor EPAS cadence
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          s=Path("opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
+          needle='if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):'
+          assert needle in s
+          i=s.index(needle)
+          window=s[i:i+900]
+          assert 'counter = (self.frame // 10) % 16' in window
+          assert 'create_steering_allowed(counter)' in window
+          assert 'self.frame % 2 == 0' not in window
+          print("V247 EPAS allow cadence: 10 Hz PASS")
+          PY
+      - name: Verify ALC floor unchanged
+        run: |
+          grep -q 'LANE_CHANGE_SPEED_MIN = 20 \* CV.MPH_TO_MS' selfdrive/controls/lib/desire_helper.py
