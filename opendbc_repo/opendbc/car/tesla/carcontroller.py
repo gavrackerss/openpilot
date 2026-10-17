@@ -1758,8 +1758,11 @@ class CarController(CarControllerBase):
     #   send OP's normal APS_eacAllow=1 stream until native Autosteer comes back or OP disengages.
     # - V199 also sends allow=1 during the state-driven co-op re-arm, beginning at the physical
     #   takeover rather than waiting for native 0x488 to fall.
-    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 2 == 0):
-      counter = (self.frame // 2) % 16
+    if (self.CP.carFingerprint in LEGACY_CARS) and (self.frame % 10 == 0):
+      # V247: restore original xnor EPAS allow cadence on the direct OP path.
+      # xnor-c3 sends APS_eacAllow=1 at 10 Hz; the later 50 Hz stream correlates
+      # with real EAC ACTIVE<->AVAILABLE oscillation seen during OP ALC.
+      counter = (self.frame // 10) % 16
       # V213: Tesla retains the sole 0x27D handshake while its native 0x488 is active.
       # OP may take it only after real native release, avoiding competing allow streams.
       # V218: match the original OP-only lifecycle whenever genuine Tesla

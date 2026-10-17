@@ -7,8 +7,8 @@ import json
 import zipfile
 from pathlib import Path
 
-DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v246")
-DEFAULT_OUTPUT = Path("/data/media/0/v246_shadow_samples.zip")
+DEFAULT_SOURCE = Path("/data/media/0/xnor_vsl_shadow_samples/v247")
+DEFAULT_OUTPUT = Path("/data/media/0/v247_shadow_samples.zip")
 
 
 def suggested_label(row: dict) -> tuple[str, str]:
@@ -64,14 +64,14 @@ def load_manifest(source: Path) -> list[dict]:
 
 
 def main() -> None:
-  ap = argparse.ArgumentParser(description="Package V246 V3.2 shadow validation crops for review.")
+  ap = argparse.ArgumentParser(description="Package V247 V3.3 shadow validation crops for review.")
   ap.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
   ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
   args = ap.parse_args()
 
   rows = load_manifest(args.source)
   if not rows:
-    raise SystemExit(f"No captured V246 samples found under {args.source}")
+    raise SystemExit(f"No captured V247 samples found under {args.source}")
 
   args.output.parent.mkdir(parents=True, exist_ok=True)
   review_fields = [
@@ -104,7 +104,7 @@ def main() -> None:
       p = args.source / str(row["file"])
       zf.write(p, f"crops/{p.name}")
 
-  print(f"V246 shadow samples: {len(rows)}")
+  print(f"V247 shadow samples: {len(rows)}")
   print(f"Review CSV: {review_csv}")
   print(f"Package: {args.output}")
 
