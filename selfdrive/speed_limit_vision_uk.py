@@ -86,7 +86,8 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # differing speed signs are retained as distinct proposals and create a short
 # ambiguity hold instead of whichever value wins one frame becoming authoritative.
 # Pending numeric reacquisition is also tightened and may not re-anchor onto a
-# neighbouring ring until OCR confirms the original speed. V3.3 is unchanged
+# neighbouring ring until OCR confirms the original speed. Temporal reads are
+# likewise scoped to one physical bbox/track. V3.3 is unchanged
 # and remains shadow-only; v248 starts a clean validation capture set.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
