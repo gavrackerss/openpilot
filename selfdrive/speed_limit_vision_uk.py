@@ -22,7 +22,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.19-UK
+# XNOR Vision Speed Limit V1.20-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -81,6 +81,13 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # V1.19 / V247 carries the V3.3 retrain using the reviewed V246 road batch,
 # including newly verified 20/50/60 signs and restriction-sign OTHER examples.
 # V3.3 remains shadow-only and starts a clean v247 validation capture set.
+#
+# V1.20 / V248 makes numeric tracking/arbitration physical-sign aware. Adjacent
+# differing speed signs are retained as distinct proposals and create a short
+# ambiguity hold instead of whichever value wins one frame becoming authoritative.
+# Pending numeric reacquisition is also tightened and may not re-anchor onto a
+# neighbouring ring until OCR confirms the original speed. V3.3 is unchanged
+# and remains shadow-only; v248 starts a clean validation capture set.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -100,7 +107,7 @@ SHADOW_MIN_DECISION_CONSENSUS = 0.60
 SHADOW_OCR_SECONDS = 2.5
 SHADOW_OCR_REQUIRED = 2
 SHADOW_OCR_MIN_CONFIDENCE = 0.72
-SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v247")
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v248")
 SHADOW_CAPTURE_MAX_FILES = 500
 SHADOW_CAPTURE_INTERVAL = 0.50
 SHADOW_CAPTURE_MAX_SIDE = 256
@@ -145,15 +152,17 @@ NUMERIC_TRACK_MAX_AGE = 1.50
 NUMERIC_TRACK_MAX_FRAMES = 24
 NUMERIC_TRACK_ARM_MIN_CONFIDENCE = 0.40
 NUMERIC_TRACK_MIN_CONFIDENCE = 0.52
-NUMERIC_TRACK_INITIAL_SEARCH_PADDING = 2.00
-NUMERIC_TRACK_SEARCH_PADDING = 1.00
+NUMERIC_TRACK_INITIAL_SEARCH_PADDING = 1.25
+NUMERIC_TRACK_SEARCH_PADDING = 0.80
 NUMERIC_TRACK_INITIAL_MIN_SCALE = 0.40
 NUMERIC_TRACK_INITIAL_MAX_SCALE = 3.00
 NUMERIC_TRACK_MIN_SCALE = 0.55
 NUMERIC_TRACK_MAX_SCALE = 2.20
-NUMERIC_TRACK_INITIAL_MAX_CENTER_SHIFT = 2.50
-NUMERIC_TRACK_MAX_CENTER_SHIFT = 1.50
+NUMERIC_TRACK_INITIAL_MAX_CENTER_SHIFT = 1.00
+NUMERIC_TRACK_MAX_CENTER_SHIFT = 0.75
 NUMERIC_TRACK_MIN_RING_SCORE = 0.20
+NUMERIC_MULTI_SIGN_HOLD_SECONDS = 1.25
+NUMERIC_MULTI_SIGN_RECOVERY_SECONDS = 3.00
 FOLLOWUP_WINDOW_SECONDS = 2.0
 TRACK_FRAME_INTERVAL = 0.10
 TRACK_MAX_AGE_SECONDS = 1.50
@@ -234,6 +243,7 @@ class HistoryEntry:
   confidence: float
   created_at: float
   source_family: str
+  bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass
@@ -293,6 +303,9 @@ class SpeedLimitVisionUK:
     self.pending_numeric: PendingNumeric | None = None
     self.last_candidate_at = 0.0
     self._last_national_log_at = 0.0
+    self._numeric_multi_sign_hold_until = -1e9
+    self._numeric_multi_sign_recovery_until = -1e9
+    self._numeric_multi_sign_last_log_at = -1e9
 
     self.sm = None
     self.runtime_error = ""
@@ -538,7 +551,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.19: ready")
+      self._set_status("UK vision V1.20: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
