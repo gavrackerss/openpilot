@@ -22,7 +22,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader, UKSpeedValueReader
 
 
-# XNOR Vision Speed Limit V1.19-UK
+# XNOR Vision Speed Limit V1.20-UK
 #
 # Runtime design is based on the speed-limit vision pipeline in StarPilot
 # (firestar5683/StarPilot, Dom branch), but deliberately uses only the legacy
@@ -81,6 +81,14 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # V1.19 / V247 carries the V3.3 retrain using the reviewed V246 road batch,
 # including newly verified 20/50/60 signs and restriction-sign OTHER examples.
 # V3.3 remains shadow-only and starts a clean v247 validation capture set.
+#
+# V1.20 / V248 makes numeric tracking/arbitration physical-sign aware. Adjacent
+# differing speed signs are retained as distinct proposals and create a short
+# ambiguity hold instead of whichever value wins one frame becoming authoritative.
+# Pending numeric reacquisition is also tightened and may not re-anchor onto a
+# neighbouring ring until OCR confirms the original speed. Temporal reads are
+# likewise scoped to one physical bbox/track. V3.3 is unchanged
+# and remains shadow-only; v248 starts a clean validation capture set.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -100,7 +108,7 @@ SHADOW_MIN_DECISION_CONSENSUS = 0.60
 SHADOW_OCR_SECONDS = 2.5
 SHADOW_OCR_REQUIRED = 2
 SHADOW_OCR_MIN_CONFIDENCE = 0.72
-SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v247")
+SHADOW_CAPTURE_DIR = Path("/data/media/0/xnor_vsl_shadow_samples/v248")
 SHADOW_CAPTURE_MAX_FILES = 500
 SHADOW_CAPTURE_INTERVAL = 0.50
 SHADOW_CAPTURE_MAX_SIDE = 256
@@ -145,15 +153,17 @@ NUMERIC_TRACK_MAX_AGE = 1.50
 NUMERIC_TRACK_MAX_FRAMES = 24
 NUMERIC_TRACK_ARM_MIN_CONFIDENCE = 0.40
 NUMERIC_TRACK_MIN_CONFIDENCE = 0.52
-NUMERIC_TRACK_INITIAL_SEARCH_PADDING = 2.00
-NUMERIC_TRACK_SEARCH_PADDING = 1.00
+NUMERIC_TRACK_INITIAL_SEARCH_PADDING = 1.25
+NUMERIC_TRACK_SEARCH_PADDING = 0.80
 NUMERIC_TRACK_INITIAL_MIN_SCALE = 0.40
 NUMERIC_TRACK_INITIAL_MAX_SCALE = 3.00
 NUMERIC_TRACK_MIN_SCALE = 0.55
 NUMERIC_TRACK_MAX_SCALE = 2.20
-NUMERIC_TRACK_INITIAL_MAX_CENTER_SHIFT = 2.50
-NUMERIC_TRACK_MAX_CENTER_SHIFT = 1.50
+NUMERIC_TRACK_INITIAL_MAX_CENTER_SHIFT = 1.00
+NUMERIC_TRACK_MAX_CENTER_SHIFT = 0.75
 NUMERIC_TRACK_MIN_RING_SCORE = 0.20
+NUMERIC_MULTI_SIGN_HOLD_SECONDS = 1.25
+NUMERIC_MULTI_SIGN_RECOVERY_SECONDS = 3.00
 FOLLOWUP_WINDOW_SECONDS = 2.0
 TRACK_FRAME_INTERVAL = 0.10
 TRACK_MAX_AGE_SECONDS = 1.50
@@ -234,6 +244,7 @@ class HistoryEntry:
   confidence: float
   created_at: float
   source_family: str
+  bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass
@@ -293,6 +304,9 @@ class SpeedLimitVisionUK:
     self.pending_numeric: PendingNumeric | None = None
     self.last_candidate_at = 0.0
     self._last_national_log_at = 0.0
+    self._numeric_multi_sign_hold_until = -1e9
+    self._numeric_multi_sign_recovery_until = -1e9
+    self._numeric_multi_sign_last_log_at = -1e9
 
     self.sm = None
     self.runtime_error = ""
@@ -538,7 +552,7 @@ class SpeedLimitVisionUK:
       self.value_reader = UKSpeedValueReader(self.cv2)
       self.national_reader = UKNationalSpeedLimitReader(self.cv2)
       self.runtime_error = ""
-      self._set_status("UK vision V1.19: ready")
+      self._set_status("UK vision V1.20: ready")
       cloudlog.info(
         f"[XNOR_VSL_V12UK] loaded proposal model {MODEL_PATH}; "
         "UK crop/tracking/national readers active"
@@ -1774,6 +1788,81 @@ class SpeedLimitVisionUK:
         break
     return kept
 
+  @classmethod
+  def _numeric_same_physical_sign(cls, a, b) -> bool:
+    """Conservative spatial identity for authoritative numeric sign tracking.
+
+    This is intentionally stricter than V3's diagnostic clustering. A neighbouring
+    20/50 pair must remain two objects even when both rings sit inside the same
+    broad search ROI.
+    """
+    if a is None or b is None:
+      return False
+    if cls._bbox_iou(a, b) >= 0.05:
+      return True
+
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    aw, ah = max(ax2 - ax1, 1), max(ay2 - ay1, 1)
+    bw, bh = max(bx2 - bx1, 1), max(by2 - by1, 1)
+    scale = max(aw, ah, bw, bh, 1)
+    width_ratio = max(aw, bw) / float(max(min(aw, bw), 1))
+    height_ratio = max(ah, bh) / float(max(min(ah, bh), 1))
+    if max(width_ratio, height_ratio) > 2.5:
+      return False
+
+    acx, acy = (ax1 + ax2) * 0.5, (ay1 + ay2) * 0.5
+    bcx, bcy = (bx1 + bx2) * 0.5, (by1 + by2) * 0.5
+    return float(np.hypot(acx - bcx, acy - bcy)) <= float(scale) * 0.80
+
+  @classmethod
+  def _numeric_candidates_conflict(cls, candidates) -> bool:
+    """True when one frame contains spatially distinct accepted numeric values."""
+    for i, left in enumerate(candidates):
+      for right in candidates[i + 1:]:
+        if int(left.speed_limit_mph) == int(right.speed_limit_mph):
+          continue
+        if not cls._numeric_same_physical_sign(left.bbox, right.bbox):
+          return True
+    return False
+
+  def _start_numeric_multi_sign_hold(self, candidates, now: float) -> None:
+    """Freeze numeric authority briefly when different physical signs coexist.
+
+    Keep the existing confirmed/map speed rather than guessing which sign applies
+    to the ego lane. Clear any provisional lower candidate and require fresh,
+    spatially-consistent reads after the ambiguity clears.
+    """
+    self._numeric_multi_sign_hold_until = max(
+      float(self._numeric_multi_sign_hold_until),
+      float(now) + NUMERIC_MULTI_SIGN_HOLD_SECONDS,
+    )
+    self._numeric_multi_sign_recovery_until = max(
+      float(self._numeric_multi_sign_recovery_until),
+      float(now) + NUMERIC_MULTI_SIGN_RECOVERY_SECONDS,
+    )
+    self.history.clear()
+    self._clear_pending_numeric("multi_sign")
+    self._clear_lower_candidate("multi_sign")
+
+    if float(now) - float(self._numeric_multi_sign_last_log_at) >= 0.75:
+      parts = []
+      for detection in sorted(candidates, key=lambda d: (int(d.speed_limit_mph), d.bbox or (0, 0, 0, 0))):
+        bbox = detection.bbox
+        bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+        parts.append(
+          f"{int(detection.speed_limit_mph)}@{float(detection.confidence):.2f}[{bbox_text}]"
+        )
+      cloudlog.warning(
+        f"[XNOR_VSL_MULTI] conflicting_signs={'|'.join(parts)} "
+        f"hold={NUMERIC_MULTI_SIGN_HOLD_SECONDS:.2f}s "
+        f"recovery={NUMERIC_MULTI_SIGN_RECOVERY_SECONDS:.2f}s"
+      )
+      self._numeric_multi_sign_last_log_at = float(now)
+
+    speeds = "/".join(str(x) for x in sorted({int(d.speed_limit_mph) for d in candidates}))
+    self._set_status(f"UK multi-sign {speeds}: waiting for separation")
+
   def _clear_pending_numeric(self, reason: str) -> None:
     pending = self.pending_numeric
     if pending is not None:
@@ -1947,9 +2036,17 @@ class SpeedLimitVisionUK:
       return None
 
     tracked_bbox, ring, ring_partial, ring_reason = found
-    pending.bbox = tracked_bbox
-    pending.tracked_once = True
     bbox_text = ",".join(str(int(v)) for v in tracked_bbox)
+
+    # V248: a broad red-ring search ROI must not silently jump from the pending
+    # sign onto a neighbouring 20/50/etc. Keep the original anchor until the
+    # candidate is both spatially consistent and OCR confirms the same value.
+    if not self._numeric_same_physical_sign(pending.bbox, tracked_bbox):
+      cloudlog.info(
+        f"[XNOR_VSL_MULTI] track_identity_reject expected={pending.speed_limit_mph}mph "
+        f"anchor={','.join(str(int(v)) for v in pending.bbox)} candidate={bbox_text}"
+      )
+      return None
 
     # V240: let V3 observe fresh tracked crops at 4 Hz. This is diagnostic-only;
     # its result is not read by the authoritative OCR/temporal path below.
@@ -2012,6 +2109,12 @@ class SpeedLimitVisionUK:
         f"read={read_speed}mph confidence={confidence:.3f} frame={pending.frames}"
       )
       return None
+
+    # Only now is the candidate allowed to become the next physical anchor.
+    # A mismatching adjacent sign can be observed/captured by the full detector,
+    # but can never drag this pending track across the frame.
+    pending.bbox = tracked_bbox
+    pending.tracked_once = True
 
     if confidence < NUMERIC_TRACK_MIN_CONFIDENCE:
       cloudlog.info(
@@ -2462,7 +2565,28 @@ class SpeedLimitVisionUK:
     if not candidates:
       return self._detect_national_sign(frame_bgr)
 
+    now = time.monotonic()
     candidates.sort(key=lambda d: d.confidence, reverse=True)
+
+    # V248: if two spatially distinct accepted signs disagree in one frame,
+    # do not guess which applies to the ego lane. Preserve the existing trusted
+    # speed/map state, clear any provisional lower-only candidate, and wait for
+    # the scene to separate before accepting a fresh numeric value.
+    if self._numeric_candidates_conflict(candidates):
+      self._start_numeric_multi_sign_hold(candidates, now)
+      return None
+
+    if now < self._numeric_multi_sign_hold_until:
+      if now - self._numeric_multi_sign_last_log_at >= 0.75:
+        cloudlog.info(
+          f"[XNOR_VSL_MULTI] separation_hold remaining="
+          f"{max(self._numeric_multi_sign_hold_until - now, 0.0):.2f}s "
+          f"candidate={int(candidates[0].speed_limit_mph)}"
+        )
+        self._numeric_multi_sign_last_log_at = float(now)
+      self._set_status("UK multi-sign: waiting for separation")
+      return None
+
     return candidates[0]
 
   def _prune_history(self, now: float) -> None:
@@ -2480,27 +2604,52 @@ class SpeedLimitVisionUK:
       detection.confidence,
       now,
       source_family,
+      detection.bbox,
     ))
     self._prune_history(now)
 
-    counts = Counter(
-      (x.speed_limit_mph, x.source_family)
-      for x in self.history
-    )
-    count = counts.get((detection.speed_limit_mph, source_family), 0)
-    confs = [
-      x.confidence for x in self.history
-      if x.speed_limit_mph == detection.speed_limit_mph and x.source_family == source_family
-    ]
+    # V248: temporal confirmations belong to one physical sign. Two different
+    # 20s/50s visible in the same few seconds cannot contribute reads to each
+    # other's confirmation count merely because their numeric value/source match.
+    matching_history = []
+    for entry in self.history:
+      if (
+        entry.speed_limit_mph != detection.speed_limit_mph or
+        entry.source_family != source_family
+      ):
+        continue
+      if (
+        source_family == "numeric" and
+        detection.bbox is not None and entry.bbox is not None and
+        not self._numeric_same_physical_sign(detection.bbox, entry.bbox)
+      ):
+        continue
+      matching_history.append(entry)
+
+    count = len(matching_history)
+    confs = [x.confidence for x in matching_history]
     best_conf = max(confs) if confs else 0.0
     initial_required = NATIONAL_REQUIRED_READS if is_national else INITIAL_REQUIRED_READS
     change_required = NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS
 
-    # Numeric signs retain the existing immediate lower-only provisional path.
-    # NSL is heuristic-only, so do not expose it to CarState until all 3 fresh
-    # full-frame confirmations have succeeded.
-    if not is_national or count >= NATIONAL_REQUIRED_READS:
+    # Numeric signs normally retain the existing immediate lower-only
+    # provisional path. After a multi-sign scene, however, require two fresh
+    # spatially-consistent reads before exposing any lower candidate to CarState.
+    # This prevents an adjacent side-road 20 beside an ego-road 50 from winning
+    # immediately as the pair separates. NSL still requires all 3 confirmations.
+    in_multi_recovery = bool(
+      not is_national and now < self._numeric_multi_sign_recovery_until
+    )
+    lower_candidate_ready = bool(
+      (not is_national and (not in_multi_recovery or count >= CHANGE_REQUIRED_READS)) or
+      (is_national and count >= NATIONAL_REQUIRED_READS)
+    )
+    if lower_candidate_ready:
       self._publish_lower_candidate(detection)
+    elif in_multi_recovery:
+      self._log_temporal_candidate(
+        detection, count, CHANGE_REQUIRED_READS, "multi_sign_lower_hold"
+      )
 
     if best_conf < MIN_CONFIRMED_CONFIDENCE:
       self._log_temporal_candidate(detection, count, initial_required, "confidence_reject")
