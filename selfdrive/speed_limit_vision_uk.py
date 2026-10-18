@@ -2563,7 +2563,28 @@ class SpeedLimitVisionUK:
     if not candidates:
       return self._detect_national_sign(frame_bgr)
 
+    now = time.monotonic()
     candidates.sort(key=lambda d: d.confidence, reverse=True)
+
+    # V248: if two spatially distinct accepted signs disagree in one frame,
+    # do not guess which applies to the ego lane. Preserve the existing trusted
+    # speed/map state, clear any provisional lower-only candidate, and wait for
+    # the scene to separate before accepting a fresh numeric value.
+    if self._numeric_candidates_conflict(candidates):
+      self._start_numeric_multi_sign_hold(candidates, now)
+      return None
+
+    if now < self._numeric_multi_sign_hold_until:
+      if now - self._numeric_multi_sign_last_log_at >= 0.75:
+        cloudlog.info(
+          f"[XNOR_VSL_MULTI] separation_hold remaining="
+          f"{max(self._numeric_multi_sign_hold_until - now, 0.0):.2f}s "
+          f"candidate={int(candidates[0].speed_limit_mph)}"
+        )
+        self._numeric_multi_sign_last_log_at = float(now)
+      self._set_status("UK multi-sign: waiting for separation")
+      return None
+
     return candidates[0]
 
   def _prune_history(self, now: float) -> None:
@@ -2581,27 +2602,52 @@ class SpeedLimitVisionUK:
       detection.confidence,
       now,
       source_family,
+      detection.bbox,
     ))
     self._prune_history(now)
 
-    counts = Counter(
-      (x.speed_limit_mph, x.source_family)
-      for x in self.history
-    )
-    count = counts.get((detection.speed_limit_mph, source_family), 0)
-    confs = [
-      x.confidence for x in self.history
-      if x.speed_limit_mph == detection.speed_limit_mph and x.source_family == source_family
-    ]
+    # V248: temporal confirmations belong to one physical sign. Two different
+    # 20s/50s visible in the same few seconds cannot contribute reads to each
+    # other's confirmation count merely because their numeric value/source match.
+    matching_history = []
+    for entry in self.history:
+      if (
+        entry.speed_limit_mph != detection.speed_limit_mph or
+        entry.source_family != source_family
+      ):
+        continue
+      if (
+        source_family == "numeric" and
+        detection.bbox is not None and entry.bbox is not None and
+        not self._numeric_same_physical_sign(detection.bbox, entry.bbox)
+      ):
+        continue
+      matching_history.append(entry)
+
+    count = len(matching_history)
+    confs = [x.confidence for x in matching_history]
     best_conf = max(confs) if confs else 0.0
     initial_required = NATIONAL_REQUIRED_READS if is_national else INITIAL_REQUIRED_READS
     change_required = NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS
 
-    # Numeric signs retain the existing immediate lower-only provisional path.
-    # NSL is heuristic-only, so do not expose it to CarState until all 3 fresh
-    # full-frame confirmations have succeeded.
-    if not is_national or count >= NATIONAL_REQUIRED_READS:
+    # Numeric signs normally retain the existing immediate lower-only
+    # provisional path. After a multi-sign scene, however, require two fresh
+    # spatially-consistent reads before exposing any lower candidate to CarState.
+    # This prevents an adjacent side-road 20 beside an ego-road 50 from winning
+    # immediately as the pair separates. NSL still requires all 3 confirmations.
+    in_multi_recovery = bool(
+      not is_national and now < self._numeric_multi_sign_recovery_until
+    )
+    lower_candidate_ready = bool(
+      (not is_national and (not in_multi_recovery or count >= CHANGE_REQUIRED_READS)) or
+      (is_national and count >= NATIONAL_REQUIRED_READS)
+    )
+    if lower_candidate_ready:
       self._publish_lower_candidate(detection)
+    elif in_multi_recovery:
+      self._log_temporal_candidate(
+        detection, count, CHANGE_REQUIRED_READS, "multi_sign_lower_hold"
+      )
 
     if best_conf < MIN_CONFIRMED_CONFIDENCE:
       self._log_temporal_candidate(detection, count, initial_required, "confidence_reject")
