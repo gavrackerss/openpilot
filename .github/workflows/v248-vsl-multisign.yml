@@ -100,3 +100,5 @@ jobs:
             selfdrive/speed_limit_vision_uk.py
             selfdrive/vsl_v3/export_shadow_samples.py
           retention-days: 14
+
+# V248 validation trigger 2
