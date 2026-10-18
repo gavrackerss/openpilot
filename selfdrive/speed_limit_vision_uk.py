@@ -2034,9 +2034,17 @@ class SpeedLimitVisionUK:
       return None
 
     tracked_bbox, ring, ring_partial, ring_reason = found
-    pending.bbox = tracked_bbox
-    pending.tracked_once = True
     bbox_text = ",".join(str(int(v)) for v in tracked_bbox)
+
+    # V248: a broad red-ring search ROI must not silently jump from the pending
+    # sign onto a neighbouring 20/50/etc. Keep the original anchor until the
+    # candidate is both spatially consistent and OCR confirms the same value.
+    if not self._numeric_same_physical_sign(pending.bbox, tracked_bbox):
+      cloudlog.info(
+        f"[XNOR_VSL_MULTI] track_identity_reject expected={pending.speed_limit_mph}mph "
+        f"anchor={','.join(str(int(v)) for v in pending.bbox)} candidate={bbox_text}"
+      )
+      return None
 
     # V240: let V3 observe fresh tracked crops at 4 Hz. This is diagnostic-only;
     # its result is not read by the authoritative OCR/temporal path below.
@@ -2099,6 +2107,12 @@ class SpeedLimitVisionUK:
         f"read={read_speed}mph confidence={confidence:.3f} frame={pending.frames}"
       )
       return None
+
+    # Only now is the candidate allowed to become the next physical anchor.
+    # A mismatching adjacent sign can be observed/captured by the full detector,
+    # but can never drag this pending track across the frame.
+    pending.bbox = tracked_bbox
+    pending.tracked_once = True
 
     if confidence < NUMERIC_TRACK_MIN_CONFIDENCE:
       cloudlog.info(
