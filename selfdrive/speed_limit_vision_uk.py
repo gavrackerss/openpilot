@@ -1805,8 +1805,9 @@ class SpeedLimitVisionUK:
     aw, ah = max(ax2 - ax1, 1), max(ay2 - ay1, 1)
     bw, bh = max(bx2 - bx1, 1), max(by2 - by1, 1)
     scale = max(aw, ah, bw, bh, 1)
-    size_ratio = max(aw, ah, bw, bh) / float(max(min(aw, ah, bw, bh), 1))
-    if size_ratio > 2.5:
+    width_ratio = max(aw, bw) / float(max(min(aw, bw), 1))
+    height_ratio = max(ah, bh) / float(max(min(ah, bh), 1))
+    if max(width_ratio, height_ratio) > 2.5:
       return False
 
     acx, acy = (ax1 + ax2) * 0.5, (ay1 + ay2) * 0.5
