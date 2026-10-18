@@ -1,0 +1,102 @@
+name: V248 VSL multi-sign tracking
+
+on:
+  push:
+    branches:
+      - xnor-dev-v248-vsl-multisign
+    paths:
+      - .github/workflows/v248-vsl-multisign.yml
+      - selfdrive/speed_limit_vision_uk.py
+      - selfdrive/vsl_v3/export_shadow_samples.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax check
+        run: |
+          python -m py_compile selfdrive/speed_limit_vision_uk.py
+          python -m py_compile selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify physical-sign identity helpers
+        run: |
+          python - <<'PY'
+          import ast
+          import numpy as np
+          from types import SimpleNamespace
+
+          path = "selfdrive/speed_limit_vision_uk.py"
+          tree = ast.parse(open(path).read(), path)
+          cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "SpeedLimitVisionUK")
+          names = {"_bbox_iou", "_numeric_same_physical_sign", "_numeric_candidates_conflict"}
+          methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
+          assert {m.name for m in methods} == names
+          mod = ast.fix_missing_locations(ast.Module(body=[
+            ast.ClassDef(name="T", bases=[], keywords=[], body=methods, decorator_list=[])
+          ], type_ignores=[]))
+          ns = {"np": np}
+          exec(compile(mod, path, "exec"), ns)
+          T = ns["T"]
+
+          # Real V247 adjacent-sign geometry: 50 and neighbouring 20 are not one object.
+          fifty = (421, 429, 474, 487)
+          twenty = (504, 350, 532, 378)
+          assert not T._numeric_same_physical_sign(fifty, twenty)
+
+          # Modest frame-to-frame motion/scale remains the same physical sign.
+          moved_fifty = (429, 421, 486, 483)
+          assert T._numeric_same_physical_sign(fifty, moved_fifty)
+
+          same = [
+            SimpleNamespace(speed_limit_mph=50, bbox=fifty),
+            SimpleNamespace(speed_limit_mph=50, bbox=twenty),
+          ]
+          mixed = [
+            SimpleNamespace(speed_limit_mph=50, bbox=fifty),
+            SimpleNamespace(speed_limit_mph=20, bbox=twenty),
+          ]
+          assert not T._numeric_candidates_conflict(same)
+          assert T._numeric_candidates_conflict(mixed)
+          print("V248 physical-sign tests: PASS")
+          PY
+
+      - name: Verify arbitration safeguards
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'NUMERIC_MULTI_SIGN_HOLD_SECONDS = 1.25' selfdrive/speed_limit_vision_uk.py
+          grep -q 'NUMERIC_MULTI_SIGN_RECOVERY_SECONDS = 3.00' selfdrive/speed_limit_vision_uk.py
+          grep -q 'track_identity_reject' selfdrive/speed_limit_vision_uk.py
+          grep -q 'multi_sign_lower_hold' selfdrive/speed_limit_vision_uk.py
+          grep -q 'conflicting_signs=' selfdrive/speed_limit_vision_uk.py
+          grep -q 'xnor_vsl_shadow_samples/v248' selfdrive/speed_limit_vision_uk.py
+          grep -q 'UK vision V1.20: ready' selfdrive/speed_limit_vision_uk.py
+          grep -q 'v248_shadow_samples.zip' selfdrive/vsl_v3/export_shadow_samples.py
+
+      - name: Verify V3 authority unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'authoritative=0' selfdrive/speed_limit_vision_uk.py
+          grep -q 'SHADOW_MIN_DECISION_CONFIDENCE = 0.60' selfdrive/speed_limit_vision_uk.py
+          grep -q 'SHADOW_MIN_DECISION_CONSENSUS = 0.60' selfdrive/speed_limit_vision_uk.py
+          grep -q 'SHADOW_OCR_MIN_CONFIDENCE = 0.72' selfdrive/speed_limit_vision_uk.py
+
+      - name: Package changed source
+        uses: actions/upload-artifact@v4
+        with:
+          name: v248-vsl-multisign-source
+          path: |
+            selfdrive/speed_limit_vision_uk.py
+            selfdrive/vsl_v3/export_shadow_samples.py
+          retention-days: 14
