@@ -1787,6 +1787,80 @@ class SpeedLimitVisionUK:
         break
     return kept
 
+  @classmethod
+  def _numeric_same_physical_sign(cls, a, b) -> bool:
+    """Conservative spatial identity for authoritative numeric sign tracking.
+
+    This is intentionally stricter than V3's diagnostic clustering. A neighbouring
+    20/50 pair must remain two objects even when both rings sit inside the same
+    broad search ROI.
+    """
+    if a is None or b is None:
+      return False
+    if cls._bbox_iou(a, b) >= 0.05:
+      return True
+
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    aw, ah = max(ax2 - ax1, 1), max(ay2 - ay1, 1)
+    bw, bh = max(bx2 - bx1, 1), max(by2 - by1, 1)
+    scale = max(aw, ah, bw, bh, 1)
+    size_ratio = max(aw, ah, bw, bh) / float(max(min(aw, ah, bw, bh), 1))
+    if size_ratio > 2.5:
+      return False
+
+    acx, acy = (ax1 + ax2) * 0.5, (ay1 + ay2) * 0.5
+    bcx, bcy = (bx1 + bx2) * 0.5, (by1 + by2) * 0.5
+    return float(np.hypot(acx - bcx, acy - bcy)) <= float(scale) * 0.80
+
+  @classmethod
+  def _numeric_candidates_conflict(cls, candidates) -> bool:
+    """True when one frame contains spatially distinct accepted numeric values."""
+    for i, left in enumerate(candidates):
+      for right in candidates[i + 1:]:
+        if int(left.speed_limit_mph) == int(right.speed_limit_mph):
+          continue
+        if not cls._numeric_same_physical_sign(left.bbox, right.bbox):
+          return True
+    return False
+
+  def _start_numeric_multi_sign_hold(self, candidates, now: float) -> None:
+    """Freeze numeric authority briefly when different physical signs coexist.
+
+    Keep the existing confirmed/map speed rather than guessing which sign applies
+    to the ego lane. Clear any provisional lower candidate and require fresh,
+    spatially-consistent reads after the ambiguity clears.
+    """
+    self._numeric_multi_sign_hold_until = max(
+      float(self._numeric_multi_sign_hold_until),
+      float(now) + NUMERIC_MULTI_SIGN_HOLD_SECONDS,
+    )
+    self._numeric_multi_sign_recovery_until = max(
+      float(self._numeric_multi_sign_recovery_until),
+      float(now) + NUMERIC_MULTI_SIGN_RECOVERY_SECONDS,
+    )
+    self.history.clear()
+    self._clear_pending_numeric("multi_sign")
+    self._clear_lower_candidate("multi_sign")
+
+    if float(now) - float(self._numeric_multi_sign_last_log_at) >= 0.75:
+      parts = []
+      for detection in sorted(candidates, key=lambda d: (int(d.speed_limit_mph), d.bbox or (0, 0, 0, 0))):
+        bbox = detection.bbox
+        bbox_text = "none" if bbox is None else ",".join(str(int(v)) for v in bbox)
+        parts.append(
+          f"{int(detection.speed_limit_mph)}@{float(detection.confidence):.2f}[{bbox_text}]"
+        )
+      cloudlog.warning(
+        f"[XNOR_VSL_MULTI] conflicting_signs={'|'.join(parts)} "
+        f"hold={NUMERIC_MULTI_SIGN_HOLD_SECONDS:.2f}s "
+        f"recovery={NUMERIC_MULTI_SIGN_RECOVERY_SECONDS:.2f}s"
+      )
+      self._numeric_multi_sign_last_log_at = float(now)
+
+    speeds = "/".join(str(x) for x in sorted({int(d.speed_limit_mph) for d in candidates}))
+    self._set_status(f"UK multi-sign {speeds}: waiting for separation")
+
   def _clear_pending_numeric(self, reason: str) -> None:
     pending = self.pending_numeric
     if pending is not None:
