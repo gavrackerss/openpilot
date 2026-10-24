@@ -363,6 +363,10 @@ class SpeedLimitVisionUK:
     self.published_speed_limit_mph = int(speed_limit_mph)
     self.published_confidence = float(confidence)
     self.last_detection_at = now
+    # Clear any previously issued provisional value when promoting a confirmed
+    # limit. Otherwise an old lower-only candidate can remain latched by CarState.
+    if self.last_candidate_at > 0.0:
+      self._clear_lower_candidate("confirmed_publish")
     try:
       self.params.put_nonblocking("VisionSpeedLimit", float(speed_limit_mph) * CV.MPH_TO_MS)
       self.params.put_nonblocking("VisionSpeedLimitConfidence", float(confidence))
@@ -373,6 +377,25 @@ class SpeedLimitVisionUK:
     cloudlog.info(f"[XNOR_VSL_V12UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
     if self.pending_numeric is not None and self.pending_numeric.speed_limit_mph == int(speed_limit_mph):
       self._clear_pending_numeric("published")
+
+  @staticmethod
+  def _allow_provisional_candidate(*, confirmed_speed: int, candidate_speed: int,
+                                   confirmations: int, required_confirmations: int,
+                                   in_multi_recovery: bool, confidence_ok: bool,
+                                   is_national: bool) -> bool:
+    """Gate provisional CarState input; does not make V3 authoritative.
+
+    A conflicting new sign still follows the established confirmed _publish
+    path. We never expose an unconfirmed, conflicting value to lower-only
+    CarState arbitration first, even if the detector's confidence is high.
+    """
+    if not confidence_ok or candidate_speed <= 0:
+      return False
+    if confirmed_speed > 0 and candidate_speed != confirmed_speed:
+      return False
+    if is_national or in_multi_recovery:
+      return confirmations >= required_confirmations
+    return True
 
   def _publish_lower_candidate(self, detection: Detection) -> None:
     """Publish an accepted sign as a provisional lower-only candidate.
@@ -2632,23 +2655,32 @@ class SpeedLimitVisionUK:
     initial_required = NATIONAL_REQUIRED_READS if is_national else INITIAL_REQUIRED_READS
     change_required = NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS
 
-    # Numeric signs normally retain the existing immediate lower-only
-    # provisional path. After a multi-sign scene, however, require two fresh
-    # spatially-consistent reads before exposing any lower candidate to CarState.
-    # This prevents an adjacent side-road 20 beside an ego-road 50 from winning
-    # immediately as the pair separates. NSL still requires all 3 confirmations.
+    # Release-candidate safety guard (NOT activated as V3 authority): a
+    # provisional candidate must never override an existing, different,
+    # confirmed camera-sign anchor. A genuine new sign can still replace it
+    # through the normal spatially-consistent confirmed _publish() path below.
+    # The confidence threshold also applies before any provisional exposure.
     in_multi_recovery = bool(
       not is_national and now < self._numeric_multi_sign_recovery_until
     )
-    lower_candidate_ready = bool(
-      (not is_national and (not in_multi_recovery or count >= CHANGE_REQUIRED_READS)) or
-      (is_national and count >= NATIONAL_REQUIRED_READS)
+    lower_candidate_ready = self._allow_provisional_candidate(
+      confirmed_speed=int(self.published_speed_limit_mph),
+      candidate_speed=int(detection.speed_limit_mph),
+      confirmations=count,
+      required_confirmations=(NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS),
+      in_multi_recovery=in_multi_recovery,
+      confidence_ok=best_conf >= MIN_CONFIRMED_CONFIDENCE,
+      is_national=is_national,
     )
     if lower_candidate_ready:
       self._publish_lower_candidate(detection)
     elif in_multi_recovery:
       self._log_temporal_candidate(
         detection, count, CHANGE_REQUIRED_READS, "multi_sign_lower_hold"
+      )
+    elif self.published_speed_limit_mph > 0 and detection.speed_limit_mph != self.published_speed_limit_mph:
+      self._log_temporal_candidate(
+        detection, count, change_required, "provisional_blocked_by_confirmed_anchor"
       )
 
     if best_conf < MIN_CONFIRMED_CONFIDENCE:
