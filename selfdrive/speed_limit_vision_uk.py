@@ -89,6 +89,12 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # neighbouring ring until OCR confirms the original speed. Temporal reads are
 # likewise scoped to one physical bbox/track. V3.3 is unchanged
 # and remains shadow-only; v248 starts a clean validation capture set.
+#
+# V1.21 / V250 disables all unconfirmed lower-candidate parameter publication.
+# The 2026-10-24 false 20 mph latch came from a single OCR read of a no-overtaking
+# sign. CarState treats a provisional candidate as a potential speed target for
+# 30 seconds. Therefore only the existing, independently confirmed _publish()
+# path may expose a camera limit. V3.3 stays shadow-only (authoritative=0).
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -311,6 +317,13 @@ class SpeedLimitVisionUK:
     self.sm = None
     self.runtime_error = ""
 
+    # One-time migration reset: previous releases wrote unconfirmed lower-only
+    # values to persistent Params. Clear them before processing any new frame.
+    # CarState already cancels an old provisional latch upon observing an
+    # explicit (value=0, timestamp=0) clear in these keys.
+    self._clear_lower_candidate("startup_confirmed_only")
+    cloudlog.info("[XNOR_VSL_V12UK] confirmed_only=1 provisional_off=1 startup_reset=1")
+
   def _set_status(self, text: str) -> None:
     if text == self.last_status:
       return
@@ -363,10 +376,10 @@ class SpeedLimitVisionUK:
     self.published_speed_limit_mph = int(speed_limit_mph)
     self.published_confidence = float(confidence)
     self.last_detection_at = now
-    # Clear any previously issued provisional value when promoting a confirmed
-    # limit. Otherwise an old lower-only candidate can remain latched by CarState.
-    if self.last_candidate_at > 0.0:
-      self._clear_lower_candidate("confirmed_publish")
+    # Always clear any old-format provisional value on confirmed publication.
+    # A prior release could have left candidate Params populated even though
+    # this process has never issued a candidate itself.
+    self._clear_lower_candidate("confirmed_publish")
     try:
       self.params.put_nonblocking("VisionSpeedLimit", float(speed_limit_mph) * CV.MPH_TO_MS)
       self.params.put_nonblocking("VisionSpeedLimitConfidence", float(confidence))
@@ -377,45 +390,6 @@ class SpeedLimitVisionUK:
     cloudlog.info(f"[XNOR_VSL_V12UK] publish={speed_limit_mph}mph confidence={confidence:.3f}")
     if self.pending_numeric is not None and self.pending_numeric.speed_limit_mph == int(speed_limit_mph):
       self._clear_pending_numeric("published")
-
-  @staticmethod
-  def _allow_provisional_candidate(*, confirmed_speed: int, candidate_speed: int,
-                                   confirmations: int, required_confirmations: int,
-                                   in_multi_recovery: bool, confidence_ok: bool,
-                                   is_national: bool) -> bool:
-    """Gate provisional CarState input; does not make V3 authoritative.
-
-    A conflicting new sign still follows the established confirmed _publish
-    path. We never expose an unconfirmed, conflicting value to lower-only
-    CarState arbitration first, even if the detector's confidence is high.
-    """
-    if not confidence_ok or candidate_speed <= 0:
-      return False
-    if confirmed_speed > 0 and candidate_speed != confirmed_speed:
-      return False
-    if is_national or in_multi_recovery:
-      return confirmations >= required_confirmations
-    return True
-
-  def _publish_lower_candidate(self, detection: Detection) -> None:
-    """Publish an accepted sign as a provisional lower-only candidate.
-
-    CarState decides whether it is actually lower than the current trusted
-    Tesla/map/DAS limit. If it is not lower, this candidate can never raise the
-    effective limit.
-    """
-    now = time.monotonic()
-    self.last_candidate_at = now
-    try:
-      self.params.put_nonblocking("VisionSpeedLimitCandidate", float(detection.speed_limit_mph) * CV.MPH_TO_MS)
-      self.params.put_nonblocking("VisionSpeedLimitCandidateConfidence", float(detection.confidence))
-      self.params.put_nonblocking("VisionSpeedLimitCandidateTimestamp", float(now))
-    except Exception:
-      pass
-    cloudlog.info(
-      f"[XNOR_VSL_V12UK] lower_candidate={int(detection.speed_limit_mph)}mph "
-      f"confidence={float(detection.confidence):.3f} source={detection.source}"
-    )
 
   def _clear_lower_candidate(self, reason: str) -> None:
     had_candidate = self.last_candidate_at > 0.0
@@ -451,9 +425,9 @@ class SpeedLimitVisionUK:
       self.params.put_nonblocking("VisionSpeedLimitTimestamp", 0.0)
     except Exception:
       pass
-    # A newly-seen provisional lower candidate may be fresher than an older
-    # confirmed publish that is expiring, so its own 300 s lifetime is managed
-    # independently rather than being cleared here.
+    # Confirmed-only mode does not retain unconfirmed lower candidates, even
+    # if the camera observation expires; never leave old candidate Params active.
+    self._clear_lower_candidate("clear_confirmed_publish")
     self._set_status(f"UK vision: scanning ({reason})")
     if old > 0:
       cloudlog.info(f"[XNOR_VSL_V12UK] clear previous={old}mph reason={reason}")
@@ -2655,32 +2629,16 @@ class SpeedLimitVisionUK:
     initial_required = NATIONAL_REQUIRED_READS if is_national else INITIAL_REQUIRED_READS
     change_required = NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS
 
-    # Release-candidate safety guard (NOT activated as V3 authority): a
-    # provisional candidate must never override an existing, different,
-    # confirmed camera-sign anchor. A genuine new sign can still replace it
-    # through the normal spatially-consistent confirmed _publish() path below.
-    # The confidence threshold also applies before any provisional exposure.
-    in_multi_recovery = bool(
-      not is_national and now < self._numeric_multi_sign_recovery_until
-    )
-    lower_candidate_ready = self._allow_provisional_candidate(
-      confirmed_speed=int(self.published_speed_limit_mph),
-      candidate_speed=int(detection.speed_limit_mph),
-      confirmations=count,
-      required_confirmations=(NATIONAL_REQUIRED_READS if is_national else CHANGE_REQUIRED_READS),
-      in_multi_recovery=in_multi_recovery,
-      confidence_ok=best_conf >= MIN_CONFIRMED_CONFIDENCE,
-      is_national=is_national,
-    )
-    if lower_candidate_ready:
-      self._publish_lower_candidate(detection)
-    elif in_multi_recovery:
+    # V250 confirmed-only publication: no VisionSpeedLimitCandidate writes.
+    # The pre-V250 lower-only shortcut could latch a spurious 20 mph reading
+    # for 30 seconds in CarState after a SINGLE detection of a no-overtaking
+    # sign. Keep candidate history entirely local until the existing confirmed
+    # _publish() path succeeds (two spatially consistent numeric reads or
+    # three NSL reads). There is intentionally no fallback single-read path.
+    required_for_publication = initial_required if self.published_speed_limit_mph <= 0 else change_required
+    if count < required_for_publication:
       self._log_temporal_candidate(
-        detection, count, CHANGE_REQUIRED_READS, "multi_sign_lower_hold"
-      )
-    elif self.published_speed_limit_mph > 0 and detection.speed_limit_mph != self.published_speed_limit_mph:
-      self._log_temporal_candidate(
-        detection, count, change_required, "provisional_blocked_by_confirmed_anchor"
+        detection, count, required_for_publication, "provisional_suppressed_unconfirmed"
       )
 
     if best_conf < MIN_CONFIRMED_CONFIDENCE:
