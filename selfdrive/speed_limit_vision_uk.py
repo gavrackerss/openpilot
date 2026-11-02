@@ -95,6 +95,12 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # sign. CarState treats a provisional candidate as a potential speed target for
 # 30 seconds. Therefore only the existing, independently confirmed _publish()
 # path may expose a camera limit. V3.3 stays shadow-only (authoritative=0).
+#
+# V1.22 / V252 adds a completely non-authoritative OCR + V3 hybrid evidence
+# tracker. OCR is never vetoed or replaced by V3 in the existing publisher;
+# independent same-sign reads, disagreement and sign geometry are recorded in
+# [XNOR_VSL_V252] logs for offline validation only. No candidate Params,
+# VisionSpeedLimit, speed control, or CarState behaviour is modified.
 
 MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_vision.onnx"
 SHADOW_MODEL_PATH = Path(__file__).resolve().parent / "assets" / "vision_models" / "speed_limit_v3_classifier.onnx"
@@ -127,6 +133,17 @@ SHADOW_CAPTURE_OCR_MIN_CONFIDENCE = 0.30
 SHADOW_CAPTURE_OCR_CROP_CONSENSUS = 0.33
 SHADOW_CAPTURE_AGREE_V3_CONFIDENCE = 0.30
 SHADOW_CAPTURE_AGREE_OCR_CONFIDENCE = 0.30
+
+# V252 fusion is SHADOW-ONLY. These are diagnostic screening thresholds,
+# NOT release or publication thresholds. No V252 output enters _publish().
+HYBRID_TRACK_TTL_SECONDS = 2.5
+HYBRID_MIN_DISTINCT_OBSERVATION_SECONDS = 0.095
+HYBRID_STRONG_OCR_CONFIDENCE = 0.72
+HYBRID_MIN_RING_EVIDENCE = 0.45
+HYBRID_OTHER_CONFLICT_MIN_CONFIDENCE = 0.45
+HYBRID_SHADOW_RESULT_MAX_AGE_SECONDS = 0.65
+HYBRID_MAX_TRACKS = 4
+HYBRID_LOG_REPEAT_SECONDS = 0.60
 
 # The comma/AGNOS Python environment does not automatically re-resolve
 # pyproject.toml when a changed-files overlay is installed. Carry a pinned
@@ -270,6 +287,27 @@ class ShadowOcrEntry:
   source: str
 
 
+@dataclass
+class HybridEvidence:
+  created_at: float
+  ocr_speed_mph: int
+  ocr_confidence: float
+  v3_class: str
+  v3_confidence: float
+  ring_evidence: float
+  source: str
+
+
+@dataclass
+class HybridTrack:
+  track_id: int
+  bbox: tuple[int, int, int, int]
+  last_seen: float
+  observations: deque[HybridEvidence]
+  last_log_at: float = -1e9
+  last_log_signature: str = ""
+
+
 class SpeedLimitVisionUK:
   def __init__(self):
     self.params = Params()
@@ -291,6 +329,8 @@ class SpeedLimitVisionUK:
     self._shadow_last_capture_at = -1e9
     self._shadow_capture_count = 0
     self._shadow_last_results = []
+    self._hybrid_tracks: dict[int, HybridTrack] = {}
+    self._hybrid_next_track_id = 1
     self.value_reader = None
     self.national_reader = None
     self.client = None
@@ -323,6 +363,7 @@ class SpeedLimitVisionUK:
     # explicit (value=0, timestamp=0) clear in these keys.
     self._clear_lower_candidate("startup_confirmed_only")
     cloudlog.info("[XNOR_VSL_V12UK] confirmed_only=1 provisional_off=1 startup_reset=1")
+    cloudlog.info("[XNOR_VSL_V252] hybrid=shadow-only authority=0 classifier=v3.3 publication=v250")
 
   def _set_status(self, text: str) -> None:
     if text == self.last_status:
@@ -1075,6 +1116,129 @@ class SpeedLimitVisionUK:
         if len(boxes) >= 3:
           break
     return boxes[:3]
+
+  def _hybrid_observe_safe(self, *args) -> None:
+    """Fusion telemetry must never interrupt the existing vision publisher."""
+    try:
+      self._hybrid_observe(*args)
+    except Exception:
+      cloudlog.exception("[XNOR_VSL_V252] telemetry_error authority=0 publicationEffect=none")
+
+  def _hybrid_observe(self, source: str, read, bbox, ring_evidence: float,
+                      partial_ring: bool = False) -> dict | None:
+    """Diagnostic OCR/V3 decision for one *accepted* OCR crop on a physical sign.
+
+    Deliberately does not call _update_detection(), _publish(), or Params.put().
+    The V250 confirmed-only publication logic runs independently and unchanged.
+    A 'review_ready' result means only that the case is interesting for replay;
+    it is NOT permission to publish a limit or to change vehicle speed.
+    """
+    if read is None or bbox is None:
+      return None
+    now = time.monotonic()
+    bbox = tuple(int(v) for v in bbox)
+    ocr_speed = int(read.speed_limit_mph)
+    ocr_conf = float(read.confidence)
+    ring = float(ring_evidence)
+
+    # Use only a recent V3 inference with an unambiguous spatial match. The
+    # legacy shadow matcher is intentionally broad for crop diagnostics; V252
+    # must not label an adjacent 20/50 ring as though it were this OCR sign.
+    v3_matches = []
+    for item in self._shadow_last_results:
+      other_box = item.get("bbox")
+      if other_box is None or now - float(item.get("created_at", 0.0)) > HYBRID_SHADOW_RESULT_MAX_AGE_SECONDS:
+        continue
+      overlap = float(self._bbox_iou(bbox, other_box))
+      if overlap >= 0.25:
+        v3_matches.append((overlap, item))
+    v3_matches.sort(key=lambda pair: pair[0], reverse=True)
+    v3_result = (v3_matches[0][1] if v3_matches and
+                 (len(v3_matches) == 1 or v3_matches[0][0] - v3_matches[1][0] >= 0.10)
+                 else None)
+    v3_class = str(v3_result.get("class_name", "")) if v3_result else ""
+    v3_conf = float(v3_result.get("confidence", 0.0)) if v3_result else 0.0
+
+    # Bounded independent tracks; never combine evidence from different signs.
+    for track_id, track in list(self._hybrid_tracks.items()):
+      if now - track.last_seen > HYBRID_TRACK_TTL_SECONDS:
+        del self._hybrid_tracks[track_id]
+    matches = [track for track in self._hybrid_tracks.values()
+               if self._numeric_same_physical_sign(track.bbox, bbox)]
+    track = (max(matches, key=lambda t: self._bbox_iou(t.bbox, bbox)) if matches else None)
+    if track is None:
+      if len(self._hybrid_tracks) >= HYBRID_MAX_TRACKS:
+        oldest_id = min(self._hybrid_tracks, key=lambda k: self._hybrid_tracks[k].last_seen)
+        del self._hybrid_tracks[oldest_id]
+      track = HybridTrack(self._hybrid_next_track_id, bbox, now, deque())
+      self._hybrid_tracks[track.track_id] = track
+      self._hybrid_next_track_id += 1
+
+    # Multiple OCR attempts on one image must not count as two independent reads.
+    # Sampling is already from fresh camera frames; this is an additional guard.
+    if track.observations and now - track.observations[-1].created_at < HYBRID_MIN_DISTINCT_OBSERVATION_SECONDS:
+      return None
+    track.bbox = bbox
+    track.last_seen = now
+    track.observations.append(HybridEvidence(
+      now, ocr_speed, ocr_conf, v3_class, v3_conf, ring, str(source)))
+    while track.observations and now - track.observations[0].created_at > HYBRID_TRACK_TTL_SECONDS:
+      track.observations.popleft()
+
+    strong_reads = [o for o in track.observations
+                    if o.ocr_confidence >= HYBRID_STRONG_OCR_CONFIDENCE and
+                    o.ring_evidence >= HYBRID_MIN_RING_EVIDENCE]
+    matching = [o for o in strong_reads if o.ocr_speed_mph == ocr_speed]
+    strong_conflict = any(o.ocr_speed_mph != ocr_speed for o in strong_reads)
+    # V3's OTHER prediction is useful as a negative warning, not a complete
+    # sign-type proof. In shadow mode do not silently override strong OCR.
+    other_conflict = any(
+      o.ocr_speed_mph == ocr_speed and o.v3_class == "OTHER" and
+      o.v3_confidence >= HYBRID_OTHER_CONFLICT_MIN_CONFIDENCE
+      for o in track.observations)
+    v3_agrees = bool(v3_class == str(ocr_speed))
+    spatial_ambiguity = now < self._numeric_multi_sign_hold_until
+    repeated = len(matching) >= 2
+    weak_ocr = ocr_conf < HYBRID_STRONG_OCR_CONFIDENCE or ring < HYBRID_MIN_RING_EVIDENCE
+    if spatial_ambiguity:
+      decision = "MULTI_SIGN_HOLD"
+    elif other_conflict:
+      decision = "V3_OTHER_CONFLICT_HOLD"
+    elif strong_conflict:
+      decision = "OCR_INCONSISTENT_HOLD"
+    elif weak_ocr:
+      decision = "WEAK_OCR_OR_RING_HOLD"
+    elif not repeated:
+      decision = "WAIT_INDEPENDENT_READ"
+    elif not v3_class:
+      decision = "OCR_REPEATED_V3_MISSING"
+    elif v3_agrees:
+      decision = "AGREE_REVIEW"
+    elif ocr_speed == 20 and v3_class in SHADOW_CLASSES:
+      decision = "OCR20_V3_DISAGREE_REVIEW"
+    else:
+      decision = "OCR_V3_DISAGREE_REVIEW"
+
+    # Never expose this to the control path. Even 'review_ready' is *only*
+    # diagnostic. Shared 10 -> 40 mistakes show agreement is not proof.
+    review_ready = bool(decision in ("AGREE_REVIEW", "OCR20_V3_DISAGREE_REVIEW",
+                                     "OCR_V3_DISAGREE_REVIEW"))
+    signature = f"{decision}:{ocr_speed}:{v3_class}:{len(matching)}"
+    if signature != track.last_log_signature or now - track.last_log_at >= HYBRID_LOG_REPEAT_SECONDS:
+      bbox_text = ",".join(str(x) for x in bbox)
+      cloudlog.info(
+        f"[XNOR_VSL_V252] hybrid=shadow-only authority=0 track={track.track_id} "
+        f"source={source} bbox={bbox_text} ocr={ocr_speed} ocrConf={ocr_conf:.3f} "
+        f"v3={v3_class or 'MISSING'} v3Conf={v3_conf:.3f} ring={ring:.3f} "
+        f"partial={int(partial_ring)} repeats={len(matching)} "
+        f"observations={len(track.observations)} decision={decision} "
+        f"reviewReady={int(review_ready)} publicationEffect=none"
+      )
+      track.last_log_at = now
+      track.last_log_signature = signature
+    return {"track_id": track.track_id, "decision": decision,
+            "review_ready": review_ready, "strong_ocr_repeats": len(matching),
+            "ocr_speed_mph": ocr_speed, "v3_class": v3_class}
 
   def _shadow_record_ocr(self, source: str, speed_limit_mph: int,
                          confidence: float, bbox=None) -> None:
@@ -2130,6 +2294,7 @@ class SpeedLimitVisionUK:
       bbox=tracked_bbox,
       source="numeric_reacquire_partial" if ring_partial else "numeric_reacquire",
     )
+    self._hybrid_observe_safe(detection.source, read, tracked_bbox, float(ring), ring_partial)
     cloudlog.info(
       f"[XNOR_VSL_V12UK] numeric_reacquire speed={detection.speed_limit_mph}mph "
       f"confidence={detection.confidence:.3f} ring={ring:.3f} "
@@ -2471,6 +2636,7 @@ class SpeedLimitVisionUK:
     # candidates follow the established path. Partial-ring candidates may reach
     # OCR at >=0.50 evidence, but require the stronger clear-read gate.
     candidates = []
+    hybrid_candidates = []
     for model_conf, speed_mph, uk_score, bbox, partial_score, ring_reason, ring_details in proposals:
       x1, y1, x2, y2 = bbox
       crop = frame_bgr[y1:y2, x1:x2]
@@ -2538,6 +2704,7 @@ class SpeedLimitVisionUK:
         0.0,
         0.99,
       ))
+      hybrid_candidates.append((ocr_source, value_read, bbox, effective_ring, partial_path))
       self._log_raw_proposal(
         "partial_value_accept" if partial_path else "value_accept",
         speed_mph, model_conf, effective_ring,
@@ -2571,9 +2738,13 @@ class SpeedLimitVisionUK:
     # the scene to separate before accepting a fresh numeric value.
     if self._numeric_candidates_conflict(candidates):
       self._start_numeric_multi_sign_hold(candidates, now)
+      for observation in hybrid_candidates:
+        self._hybrid_observe_safe(*observation)
       return None
 
     if now < self._numeric_multi_sign_hold_until:
+      for observation in hybrid_candidates:
+        self._hybrid_observe_safe(*observation)
       if now - self._numeric_multi_sign_last_log_at >= 0.75:
         cloudlog.info(
           f"[XNOR_VSL_MULTI] separation_hold remaining="
@@ -2584,6 +2755,8 @@ class SpeedLimitVisionUK:
       self._set_status("UK multi-sign: waiting for separation")
       return None
 
+    for observation in hybrid_candidates:
+      self._hybrid_observe_safe(*observation)
     return candidates[0]
 
   def _prune_history(self, now: float) -> None:
