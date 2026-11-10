@@ -82,6 +82,11 @@ from openpilot.selfdrive.speed_limit_uk_reader import UKNationalSpeedLimitReader
 # including newly verified 20/50/60 signs and restriction-sign OTHER examples.
 # V3.3 remains shadow-only and starts a clean v247 validation capture set.
 #
+# V253 / 2026-11-08 adds a bounded 50 mph full-detector reidentification
+# recovery path for fast motorway approaches. Independent OCR + ring reads,
+# separate camera frames and cross-side geometry checks remain mandatory.
+# V3/V252 hybrid is still shadow-only and no provisional values are emitted.
+#
 # V1.20 / V248 makes numeric tracking/arbitration physical-sign aware. Adjacent
 # differing speed signs are retained as distinct proposals and create a short
 # ambiguity hold instead of whichever value wins one frame becoming authoritative.
@@ -133,6 +138,19 @@ SHADOW_CAPTURE_OCR_MIN_CONFIDENCE = 0.30
 SHADOW_CAPTURE_OCR_CROP_CONSENSUS = 0.33
 SHADOW_CAPTURE_AGREE_V3_CONFIDENCE = 0.30
 SHADOW_CAPTURE_AGREE_OCR_CONFIDENCE = 0.30
+
+# V253: bounded full-detector recovery for a 50 mph sign on a subsequent frame.
+# These gates do not weaken the two-reading requirement or V250's prohibition
+# against nonzero provisional candidate publication. V3 remains shadow-only.
+# Restrict detector re-ID to full-ring, high-confidence 50 mph OCR candidates;
+# no other class can take this new confirmation path.
+NUMERIC_REID_CLASSES = frozenset((50,))
+NUMERIC_REID_DETECTOR_INTERVAL = 0.12
+NUMERIC_REID_MAX_SECONDS = 0.70
+NUMERIC_REID_MIN_FRAME_SEPARATION = 0.10
+NUMERIC_REID_MIN_OCR_CONFIDENCE = 0.75
+NUMERIC_REID_MIN_RING_SCORE = 0.55
+NUMERIC_REID_MIN_DETECTION_CONFIDENCE = 0.68
 
 # V252 fusion is SHADOW-ONLY. These are diagnostic screening thresholds,
 # NOT release or publication thresholds. No V252 output enters _publish().
@@ -268,6 +286,9 @@ class HistoryEntry:
   created_at: float
   source_family: str
   bbox: tuple[int, int, int, int] | None = None
+  source: str = ""
+  ring_score: float = 0.0
+  value_confidence: float = 0.0
 
 
 @dataclass
@@ -353,6 +374,7 @@ class SpeedLimitVisionUK:
     self._numeric_multi_sign_hold_until = -1e9
     self._numeric_multi_sign_recovery_until = -1e9
     self._numeric_multi_sign_last_log_at = -1e9
+    self._last_numeric_frame_width = 0
 
     self.sm = None
     self.runtime_error = ""
@@ -1976,6 +1998,100 @@ class SpeedLimitVisionUK:
     bcx, bcy = (bx1 + bx2) * 0.5, (by1 + by2) * 0.5
     return float(np.hypot(acx - bcx, acy - bcy)) <= float(scale) * 0.80
 
+  def _prefer_pending_numeric_detector_candidate(self, candidates, now: float):
+    """Prefer the original side when two OCR-confirmed 50 signs coexist.
+
+    A confidence-only choice can alternate between left/right signs on
+    consecutive frames. We may select a different candidate only when exactly
+    one high-quality detector/OCR reading matches the pending 50 track.
+    """
+    pending = self.pending_numeric
+    if pending is None or int(pending.speed_limit_mph) not in NUMERIC_REID_CLASSES:
+      return candidates[0]
+    prior = [entry for entry in self.history if
+             entry.speed_limit_mph == pending.speed_limit_mph and
+             entry.source == "numeric" and
+             NUMERIC_REID_MIN_FRAME_SEPARATION <= now - entry.created_at <= NUMERIC_REID_MAX_SECONDS and
+             entry.bbox is not None and self._numeric_same_physical_sign(entry.bbox, pending.bbox)]
+    if not prior:
+      return candidates[0]
+    last = prior[-1]
+    matches = [candidate for candidate in candidates if
+               self._numeric_detector_reid_same_sign(
+                 candidate, last, now, int(getattr(self, "_last_numeric_frame_width", 0))
+               )]
+    if len(matches) == 1:
+      chosen = matches[0]
+      if chosen is not candidates[0]:
+        cloudlog.info(
+          f"[XNOR_VSL_V253] detector_same_side_preferred speed={chosen.speed_limit_mph}mph "
+          f"bbox={chosen.bbox} over={candidates[0].bbox}"
+        )
+      return chosen
+    return candidates[0]
+
+  @staticmethod
+  def _numeric_detector_reid_same_sign(new_detection: Detection, old_entry: HistoryEntry,
+                                      now: float, frame_width: int) -> bool:
+    """Conservative re-ID across two independent FULL detector/OCR frames.
+
+    A 50 mph sign may move more than the V248 0.8-box-width identity gate
+    between 0.2 s ONNX scans, especially at motorway speed. This separate
+    recovery gate requires independently OCR-accepted full-ring 50s from
+    consecutive frames, plausible outward/downward perspective motion, and
+    consistent image side. It is NOT used for 20/30/40/60/70 or partial rings.
+    """
+    if (int(new_detection.speed_limit_mph) not in NUMERIC_REID_CLASSES or
+        int(old_entry.speed_limit_mph) != int(new_detection.speed_limit_mph) or
+        new_detection.source != "numeric" or old_entry.source != "numeric"):
+      return False
+    age = float(now) - float(old_entry.created_at)
+    if not NUMERIC_REID_MIN_FRAME_SEPARATION <= age <= NUMERIC_REID_MAX_SECONDS:
+      return False
+    if (new_detection.confidence < NUMERIC_REID_MIN_DETECTION_CONFIDENCE or
+        old_entry.confidence < NUMERIC_REID_MIN_DETECTION_CONFIDENCE or
+        new_detection.value_confidence < NUMERIC_REID_MIN_OCR_CONFIDENCE or
+        old_entry.value_confidence < NUMERIC_REID_MIN_OCR_CONFIDENCE or
+        new_detection.ring_score < NUMERIC_REID_MIN_RING_SCORE or
+        old_entry.ring_score < NUMERIC_REID_MIN_RING_SCORE):
+      return False
+    a, b = old_entry.bbox, new_detection.bbox
+    if a is None or b is None or frame_width < 400:
+      return False
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    aw, ah = ax2 - ax1, ay2 - ay1
+    bw, bh = bx2 - bx1, by2 - by1
+    if min(aw, ah, bw, bh) <= 0:
+      return False
+    # Moving towards a sign should make it grow or remain similar in size.
+    if not (0.75 <= bw / aw <= 2.6 and 0.75 <= bh / ah <= 2.6):
+      return False
+    acx, acy = (ax1 + ax2) * 0.5, (ay1 + ay2) * 0.5
+    bcx, bcy = (bx1 + bx2) * 0.5, (by1 + by2) * 0.5
+    mid = frame_width * 0.5
+    # Never join roadside signs from opposite halves of the road. Allow only
+    # a narrow centre crossing for overhead/near-centre signs.
+    if ((acx - mid) * (bcx - mid) < 0 and
+        (abs(acx - mid) > frame_width * 0.06 or
+         abs(bcx - mid) > frame_width * 0.06)):
+      return False
+    max_w = max(aw, bw)
+    max_h = max(ah, bh)
+    # Conservative search envelope: more tolerant than the old 0.8-size gate
+    # while still rejecting a jump across to another roadside object.
+    if abs(bcx - acx) > min(frame_width * 0.14, max_w * 2.4):
+      return False
+    # A roadside sign normally expands outwards as it is approached. A large
+    # jump back towards the vanishing point suggests a different sign/object.
+    if (abs(acx - mid) > frame_width * 0.10 and
+        abs(bcx - acx) > max_w * 0.80 and
+        (acx - mid) * (bcx - acx) < 0.0):
+      return False
+    if bcy < acy - max_h * 0.30 or bcy - acy > max_h * 2.2:
+      return False
+    return True
+
   @classmethod
   def _numeric_candidates_conflict(cls, candidates) -> bool:
     """True when one frame contains spatially distinct accepted numeric values."""
@@ -2757,7 +2873,7 @@ class SpeedLimitVisionUK:
 
     for observation in hybrid_candidates:
       self._hybrid_observe_safe(*observation)
-    return candidates[0]
+    return self._prefer_pending_numeric_detector_candidate(candidates, now)
 
   def _prune_history(self, now: float) -> None:
     while self.history and now - self.history[0].created_at > HISTORY_SECONDS:
@@ -2775,6 +2891,9 @@ class SpeedLimitVisionUK:
       now,
       source_family,
       detection.bbox,
+      detection.source,
+      detection.ring_score,
+      detection.value_confidence,
     ))
     self._prune_history(now)
 
@@ -2788,12 +2907,25 @@ class SpeedLimitVisionUK:
         entry.source_family != source_family
       ):
         continue
-      if (
-        source_family == "numeric" and
-        detection.bbox is not None and entry.bbox is not None and
-        not self._numeric_same_physical_sign(detection.bbox, entry.bbox)
-      ):
-        continue
+      if source_family == "numeric":
+        # The original V248 identity check remains authoritative for normal
+        # reacquisition. Only FULL detector reads of the same 50 mph sign may
+        # use the bounded high-confidence re-identification fallback.
+        same_sign = (
+          detection.bbox is not None and entry.bbox is not None and
+          self._numeric_same_physical_sign(detection.bbox, entry.bbox)
+        )
+        if not same_sign and self._numeric_detector_reid_same_sign(
+          detection, entry, now, int(getattr(self, "_last_numeric_frame_width", 0))
+        ):
+          same_sign = True
+          cloudlog.info(
+            f"[XNOR_VSL_V253] detector_reid speed={detection.speed_limit_mph}mph "
+            f"dt={now-entry.created_at:.3f}s previous={entry.bbox} current={detection.bbox} "
+            f"ocr={entry.value_confidence:.3f}/{detection.value_confidence:.3f}"
+          )
+        if not same_sign:
+          continue
       matching_history.append(entry)
 
     count = len(matching_history)
@@ -2911,6 +3043,15 @@ class SpeedLimitVisionUK:
       if now < self.followup_until:
         detector_interval = max(FOLLOWUP_INFERENCE_INTERVAL, min(detector_interval, NORMAL_INFERENCE_INTERVAL))
 
+      # Briefly run the full detector more frequently after the first accepted
+      # numeric detection. A new frame gives an independent OCR opportunity
+      # before a motorway sign leaves the field of view. Do not increase
+      # detector load during memory-pressure operation.
+      if (mem < MEMORY_PRESSURE_PERCENT and self.pending_numeric is not None and
+          int(self.pending_numeric.speed_limit_mph) in NUMERIC_REID_CLASSES and
+          0.0 <= now - self.pending_numeric.created_at < NUMERIC_REID_MAX_SECONDS):
+        detector_interval = min(detector_interval, NUMERIC_REID_DETECTOR_INTERVAL)
+
       detector_due = (now - self.last_inference_at) >= detector_interval
       track_due = self.track is not None and (now - self.track.last_frame_at) >= TRACK_FRAME_INTERVAL
       pending_due = (
@@ -2926,6 +3067,7 @@ class SpeedLimitVisionUK:
       if frame_bgr is None:
         rk.keep_time()
         continue
+      self._last_numeric_frame_width = int(frame_bgr.shape[1])
 
       # V1.7 follows an already-accepted numeric sign locally at up to 20 Hz
       # and reruns digit OCR at up to 10 Hz. A successful read is from a fresh
