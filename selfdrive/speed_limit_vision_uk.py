@@ -152,6 +152,28 @@ NUMERIC_REID_MIN_OCR_CONFIDENCE = 0.75
 NUMERIC_REID_MIN_RING_SCORE = 0.55
 NUMERIC_REID_MIN_DETECTION_CONFIDENCE = 0.68
 
+# V254 low-light partial-50 recovery is an additional **confirmed-only** path.
+# It never publishes from a single crop: two independently timed observations
+# of the same physical 50 sign must each satisfy raw+enhanced OCR checks.
+# The untouched V3.3 classifier remains diagnostic-only. For safety a strong
+# V3 OTHER classification vetoes a low-light rescue; a numeric V3 disagreement
+# does NOT replace a high-confidence OCR reading.
+V254_PARTIAL50_MIN_RING = 0.70
+V254_PARTIAL50_RAW_MIN_CONF = 0.70
+V254_PARTIAL50_RAW_FIRST_MIN = 0.68
+V254_PARTIAL50_RAW_ZERO_MIN = 0.55
+V254_PARTIAL50_RAW_MARGIN_MIN = 0.030
+V254_PARTIAL50_RAW_WHOLE_MIN = 0.47
+V254_PARTIAL50_ENH_MIN_CONF = 0.65
+V254_PARTIAL50_ENH_FIRST_MIN = 0.62
+V254_PARTIAL50_ENH_ZERO_MIN = 0.50
+V254_PARTIAL50_ENH_MARGIN_MIN = 0.025
+V254_PARTIAL50_ENH_WHOLE_MIN = 0.43
+V254_PARTIAL50_MAX_MEDIAN_LIGHT = 100
+V254_PARTIAL50_V3_OTHER_VETO = 0.80
+V254_PARTIAL50_MIN_FRAME_SEPARATION = 0.10
+V254_PARTIAL50_RECOVERY_MAX_AGE = 0.70
+
 # V252 fusion is SHADOW-ONLY. These are diagnostic screening thresholds,
 # NOT release or publication thresholds. No V252 output enters _publish().
 HYBRID_TRACK_TTL_SECONDS = 2.5
@@ -252,6 +274,7 @@ class Detection:
   legacy_speed_mph: int = 0
   bbox: tuple[int, int, int, int] | None = None
   source: str = "numeric"
+  v254_verified: bool = False  # paired raw/contrast OCR with strong partial ring
 
 
 @dataclass
@@ -277,6 +300,7 @@ class PendingNumeric:
   ocr_attempts: int = 0
   tracked_once: bool = False
   first_confidence: float = 0.0
+  v254_partial: bool = False
 
 
 @dataclass
@@ -289,6 +313,7 @@ class HistoryEntry:
   source: str = ""
   ring_score: float = 0.0
   value_confidence: float = 0.0
+  v254_verified: bool = False
 
 
 @dataclass
@@ -385,6 +410,7 @@ class SpeedLimitVisionUK:
     # explicit (value=0, timestamp=0) clear in these keys.
     self._clear_lower_candidate("startup_confirmed_only")
     cloudlog.info("[XNOR_VSL_V12UK] confirmed_only=1 provisional_off=1 startup_reset=1")
+    cloudlog.info("[XNOR_VSL_V254] lowlight_ocr_pair=1 partial50_confirmed_only=1 v3_authority=0")
     cloudlog.info("[XNOR_VSL_V252] hybrid=shadow-only authority=0 classifier=v3.3 publication=v250")
 
   def _set_status(self, text: str) -> None:
@@ -941,6 +967,94 @@ class SpeedLimitVisionUK:
       float(read.first_digit_margin) >= NUMERIC_PARTIAL_MARGIN_MIN and
       float(read.whole_value_score) >= NUMERIC_PARTIAL_WHOLE_MIN
     )
+
+  def _v254_lowlight_contrast(self, crop):
+    """CLAHE/brightness-normalised *OCR view*; never replace raw ring geometry.
+
+    This only runs on dark proposals. No neural net, third-party packages or
+    modified threshold on the unprocessed red-ring test are introduced.
+    """
+    if crop is None or crop.size == 0 or min(crop.shape[:2]) < 12:
+      return None
+    try:
+      lab = self.cv2.cvtColor(crop, self.cv2.COLOR_BGR2LAB)
+      light = lab[:, :, 0]
+      if float(np.median(light)) > V254_PARTIAL50_MAX_MEDIAN_LIGHT:
+        return None
+      equal = self.cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(light)
+      # Increase dark-sign readability while retaining relative digit contrast.
+      lab[:, :, 0] = np.clip(
+        255.0 * np.power(equal.astype(np.float32) / 255.0, 0.70), 0, 255
+      ).astype(np.uint8)
+      return self.cv2.cvtColor(lab, self.cv2.COLOR_LAB2BGR)
+    except Exception:
+      cloudlog.exception("[XNOR_VSL_V254] lowlight preprocessing failed")
+      return None
+
+  @staticmethod
+  def _v254_digit_quality(read, enhanced: bool = False) -> bool:
+    """Require independent evidence for both digits; a lone '5' is invalid."""
+    if read is None or int(read.speed_limit_mph) != 50:
+      return False
+    return bool(
+      float(read.confidence) >= (V254_PARTIAL50_ENH_MIN_CONF if enhanced else V254_PARTIAL50_RAW_MIN_CONF) and
+      float(read.first_digit_score) >= (V254_PARTIAL50_ENH_FIRST_MIN if enhanced else V254_PARTIAL50_RAW_FIRST_MIN) and
+      float(read.zero_score) >= (V254_PARTIAL50_ENH_ZERO_MIN if enhanced else V254_PARTIAL50_RAW_ZERO_MIN) and
+      float(read.first_digit_margin) >= (V254_PARTIAL50_ENH_MARGIN_MIN if enhanced else V254_PARTIAL50_RAW_MARGIN_MIN) and
+      float(read.whole_value_score) >= (V254_PARTIAL50_ENH_WHOLE_MIN if enhanced else V254_PARTIAL50_RAW_WHOLE_MIN)
+    )
+
+  def _v254_partial_50_verified(self, crop, raw_read, ring_evidence: float,
+                                ring_reason: str, bbox) -> bool:
+    """Independently corroborate a *partial* 50 with enhanced OCR on same crop.
+
+    Paired raw/enhanced crops do NOT count as two temporal sign readings. This
+    method only makes a single observation eligible for later confirmation on
+    an entirely new camera frame. A strong OTHER prediction vetoes the rescue.
+    """
+    if (float(ring_evidence) < V254_PARTIAL50_MIN_RING or
+        ring_reason not in ("white_ratio", "centre_white", "dark_ratio") or
+        not self._v254_digit_quality(raw_read)):
+      return False
+    # Re-measure the actual raw crop rather than trusting geometry from an
+    # earlier tracker ROI. This blocks fabricated/shifted boxes whose ring
+    # score was measured on a different object or on an empty crop.
+    try:
+      _strict_raw, measured, raw_reason, _raw_details = self._uk_red_ring_assessment(crop)
+    except Exception:
+      cloudlog.exception("[XNOR_VSL_V254] raw ring recheck failed")
+      return False
+    if (float(measured) < 0.65 or
+        raw_reason not in ("white_ratio", "centre_white", "dark_ratio")):
+      return False
+    shadow = self._shadow_result_for_bbox(bbox, max_age=HYBRID_SHADOW_RESULT_MAX_AGE_SECONDS)
+    if (shadow is not None and str(shadow.get("class_name", "")) == "OTHER" and
+        float(shadow.get("confidence", 0.0)) >= V254_PARTIAL50_V3_OTHER_VETO and
+        float(shadow.get("crop_consensus", 0.0)) >= 0.67):
+      cloudlog.info("[XNOR_VSL_V254] partial50_veto=v3_other")
+      return False
+    enhanced = self._v254_lowlight_contrast(crop)
+    if enhanced is None or self.value_reader is None:
+      return False
+    try:
+      enhanced_read = self.value_reader.read(enhanced)
+    except Exception:
+      cloudlog.exception("[XNOR_VSL_V254] contrast OCR failed")
+      return False
+    if not self._v254_digit_quality(enhanced_read, enhanced=True):
+      cloudlog.info(
+        f"[XNOR_VSL_V254] partial50_pair_reject raw=50 "
+        f"enhanced={int(enhanced_read.speed_limit_mph) if enhanced_read else 0} "
+        f"rawConf={float(raw_read.confidence):.3f} "
+        f"enhConf={float(enhanced_read.confidence) if enhanced_read else 0.0:.3f}"
+      )
+      return False
+    cloudlog.info(
+      f"[XNOR_VSL_V254] partial50_pair_ok raw={float(raw_read.confidence):.3f} "
+      f"enhanced={float(enhanced_read.confidence):.3f} ring={float(ring_evidence):.3f} "
+      f"bbox={bbox} authority=pending_only"
+    )
+    return True
 
   def _log_ring_assessment(self, decision: str, legacy_speed_mph: int,
                            model_confidence: float, strict_score: float,
@@ -2010,7 +2124,8 @@ class SpeedLimitVisionUK:
       return candidates[0]
     prior = [entry for entry in self.history if
              entry.speed_limit_mph == pending.speed_limit_mph and
-             entry.source == "numeric" and
+             entry.source in ("numeric", "numeric_partial_v254") and
+             (entry.source == "numeric" or entry.v254_verified) and
              NUMERIC_REID_MIN_FRAME_SEPARATION <= now - entry.created_at <= NUMERIC_REID_MAX_SECONDS and
              entry.bbox is not None and self._numeric_same_physical_sign(entry.bbox, pending.bbox)]
     if not prior:
@@ -2033,27 +2148,35 @@ class SpeedLimitVisionUK:
   @staticmethod
   def _numeric_detector_reid_same_sign(new_detection: Detection, old_entry: HistoryEntry,
                                       now: float, frame_width: int) -> bool:
-    """Conservative re-ID across two independent FULL detector/OCR frames.
+    """Conservative 50 mph re-ID across two distinct full-detector frames.
 
-    A 50 mph sign may move more than the V248 0.8-box-width identity gate
-    between 0.2 s ONNX scans, especially at motorway speed. This separate
-    recovery gate requires independently OCR-accepted full-ring 50s from
-    consecutive frames, plausible outward/downward perspective motion, and
-    consistent image side. It is NOT used for 20/30/40/60/70 or partial rings.
+    Retains V253 full-ring checks; V254 adds only paired-verified low-light
+    partial 50s (not generic partial rings), requiring matching digits and
+    independently corroborated geometry on separate frames. No other limit.
     """
     if (int(new_detection.speed_limit_mph) not in NUMERIC_REID_CLASSES or
-        int(old_entry.speed_limit_mph) != int(new_detection.speed_limit_mph) or
-        new_detection.source != "numeric" or old_entry.source != "numeric"):
+        int(old_entry.speed_limit_mph) != int(new_detection.speed_limit_mph)):
       return False
+    new_partial = new_detection.source == "numeric_partial_v254"
+    old_partial = old_entry.source == "numeric_partial_v254"
+    if new_detection.source not in ("numeric", "numeric_partial_v254") or \
+       old_entry.source not in ("numeric", "numeric_partial_v254"):
+      return False
+    if (new_partial and not new_detection.v254_verified or
+        old_partial and not old_entry.v254_verified):
+      return False
+    partial_pair = new_partial or old_partial
     age = float(now) - float(old_entry.created_at)
     if not NUMERIC_REID_MIN_FRAME_SEPARATION <= age <= NUMERIC_REID_MAX_SECONDS:
       return False
-    if (new_detection.confidence < NUMERIC_REID_MIN_DETECTION_CONFIDENCE or
-        old_entry.confidence < NUMERIC_REID_MIN_DETECTION_CONFIDENCE or
-        new_detection.value_confidence < NUMERIC_REID_MIN_OCR_CONFIDENCE or
-        old_entry.value_confidence < NUMERIC_REID_MIN_OCR_CONFIDENCE or
-        new_detection.ring_score < NUMERIC_REID_MIN_RING_SCORE or
-        old_entry.ring_score < NUMERIC_REID_MIN_RING_SCORE):
+    # A low-light partial needs paired raw/enhanced OCR and a stronger ring
+    # evidence floor. V253's original full-ring thresholds are unchanged.
+    if (new_detection.confidence < (0.65 if partial_pair else NUMERIC_REID_MIN_DETECTION_CONFIDENCE) or
+        old_entry.confidence < (0.65 if partial_pair else NUMERIC_REID_MIN_DETECTION_CONFIDENCE) or
+        new_detection.value_confidence < (V254_PARTIAL50_RAW_MIN_CONF if new_partial else NUMERIC_REID_MIN_OCR_CONFIDENCE) or
+        old_entry.value_confidence < (V254_PARTIAL50_RAW_MIN_CONF if old_partial else NUMERIC_REID_MIN_OCR_CONFIDENCE) or
+        new_detection.ring_score < (V254_PARTIAL50_MIN_RING if new_partial else NUMERIC_REID_MIN_RING_SCORE) or
+        old_entry.ring_score < (V254_PARTIAL50_MIN_RING if old_partial else NUMERIC_REID_MIN_RING_SCORE)):
       return False
     a, b = old_entry.bbox, new_detection.bbox
     if a is None or b is None or frame_width < 400:
@@ -2150,7 +2273,9 @@ class SpeedLimitVisionUK:
     self.pending_numeric = None
 
   def _arm_pending_numeric(self, detection: Detection, now: float | None = None) -> None:
-    if detection.bbox is None or not detection.source.startswith("numeric"):
+    if detection.bbox is None or detection.source not in ("numeric", "numeric_partial_v254"):
+      return
+    if detection.source == "numeric_partial_v254" and (not detection.v254_verified or detection.speed_limit_mph != 50):
       return
     if detection.confidence < NUMERIC_TRACK_ARM_MIN_CONFIDENCE:
       return
@@ -2169,6 +2294,7 @@ class SpeedLimitVisionUK:
       ocr_attempts=0,
       tracked_once=False,
       first_confidence=float(detection.confidence),
+      v254_partial=bool(detection.source == "numeric_partial_v254" and detection.v254_verified),
     )
     bbox_text = ",".join(str(int(v)) for v in detection.bbox)
     cloudlog.info(
@@ -2368,7 +2494,24 @@ class SpeedLimitVisionUK:
     value_conf = float(read.confidence)
     read_speed = int(read.speed_limit_mph)
 
-    if ring_partial and not self._partial_numeric_read_is_clear(read):
+    v254_pair_verified = False
+    if (int(pending.speed_limit_mph) == 50 and
+        (bool(pending.v254_partial) or bool(ring_partial))):
+      if ring_partial:
+        v254_pair_verified = self._v254_partial_50_verified(
+          crop, read, float(ring), str(ring_reason), tracked_bbox
+        )
+      elif bool(pending.v254_partial):
+        # Strong full-ring OCR can confirm an already paired partial sign.
+        v254_pair_verified = bool(
+          read_speed == 50 and value_conf >= NUMERIC_REID_MIN_OCR_CONFIDENCE and
+          ring >= NUMERIC_REID_MIN_RING_SCORE
+        )
+      if bool(pending.v254_partial) and not v254_pair_verified:
+        cloudlog.info("[XNOR_VSL_V254] partial50_track_pair_reject")
+        return None
+
+    if ring_partial and not (self._partial_numeric_read_is_clear(read) or v254_pair_verified):
       cloudlog.info(
         f"[XNOR_VSL_V12UK] numeric_track_partial_reject expected={pending.speed_limit_mph}mph "
         f"read={read_speed}mph ring={ring:.3f} reason={ring_reason} "
@@ -2408,7 +2551,9 @@ class SpeedLimitVisionUK:
       value_confidence=value_conf,
       legacy_speed_mph=0,
       bbox=tracked_bbox,
-      source="numeric_reacquire_partial" if ring_partial else "numeric_reacquire",
+      source=("numeric_partial_v254_reacquire" if bool(pending.v254_partial) else
+              "numeric_reacquire_partial" if ring_partial else "numeric_reacquire"),
+      v254_verified=bool(pending.v254_partial and v254_pair_verified),
     )
     self._hybrid_observe_safe(detection.source, read, tracked_bbox, float(ring), ring_partial)
     cloudlog.info(
@@ -2791,7 +2936,13 @@ class SpeedLimitVisionUK:
       self._log_ocr_accept(ocr_source, value_read, bbox)
       self._shadow_capture_after_ocr(frame_bgr, bbox, value_read, ocr_source)
 
-      if partial_path and not self._partial_numeric_read_is_clear(value_read):
+      v254_pair_verified = False
+      if partial_path and int(value_read.speed_limit_mph) == 50:
+        v254_pair_verified = self._v254_partial_50_verified(
+          crop, value_read, float(partial_score), str(ring_reason), bbox
+        )
+
+      if partial_path and not (self._partial_numeric_read_is_clear(value_read) or v254_pair_verified):
         self._log_raw_proposal(
           "partial_clear_reject", speed_mph, model_conf, partial_score,
           int(value_read.speed_limit_mph), float(value_read.confidence), 0.0, bbox,
@@ -2839,7 +2990,9 @@ class SpeedLimitVisionUK:
         value_conf,
         speed_mph,
         bbox,
+        "numeric_partial_v254" if v254_pair_verified else
         "numeric_partial" if partial_path else "numeric",
+        v254_verified=bool(v254_pair_verified),
       ))
 
     if not candidates:
@@ -2894,6 +3047,7 @@ class SpeedLimitVisionUK:
       detection.source,
       detection.ring_score,
       detection.value_confidence,
+      detection.v254_verified,
     ))
     self._prune_history(now)
 
@@ -2908,19 +3062,38 @@ class SpeedLimitVisionUK:
       ):
         continue
       if source_family == "numeric":
+        # V254 partial 50 confirmation requires paired raw/enhanced OCR for
+        # every partial observation and distinct camera-frame timestamps.
+        partial_50 = (
+          int(detection.speed_limit_mph) == 50 and
+          ("partial" in detection.source or "partial" in entry.source)
+        )
+        if partial_50:
+          if ("partial" in detection.source and not detection.v254_verified or
+              "partial" in entry.source and not entry.v254_verified):
+            continue
+          if entry is not self.history[-1] and not (
+            V254_PARTIAL50_MIN_FRAME_SEPARATION <= now - entry.created_at <= V254_PARTIAL50_RECOVERY_MAX_AGE
+          ):
+            continue
         # The original V248 identity check remains authoritative for normal
-        # reacquisition. Only FULL detector reads of the same 50 mph sign may
-        # use the bounded high-confidence re-identification fallback.
+        # reacquisition. V254 permits a tightly gated low-light 50 pair as
+        # well; other partial, adjacent and single-read cases are excluded.
         same_sign = (
           detection.bbox is not None and entry.bbox is not None and
           self._numeric_same_physical_sign(detection.bbox, entry.bbox)
         )
+        if (partial_50 and detection.source in ("numeric", "numeric_partial_v254") and
+            entry.source in ("numeric", "numeric_partial_v254") and entry is not self.history[-1]):
+          same_sign = self._numeric_detector_reid_same_sign(
+            detection, entry, now, int(getattr(self, "_last_numeric_frame_width", 0))
+          )
         if not same_sign and self._numeric_detector_reid_same_sign(
           detection, entry, now, int(getattr(self, "_last_numeric_frame_width", 0))
         ):
           same_sign = True
           cloudlog.info(
-            f"[XNOR_VSL_V253] detector_reid speed={detection.speed_limit_mph}mph "
+            f"[XNOR_VSL_V254] detector_reid speed={detection.speed_limit_mph}mph "
             f"dt={now-entry.created_at:.3f}s previous={entry.bbox} current={detection.bbox} "
             f"ocr={entry.value_confidence:.3f}/{detection.value_confidence:.3f}"
           )
@@ -3099,7 +3272,7 @@ class SpeedLimitVisionUK:
         self.last_inference_at = time.monotonic()
         if detection is not None:
           self._update_detection(detection)
-          if detection.source == "numeric":
+          if detection.source in ("numeric", "numeric_partial_v254"):
             self._arm_pending_numeric(detection, self.last_inference_at)
           # Do not optical-flow this detection into a second confirmation.
           # followup_until still schedules fresh detector passes as a fallback.
