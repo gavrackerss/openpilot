@@ -83,11 +83,11 @@ class ManualSpeedLimitBar(Widget):
                     size, 0, color)
 
   def _render(self, rect: rl.Rectangle):
-    label = f"POSTED {self._value} mph · OFFSET APPLIES" if self._value else "TESLA SPEED LIMIT · AUTO"
+    label = f"POSTED {self._value} mph - OFFSET APPLIES" if self._value else "TESLA SPEED LIMIT - AUTO"
     if self._actual_set_mph > 0:
-      label += f" · TESLA SET {round(self._actual_set_mph)} mph"
+      label += f" - TESLA SET {round(self._actual_set_mph)} mph"
     if self._status:
-      label += f" · {self._status}"
+      label += f" - {self._status}"
     rl.draw_text_ex(self._smaller_font, label, rl.Vector2(rect.x + 5, rect.y + 2), 24, 0, TEXT)
     for (value, text), box in zip(OPTIONS, self._button_rects()):
       selected = value == self._value
