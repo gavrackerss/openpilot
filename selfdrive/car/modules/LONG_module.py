@@ -2180,6 +2180,15 @@ class LongController:
         use_speed_limit = bool(getattr(tinkla, "adjust_acc_with_speed_limit"))
       except Exception:
         use_speed_limit = True
+    # V279: manual posted limit + Tesla/Tinkla offset has priority over
+    # automatic posted-limit selection, but not planner lead/curve constraints.
+    if str(getattr(CS, '_xnor_speed_limit_source', '')) == 'manual_ui':
+      try:
+        manual_ms = float(CS._calc_speed_limit_target_ms(speed_units))
+        if math.isfinite(manual_ms) and manual_ms > 0.1:
+          return manual_ms, True, 'manual_ui_offset'
+      except Exception:
+        pass
     if not use_speed_limit:
       return None, False, "config_disabled"
 
