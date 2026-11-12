@@ -75,6 +75,16 @@ def tesla_vision_speed_limit(started: bool, params: Params, CP: car.CarParams) -
   except Exception:
     return False
 
+
+def tesla_v275_shadow(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """XNOR V275: Tesla onroad observation ONLY; separate from old vision Params."""
+  try:
+    return bool(started and getattr(CP, "brand", "") == "tesla" and
+                not params.get_bool("VisionSpeedLimitDetection") and
+                os.path.isfile("/data/V275_Shadow/ENABLED"))
+  except Exception:
+    return False
+
 _XNOR_MODEL_SELECTOR_RUNTIME_FAILED = False
 _XNOR_MODEL_SELECTOR_RUNTIME_ERROR = ""
 
@@ -139,7 +149,7 @@ procs = [
   PythonProcess("soundd", "selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),
   NativeProcess("mapd", "selfdrive", ["./mapd"], always_run),
-  PythonProcess("speedlimitvisiond", "selfdrive.speed_limit_vision_uk", tesla_vision_speed_limit),
+  PythonProcess("v275shadowd", "selfdrive.v275_shadow_manager", tesla_v275_shadow),
   NativeProcess("_pandad", "selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", only_onroad),
   PythonProcess("torqued", "selfdrive.locationd.torqued", only_onroad),
