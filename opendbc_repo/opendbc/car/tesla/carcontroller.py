@@ -1025,7 +1025,107 @@ class CarController(CarControllerBase):
     self._xnor_diag_last_log_ms = int(now_ms)
     cloudlog.info(msg)
 
+  # XNOR_V279_MANUAL_OFFSET: native Tesla TACC SET by existing protected STW pulses.
+  # LONG_module.update stays active for lead and curve processing.
+  def _v279_manual_target_mph(self) -> int:
+    if int(self.frame) - int(getattr(self, '_v279_manual_read_frame', -100000)) >= 10:
+      self._v279_manual_read_frame = int(self.frame)
+      try:
+        value = int(self.params.get("XNORManualSpeedLimitMph") or 0)
+        self._v279_manual_mph = value if value in (40, 50, 60, 70) else 0
+      except Exception:
+        self._v279_manual_mph = 0
+      if not self._v279_manual_mph:
+        self._v279_target_signature = None
+    return int(getattr(self, '_v279_manual_mph', 0))
+
+  def _v279_manual_cruise_sync(self, CC, CS, can_sends, target_mph: int) -> None:
+    # Never engage TACC; only nudge an already engaged native Tesla SET value.
+    if int(target_mph) not in (40, 50, 60, 70):
+      return
+    if str(getattr(CS, '_xnor_speed_limit_source', '')) != 'manual_ui':
+      return
+    try:
+      units = str(getattr(CS, 'speed_units', 'MPH') or 'MPH').upper()
+      target_ms = float(CS._calc_speed_limit_target_ms(units))
+    except Exception:
+      return
+    if not math.isfinite(target_ms) or not (10.0 * CV.MPH_TO_MS <= target_ms <= 85.0 * CV.MPH_TO_MS):
+      return
+    target_total_mph = target_ms * CV.MS_TO_MPH
+    now_ms = int(self._now_ms())
+    signature = (int(target_mph), round(target_total_mph, 2))
+    if getattr(self, '_v279_target_signature', None) != signature:
+      self._v279_target_signature = signature
+      self._v279_target_since_ms = now_ms
+      self._v279_last_button_ms = 0
+      self._v279_no_feedback = 0
+      self._v279_last_seen_set_ms = 0.0
+      self._v279_sent_count = 0
+      cloudlog.info(f'[XNOR_V279_MANUAL_OFFSET] posted={target_mph}mph target={target_total_mph:.2f}mph selected')
+
+    if not bool(getattr(CC, 'enabled', False)):
+      return
+    stock_state = str(getattr(CS, 'stock_cruise_state', '') or '').upper()
+    if stock_state not in ('ENABLED', 'OVERRIDE') or not bool(getattr(CS, 'stock_cruise_enabled', False)):
+      return
+    cs_out = getattr(CS, 'out', None)
+    if cs_out is None or any(bool(getattr(cs_out, k, False)) for k in ('brakePressed', 'regenBraking', 'gasPressed')):
+      return
+    if int(getattr(CS, 'cruise_buttons', BTN_IDLE) or BTN_IDLE) != BTN_IDLE:
+      return
+    if int(getattr(self, '_virtual_turn_prev', 0) or 0) in (1, 2):
+      return
+    if int(getattr(self, '_stw_release_frame', -1)) >= 0:
+      return
+    if now_ms - int(getattr(self, '_human_cruise_action_time_ms', 0) or 0) < 1200:
+      return
+    if now_ms - int(getattr(self, '_automated_cruise_action_time_ms', 0) or 0) < 700:
+      return
+    if now_ms - int(getattr(self, '_v279_last_button_ms', 0) or 0) < 750:
+      return
+    if now_ms - int(getattr(self, '_v279_target_since_ms', now_ms)) > 25000:
+      return
+    if int(getattr(self, '_v279_sent_count', 0)) >= 25:
+      return
+
+    current_ms = float(getattr(CS, 'stock_cruise_set_speed_ms', 0.0) or 0.0)
+    if not math.isfinite(current_ms) or current_ms < 10.0 * CV.MPH_TO_MS:
+      return
+    last_ms = float(getattr(self, '_v279_last_seen_set_ms', 0.0) or 0.0)
+    if last_ms > 0.1 and abs(current_ms - last_ms) > 0.4 * CV.MPH_TO_MS:
+      self._v279_no_feedback = 0
+    elif int(getattr(self, '_v279_last_button_ms', 0) or 0) > 0:
+      self._v279_no_feedback = int(getattr(self, '_v279_no_feedback', 0)) + 1
+    if self._v279_no_feedback >= 3:
+      return
+
+    unit_scale = CV.MS_TO_KPH if units == 'KPH' else CV.MS_TO_MPH
+    current_u = current_ms * unit_scale
+    target_u = target_ms * unit_scale
+    delta = target_u - current_u
+    tol = 1.0 if units == 'KPH' else 0.7
+    if delta >= 5.0 - tol:
+      btn = BTN_UP2
+    elif delta > tol:
+      btn = BTN_UP1
+    elif delta <= -(5.0 - tol):
+      btn = BTN_DOWN2
+    elif delta < -tol:
+      btn = BTN_DOWN1
+    else:
+      return
+    if self._queue_stalk_pulse(CS, can_sends, int(btn)):
+      self._v279_sent_count += 1
+      self._v279_last_button_ms = now_ms
+      self._v279_last_seen_set_ms = current_ms
+      self._automated_cruise_action_time_ms = now_ms
+      cloudlog.info(f'[XNOR_V279_MANUAL_OFFSET] posted={target_mph}mph target={target_total_mph:.1f}mph '
+                    f'tesla_set={current_u:.1f}{units} pulse={btn} attempt={self._v279_sent_count}')
+
   def _speed_limit_sync(self, CC, CS, can_sends) -> None:
+    manual_target_mph = self._v279_manual_target_mph()
+    manual_active = manual_target_mph in (40, 50, 60, 70)
     enabled = bool(getattr(CC, "enabled", False) or getattr(CC, "latActive", False))
     # V218 direct remains advisory-only. V229 is different: its Unity-style
     # DAS_control owner also needs the native Tesla SET value synchronised to the
@@ -1042,9 +1142,11 @@ class CarController(CarControllerBase):
       decision = self._long_module.update(CS, enabled=policy_enabled,
                                           frame=int(self.frame), now_ms=int(self._now_ms()))
 
+      if manual_active:
+        self._v279_manual_cruise_sync(CC, CS, can_sends, manual_target_mph)
       setsync_btn = None
-      setsync_reason = 'inactive'
-      if bool(self._v229_owner_now) and bool(getattr(CC, 'enabled', False)) and not brake and not regen:
+      setsync_reason = 'manual_ui' if manual_active else 'inactive'
+      if (not manual_active) and bool(self._v229_owner_now) and bool(getattr(CC, 'enabled', False)) and not brake and not regen:
         now_ms = int(self._now_ms())
         target_ms = getattr(self._long_module, 'v231_setsync_target_ms', None)
         target_time_ms = int(getattr(self._long_module, 'v231_setsync_mono_ms', 0) or 0)
@@ -1138,6 +1240,8 @@ class CarController(CarControllerBase):
       elif pedal_only_override and not long_active and int(self.frame) % 100 == 0:
         self._diag_log("[XNOR_V214_LONG] accelerator_override: SET sync remains enabled; acceleration authority stays with driver")
     if (not enabled) or (not (self._cached_autopilot_disabled or hybrid_original_long)):
+      if manual_active:
+        self._v279_manual_cruise_sync(CC, CS, can_sends, manual_target_mph)
       self._diag_log(
         f"[XNOR_CC_DIAG] gate=pre enabled={int(enabled)} "
         f"latActive={int(bool(getattr(CC, 'latActive', False)))} "
@@ -1159,6 +1263,9 @@ class CarController(CarControllerBase):
       return
 
     decision = self._long_module.update(CS, enabled=enabled, frame=int(self.frame), now_ms=int(self._now_ms()))
+    if manual_active:
+      self._v279_manual_cruise_sync(CC, CS, can_sends, manual_target_mph)
+      return
     if decision.button is None:
       self._diag_log(f"[XNOR_CC_DIAG] gate=no_decision detail={decision.log or 'none'}")
       return

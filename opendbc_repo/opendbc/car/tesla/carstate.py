@@ -146,6 +146,9 @@ class CarState(CarStateBase):
     # XNOR V1-UK camera speed-limit cache. Params are sampled at 5 Hz, not on
     # every 100 Hz CarState update.
     self._vision_params = Params()
+    # V279: driver-selected posted limit (not camera inference)
+    self._xnor_manual_speed_limit_mph = 0
+    self._xnor_manual_speed_limit_last_read_frame = -100000
     self._vision_speed_limit_ms = 0.0
     self._vision_speed_limit_confidence = 0.0
     self._vision_speed_limit_timestamp = 0.0
@@ -1003,8 +1006,22 @@ class CarState(CarStateBase):
       provisional_applied = True
       vision_applied = False
 
+    # V279: driver's manual posted limit takes precedence over Tesla map and vision.
+    # The existing _calc_speed_limit_target_ms still applies Tesla/Tinkla offsets.
+    if self._param_frame - self._xnor_manual_speed_limit_last_read_frame >= 20:
+      self._xnor_manual_speed_limit_last_read_frame = self._param_frame
+      try:
+        selected = int(self._vision_params.get("XNORManualSpeedLimitMph") or 0)
+        self._xnor_manual_speed_limit_mph = selected if selected in (40, 50, 60, 70) else 0
+      except Exception:
+        self._xnor_manual_speed_limit_mph = 0
+    manual_applied = self._xnor_manual_speed_limit_mph in (40, 50, 60, 70)
+    if manual_applied:
+      chosen = self._xnor_manual_speed_limit_mph * CV.MPH_TO_MS
     self.speed_limit_ms = float(chosen)
-    if vision_applied:
+    if manual_applied:
+      self._xnor_speed_limit_source = "manual_ui"
+    elif vision_applied:
       self._xnor_speed_limit_source = "vision_uk"
     elif provisional_applied:
       self._xnor_speed_limit_source = "vision_uk_lower_candidate"
