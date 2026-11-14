@@ -3,6 +3,8 @@
 Every preset is two-tap confirmed within 3 s because the car's CAN-reported offset
 may differ from Params. X immediately cancels the manual source, returning to Tesla.
 No GUI code transmits CAN messages.
+
+Visual-only adjustment: speed buttons have completely transparent fills.
 """
 from __future__ import annotations
 
@@ -16,12 +18,13 @@ from openpilot.system.ui.widgets import Widget
 
 PARAM = "XNORManualSpeedLimitMph"
 OPTIONS = ((40, "40"), (50, "50"), (60, "60"), (70, "NSL"), (0, "X"))
-BG = rl.Color(13, 26, 34, 214)
-BG_SELECTED = rl.Color(23, 104, 79, 238)
-BG_CANCEL = rl.Color(78, 57, 58, 230)
-OUTLINE = rl.Color(230, 237, 237, 135)
+# No background paint: the driving camera remains fully visible inside every button.
+OUTLINE = rl.Color(230, 237, 237, 155)
+OUTLINE_SELECTED = rl.Color(74, 239, 163, 255)
+OUTLINE_CANCEL = rl.Color(255, 170, 170, 190)
 TEXT = rl.Color(255, 255, 255, 255)
 MUTED = rl.Color(201, 211, 213, 255)
+SHADOW = rl.Color(0, 0, 0, 215)
 
 
 class ManualSpeedLimitBar(Widget):
@@ -77,10 +80,10 @@ class ManualSpeedLimitBar(Widget):
 
   def _draw_centered(self, text: str, font, size: float, rect: rl.Rectangle, color):
     dims = rl.measure_text_ex(font, text, size, 0)
-    rl.draw_text_ex(font, text,
-                    rl.Vector2(rect.x + (rect.width - dims.x) / 2,
-                               rect.y + (rect.height - dims.y) / 2),
-                    size, 0, color)
+    pos = rl.Vector2(rect.x + (rect.width - dims.x) / 2,
+                     rect.y + (rect.height - dims.y) / 2)
+    rl.draw_text_ex(font, text, rl.Vector2(pos.x + 2, pos.y + 2), size, 0, SHADOW)
+    rl.draw_text_ex(font, text, pos, size, 0, color)
 
   def _render(self, rect: rl.Rectangle):
     label = f"POSTED {self._value} mph - OFFSET APPLIES" if self._value else "TESLA SPEED LIMIT - AUTO"
@@ -88,12 +91,14 @@ class ManualSpeedLimitBar(Widget):
       label += f" - TESLA SET {round(self._actual_set_mph)} mph"
     if self._status:
       label += f" - {self._status}"
-    rl.draw_text_ex(self._smaller_font, label, rl.Vector2(rect.x + 5, rect.y + 2), 24, 0, TEXT)
+    header_pos = rl.Vector2(rect.x + 5, rect.y + 2)
+    rl.draw_text_ex(self._smaller_font, label, rl.Vector2(header_pos.x + 2, header_pos.y + 2), 24, 0, SHADOW)
+    rl.draw_text_ex(self._smaller_font, label, header_pos, 24, 0, TEXT)
     for (value, text), box in zip(OPTIONS, self._button_rects()):
       selected = value == self._value
-      fill = BG_SELECTED if selected else (BG_CANCEL if value == 0 else BG)
-      rl.draw_rectangle_rounded(box, 0.22, 8, fill)
-      rl.draw_rectangle_rounded_lines_ex(box, 0.22, 8, 3.0, OUTLINE)
+      outline = OUTLINE_SELECTED if selected else (OUTLINE_CANCEL if value == 0 else OUTLINE)
+      # Draw an outline only: no rectangular fill, even when selected or cancelled.
+      rl.draw_rectangle_rounded_lines_ex(box, 0.22, 8, 4.0 if selected else 2.5, outline)
       self._draw_centered(text, self._font, 46 if text.isdigit() else 33, box, TEXT)
       if value == 70:
         detail = rl.Rectangle(box.x, box.y + box.height - 27, box.width, 25)
