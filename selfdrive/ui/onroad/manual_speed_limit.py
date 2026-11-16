@@ -4,7 +4,8 @@ Every preset is two-tap confirmed within 3 s because the car's CAN-reported offs
 may differ from Params. X immediately cancels the manual source, returning to Tesla.
 No GUI code transmits CAN messages.
 
-Visual-only adjustment: speed buttons have completely transparent fills.
+Visual-only update: UK circular speed signs, NSL symbol, and transparent Tesla X.
+No rectangular button fills or outlines. Touch areas and control logic unchanged.
 """
 from __future__ import annotations
 
@@ -18,12 +19,17 @@ from openpilot.system.ui.widgets import Widget
 
 PARAM = "XNORManualSpeedLimitMph"
 OPTIONS = ((40, "40"), (50, "50"), (60, "60"), (70, "NSL"), (0, "X"))
-# No background paint: the driving camera remains fully visible inside every button.
-OUTLINE = rl.Color(230, 237, 237, 155)
-OUTLINE_SELECTED = rl.Color(74, 239, 163, 255)
-OUTLINE_CANCEL = rl.Color(255, 170, 170, 190)
+
+# Actual sign faces are opaque, but everything OUTSIDE the round sign is transparent.
+# The X control is transparent throughout (except its strokes and label).
+SIGN_WHITE = rl.Color(255, 255, 255, 255)
+SIGN_RED = rl.Color(210, 28, 35, 255)
+SIGN_BLACK = rl.Color(20, 20, 20, 255)
+SELECTED = rl.Color(74, 239, 163, 255)
+PENDING = rl.Color(255, 201, 61, 255)
+CANCEL_RED = rl.Color(255, 156, 156, 255)
 TEXT = rl.Color(255, 255, 255, 255)
-MUTED = rl.Color(201, 211, 213, 255)
+MUTED = rl.Color(225, 232, 232, 255)
 SHADOW = rl.Color(0, 0, 0, 215)
 
 
@@ -68,6 +74,7 @@ class ManualSpeedLimitBar(Widget):
       self._status = ''
 
   def _button_rects(self):
+    # Unchanged original hit boxes: artwork does NOT reduce the touch targets.
     r = self._rect
     gap = 12.0
     horizontal_padding = 5.0
@@ -85,6 +92,63 @@ class ManualSpeedLimitBar(Widget):
     rl.draw_text_ex(font, text, rl.Vector2(pos.x + 2, pos.y + 2), size, 0, SHADOW)
     rl.draw_text_ex(font, text, pos, size, 0, color)
 
+  def _draw_sign_text(self, speed: str, center: rl.Vector2, radius: float):
+    # Fit black speed numerals inside the circular white face, not the touch box.
+    font_size = radius * 1.30
+    dims = rl.measure_text_ex(self._font, speed, font_size, 0)
+    if dims.x > radius * 1.40:
+      font_size *= (radius * 1.40) / dims.x
+      dims = rl.measure_text_ex(self._font, speed, font_size, 0)
+    pos = rl.Vector2(center.x - dims.x / 2, center.y - dims.y / 2)
+    rl.draw_text_ex(self._font, speed, pos, font_size, 0, SIGN_BLACK)
+
+  def _draw_speed_sign(self, value: int, box: rl.Rectangle, is_selected: bool, is_pending: bool):
+    # Reserve a thin bottom strip for the '70 mph' explanation under NSL.
+    has_detail = (value == 70)
+    art_h = box.height - (21.0 if has_detail else 0.0)
+    radius = max(8.0, min(box.width * 0.42, art_h * 0.43))
+    center = rl.Vector2(box.x + box.width / 2, box.y + art_h / 2)
+
+    # Circle-only status indicator. No rectangle anywhere in the button graphics.
+    if is_selected or is_pending:
+      highlight = PENDING if is_pending else SELECTED
+      rl.draw_ring(center, radius + 2.5, radius + 5.5, 0.0, 360.0, 48, highlight)
+
+    # UK sign face, with a genuinely transparent background OUTSIDE the disc.
+    rl.draw_circle_v(center, radius, SIGN_WHITE)
+    if value == 70:
+      # UK national speed limit: white circle with a descending black diagonal bar.
+      # Semantics remain the pre-existing motorway-specific 70 mph preset.
+      rl.draw_ring(center, radius - 1.0, radius, 0.0, 360.0, 48, SIGN_BLACK)
+      p1 = rl.Vector2(center.x - radius * 0.48, center.y - radius * 0.61)
+      p2 = rl.Vector2(center.x + radius * 0.48, center.y + radius * 0.61)
+      stroke = max(3.0, radius * 0.22)
+      rl.draw_line_ex(p1, p2, stroke, SIGN_BLACK)
+      rl.draw_circle_v(p1, stroke / 2, SIGN_BLACK)
+      rl.draw_circle_v(p2, stroke / 2, SIGN_BLACK)
+      detail = rl.Rectangle(box.x, box.y + box.height - 22, box.width, 20)
+      self._draw_centered('70 mph', self._smaller_font, 17.0, detail, MUTED)
+    else:
+      rl.draw_ring(center, radius * 0.78, radius, 0.0, 360.0, 48, SIGN_RED)
+      self._draw_sign_text(str(value), center, radius)
+
+  def _draw_tesla_cancel(self, box: rl.Rectangle, is_selected: bool):
+    # X symbol only: no background panel, square outline or opaque disc.
+    art_h = box.height - 21.0
+    radius = max(8.0, min(box.width * 0.40, art_h * 0.40))
+    center = rl.Vector2(box.x + box.width / 2, box.y + art_h / 2)
+    c = MUTED if is_selected else CANCEL_RED
+    d = radius * 0.49
+    p1, p2 = rl.Vector2(center.x - d, center.y - d), rl.Vector2(center.x + d, center.y + d)
+    p3, p4 = rl.Vector2(center.x + d, center.y - d), rl.Vector2(center.x - d, center.y + d)
+    stroke = max(3.0, radius * 0.15)
+    rl.draw_line_ex(p1, p2, stroke, c)
+    rl.draw_line_ex(p3, p4, stroke, c)
+    if is_selected:
+      rl.draw_ring(center, radius + 2.5, radius + 5.5, 0.0, 360.0, 48, SELECTED)
+    detail = rl.Rectangle(box.x, box.y + box.height - 22, box.width, 20)
+    self._draw_centered('TESLA', self._smaller_font, 17.0, detail, MUTED)
+
   def _render(self, rect: rl.Rectangle):
     label = f"POSTED {self._value} mph - OFFSET APPLIES" if self._value else "TESLA SPEED LIMIT - AUTO"
     if self._actual_set_mph > 0:
@@ -96,18 +160,13 @@ class ManualSpeedLimitBar(Widget):
     rl.draw_text_ex(self._smaller_font, label, header_pos, 24, 0, TEXT)
     for (value, text), box in zip(OPTIONS, self._button_rects()):
       selected = value == self._value
-      outline = OUTLINE_SELECTED if selected else (OUTLINE_CANCEL if value == 0 else OUTLINE)
-      # Draw an outline only: no rectangular fill, even when selected or cancelled.
-      rl.draw_rectangle_rounded_lines_ex(box, 0.22, 8, 4.0 if selected else 2.5, outline)
-      self._draw_centered(text, self._font, 46 if text.isdigit() else 33, box, TEXT)
-      if value == 70:
-        detail = rl.Rectangle(box.x, box.y + box.height - 27, box.width, 25)
-        self._draw_centered("70 mph", self._smaller_font, 17, detail, MUTED)
-      elif value == 0:
-        detail = rl.Rectangle(box.x, box.y + box.height - 27, box.width, 25)
-        self._draw_centered("TESLA", self._smaller_font, 17, detail, MUTED)
+      if value == 0:
+        self._draw_tesla_cancel(box, selected)
+      else:
+        self._draw_speed_sign(value, box, selected, self._pending == value and time.monotonic() < self._pending_until)
 
   def _handle_mouse_release(self, mouse_pos):
+    # UNCHANGED V279 interaction and Tesla control logic.
     for (value, label), box in zip(OPTIONS, self._button_rects()):
       if not rl.check_collision_point_rec(mouse_pos, box):
         continue
