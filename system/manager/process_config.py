@@ -85,6 +85,15 @@ def tesla_v275_shadow(started: bool, params: Params, CP: car.CarParams) -> bool:
   except Exception:
     return False
 
+
+def xnor_jetlink_probe(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """Jetlink link diagnostics only, offroad only, no USB reconfiguration.
+
+  No change to stock/sunnypilot model choice, panda, carState or controls.
+  Marker is independent of the Params database to avoid boot migrations.
+  """
+  return not started and os.path.isfile('/data/jetlink_xnor/ENABLED')
+
 _XNOR_MODEL_SELECTOR_RUNTIME_FAILED = False
 _XNOR_MODEL_SELECTOR_RUNTIME_ERROR = ""
 
@@ -150,6 +159,7 @@ procs = [
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),
   NativeProcess("mapd", "selfdrive", ["./mapd"], always_run),
   PythonProcess("v275shadowd", "selfdrive.v275_shadow_manager", tesla_v275_shadow),
+  PythonProcess("xnorjetlinkd", "openpilot.jetlink_xnor_probe", xnor_jetlink_probe),
   NativeProcess("_pandad", "selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", only_onroad),
   PythonProcess("torqued", "selfdrive.locationd.torqued", only_onroad),
