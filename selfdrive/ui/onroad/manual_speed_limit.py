@@ -94,10 +94,12 @@ class ManualSpeedLimitBar(Widget):
 
   def _draw_sign_text(self, speed: str, center: rl.Vector2, radius: float):
     # Fit black speed numerals inside the circular white face, not the touch box.
-    font_size = radius * 1.30
+    # Keep numerals approximately the same physical size as the previous UI while expanding the rings.
+    font_size = radius * 1.22
     dims = rl.measure_text_ex(self._font, speed, font_size, 0)
-    if dims.x > radius * 1.40:
-      font_size *= (radius * 1.40) / dims.x
+    # Leave visible white clearance between digits and the red ring.
+    if dims.x > radius * 1.28:
+      font_size *= (radius * 1.28) / dims.x
       dims = rl.measure_text_ex(self._font, speed, font_size, 0)
     pos = rl.Vector2(center.x - dims.x / 2, center.y - dims.y / 2)
     rl.draw_text_ex(self._font, speed, pos, font_size, 0, SIGN_BLACK)
@@ -106,7 +108,8 @@ class ManualSpeedLimitBar(Widget):
     # Reserve a thin bottom strip for the '70 mph' explanation under NSL.
     has_detail = (value == 70)
     art_h = box.height - (21.0 if has_detail else 0.0)
-    radius = max(8.0, min(box.width * 0.42, art_h * 0.43))
+    # About 7% larger discs while staying inside the existing invisible touch areas.
+    radius = max(8.0, min(box.width * 0.45, art_h * 0.46))
     center = rl.Vector2(box.x + box.width / 2, box.y + art_h / 2)
 
     # Circle-only status indicator. No rectangle anywhere in the button graphics.
@@ -129,7 +132,7 @@ class ManualSpeedLimitBar(Widget):
       detail = rl.Rectangle(box.x, box.y + box.height - 22, box.width, 20)
       self._draw_centered('70 mph', self._smaller_font, 17.0, detail, MUTED)
     else:
-      rl.draw_ring(center, radius * 0.78, radius, 0.0, 360.0, 48, SIGN_RED)
+      rl.draw_ring(center, radius * 0.80, radius, 0.0, 360.0, 48, SIGN_RED)
       self._draw_sign_text(str(value), center, radius)
 
   def _draw_tesla_cancel(self, box: rl.Rectangle, is_selected: bool):
