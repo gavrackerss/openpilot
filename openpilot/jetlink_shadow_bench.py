@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""XNOR Jetlink connected shadow benchmark, v1.
+"""XNOR Jetlink connected shadow/latency benchmark, v2.
 
 Subscribes to camerad in a separate, non-realtime process; never imports/patches
 modeld, publishes messages, accesses CAN, or writes openpilot Params. Synthetic
@@ -16,6 +16,8 @@ import argparse
 import csv
 import json
 import math
+import queue
+import threading
 import os
 from pathlib import Path
 import secrets
@@ -29,7 +31,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-VERSION = '1.0'
+VERSION = '2.0'
 SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
 NBYTES = 768749892
 HEADER = struct.Struct('<IHHIIIQ4x')
@@ -172,6 +174,9 @@ class JetlinkTCP:
     t_sent = time.perf_counter_ns()
     resp = self.expect(INFER_RESP, seq, 3.0)
     t_recv = time.perf_counter_ns()
+    return self.decode_infer_reply(resp, frame_id, t0, t_sent, t_recv)
+
+  def decode_infer_reply(self, resp: bytes, frame_id: int, t0: int, t_sent: int, t_recv: int):
     if len(resp) < INFER_REPLY.size:
       raise RuntimeError('Short LS2 response header')
     got_id, status, gpu_us, queue_us, total_us = INFER_REPLY.unpack_from(resp)
@@ -185,9 +190,11 @@ class JetlinkTCP:
     out = np.frombuffer(resp, dtype='<f4', count=expected, offset=INFER_REPLY.size)
     if not np.isfinite(out).all():
       raise RuntimeError('LS2 returned non-finite outputs')
+    wire_ms = (t_recv-t0)/1e6
     return {
-      'wire_ms': (t_recv-t0)/1e6, 'send_ms':(t_sent-t0)/1e6, 'recv_ms':(t_recv-t_sent)/1e6,
+      'wire_ms': wire_ms, 'send_ms':(t_sent-t0)/1e6, 'recv_ms':(t_recv-t_sent)/1e6,
       'server_total_ms':total_us/1000, 'server_npu_ms':gpu_us/1000, 'server_queue_ms':queue_us/1000,
+      'link_overhead_ms': wire_ms-total_us/1000,
       'output_floats':expected,
     }
 
@@ -197,6 +204,101 @@ class JetlinkTCP:
     except Exception:
       pass
 
+
+
+class PipelinedInference:
+  """Duplex TCP inference: one camera/sender thread, one receive thread.
+
+  Only two requests may be outstanding by default. This avoids unlimited
+  queuing on the phone and allows 20Hz *throughput* even when each response
+  takes >50ms; it does not change the per-frame latency or drive the car.
+  """
+  def __init__(self, peer: JetlinkTCP, depth: int):
+    if depth not in (2, 3):
+      raise ValueError('Pipeline depth must be 2 or 3')
+    self.peer = peer
+    self.depth = depth
+    self.lock = threading.Lock()
+    self.pending = {}
+    self.results = queue.Queue()
+    self.error = None
+    self.stop_event = threading.Event()
+    self.worker = threading.Thread(target=self._reader, name='jetlink-shadow-receiver', daemon=True)
+
+  def start(self):
+    self.peer.sock.settimeout(3.0)
+    self.worker.start()
+
+  def send_frame(self, item: dict, warped: np.ndarray, packed: np.ndarray, *, reset=False):
+    if self.error is not None:
+      raise RuntimeError(f'Jetlink receive thread failed: {self.error}') from self.error
+    img = np.ascontiguousarray(warped, dtype=np.uint8)
+    scalars = np.ascontiguousarray(packed, dtype='<f4')
+    if img.nbytes != warped_bytes(self.peer.spec) or scalars.nbytes != 4*scalar_count(self.peer.spec):
+      raise ValueError('Invalid LS2 frame or scalar input size')
+    with self.lock:
+      if len(self.pending) >= self.depth:
+        return False
+      t0 = time.perf_counter_ns()
+      seq = self.peer.send(INFER_REQ, (INFER_HEADER.pack(item['frame_id'] & 0xffffffff,
+                            RESET_QUEUES if reset else 0), img, scalars))
+      sent = time.perf_counter_ns()
+      self.pending[seq] = (item, t0, sent)
+    return True
+
+  def outstanding(self):
+    with self.lock:
+      return len(self.pending)
+
+  def _reader(self):
+    try:
+      while not self.stop_event.is_set():
+        try:
+          kind, seq, _flags, raw = self.peer.recv()
+        except socket.timeout as exc:
+          if self.outstanding() > 0:
+            raise TimeoutError('Jetlink inference response timed out (3s with requests outstanding)') from exc
+          continue
+        received = time.perf_counter_ns()
+        if kind == PROGRESS:
+          continue
+        if kind == ERROR:
+          try: detail = json.loads(raw)
+          except Exception: detail = {'error': raw[:120].hex()}
+          raise RuntimeError(f'Jetlink server error during inference: {detail}')
+        if kind != INFER_RESP:
+          raise RuntimeError(f'Unexpected reply type {kind} during pipelined inference')
+        with self.lock:
+          entry = self.pending.pop(seq, None)
+        if entry is None:
+          raise RuntimeError(f'Unmatched Jetlink inference response seq={seq}')
+        item, t0, t_sent = entry
+        timing = self.peer.decode_infer_reply(raw, item['frame_id'], t0, t_sent, received)
+        self.results.put((item, timing, received))
+    except BaseException as exc:
+      if not self.stop_event.is_set():
+        self.error = exc
+        self.stop_event.set()
+
+  def drain(self):
+    out=[]
+    while True:
+      try: out.append(self.results.get_nowait())
+      except queue.Empty: return out
+
+  def wait_idle(self, deadline_s=4.0):
+    until = time.monotonic()+deadline_s
+    while self.outstanding() and time.monotonic()<until and self.error is None:
+      time.sleep(.01)
+    if self.error is not None:
+      raise RuntimeError(f'Jetlink receive thread failed: {self.error}') from self.error
+    if self.outstanding():
+      raise TimeoutError(f'{self.outstanding()} pending Jetlink inference responses at end of benchmark')
+
+  def close(self):
+    self.stop_event.set()
+    self.peer.close()
+    self.worker.join(timeout=3.2)
 
 def model_hw(spec):
   shapes = spec['input_shapes']
@@ -397,16 +499,20 @@ def camera_frames(args,spec):
     yield frame_id,timestamp_eof,preparation,out,rgbh
 
 
+
 def bench(args):
   output=Path(args.output).expanduser()
   output.mkdir(parents=True,exist_ok=False)
   meta={'version':VERSION,'mode':args.mode,'host':args.host,'port':args.port,'rate_requested_hz':args.rate,
         'seconds_requested':args.seconds,'model_sha256':SHA,'no_control':True,'cwd':os.getcwd(),
-        'started_utc':datetime.now(timezone.utc).isoformat()}
+        'pipeline_depth':args.pipeline_depth, 'started_utc':datetime.now(timezone.utc).isoformat()}
   records=[]
   errors=[]
-  counts={'frames':0,'over_50_ms':0,'source_frames_skipped':0,'preprocess_count':0}
+  counts={'frames':0,'frames_sent':0,'over_50_ms':0,'capture_to_reply_over_50_ms':0,
+          'source_frames_skipped':0,'pipeline_full_skips':0,'preprocess_count':0}
   peer=None
+  pipeline=None
+  began=None
   try:
     meta['physical']=check_route(args.host,args.port,require_usb=not args.allow_other_network,
                                   require_panda=not args.skip_panda_check)
@@ -418,70 +524,122 @@ def bench(args):
     meta['wire_payload_bytes']={'upload':INFER_HEADER.size+warped_bytes(spec)+scalar_count(spec)*4,
                                 'download':INFER_REPLY.size+output_reply_count(spec)*4}
     print(json.dumps({'connected':True,'mode':args.mode,'server':meta['server'],
+                      'pipeline_depth':args.pipeline_depth,
                       'wire_payload_bytes':meta['wire_payload_bytes']},indent=2),flush=True)
-    path=output/'frames.csv'
     fields=['sample','frame_id','capture_age_ms','preprocess_ms','wire_ms','send_ms','recv_ms',
-            'capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms','model_outputs','over_50ms']
+            'link_overhead_ms','capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms',
+            'model_outputs','over_50ms']
+    path=output/'frames.csv'
     with path.open('w',newline='') as f:
       writer=csv.DictWriter(f,fieldnames=fields)
       writer.writeheader()
-      begin=time.monotonic()
-      next_due=begin
+      began=time.monotonic()
+      next_due=began
       last_source_id=None
       camera=camera_frames(args,spec) if args.mode=='camera' else None
       rng=np.random.default_rng(0xC0A0)
       scratch=(rng.integers(0,256,(2,6,*model_hw(spec)),dtype=np.uint8) if args.mode=='synthetic' else None)
       n=0
-      while RUNNING and time.monotonic()-begin < args.seconds:
+      if args.pipeline_depth:
+        pipeline=PipelinedInference(peer,args.pipeline_depth)
+        pipeline.start()
+
+      def record_result(item,timing,received):
+        pre_ms=item['preprocess_ms']
+        capture_ns=item['capture_ns']
+        capture_to_reply=(received-capture_ns)/1e6 if capture_ns is not None else None
+        total=timing['wire_ms']+pre_ms
+        row={'sample':item['sample'],'frame_id':item['frame_id'],'capture_age_ms':item['capture_age_ms'],
+             'preprocess_ms':pre_ms,'wire_ms':timing['wire_ms'],'send_ms':timing['send_ms'],
+             'recv_ms':timing['recv_ms'],'link_overhead_ms':timing['link_overhead_ms'],
+             'capture_to_reply_ms':capture_to_reply,'server_total_ms':timing['server_total_ms'],
+             'server_npu_ms':timing['server_npu_ms'],'server_queue_ms':timing['server_queue_ms'],
+             'model_outputs':timing['output_floats'],'over_50ms':int(total>50.)}
+        writer.writerow(row)
+        records.append(row)
+        counts['frames']+=1
+        counts['over_50_ms']+=int(total>50.)
+        counts['capture_to_reply_over_50_ms']+=int(capture_to_reply is not None and capture_to_reply>50.)
+        if counts['frames'] % 20 == 0:
+          f.flush()
+          print(f"{counts['frames']} replies; NPU {timing['server_npu_ms']:.1f}ms, "
+                f"round-trip {timing['wire_ms']:.1f}ms, pipeline outstanding "
+                f"{pipeline.outstanding() if pipeline else 0}",flush=True)
+
+      while RUNNING and time.monotonic()-began < args.seconds:
+        if pipeline:
+          for item,timing,received in pipeline.drain():
+            record_result(item,timing,received)
+          if pipeline.error is not None:
+            raise RuntimeError(f'Jetlink receiver failed: {pipeline.error}') from pipeline.error
         if args.rate>0 and time.monotonic()<next_due:
-          time.sleep(min(.02,next_due-time.monotonic()))
+          # V1's min() could become negative between the test and this call.
+          time.sleep(max(0.,min(.01,next_due-time.monotonic())))
           continue
         if args.rate>0:
           next_due=max(next_due+1.0/args.rate,time.monotonic())
         if camera is not None:
           frame_id,capture_ns,pre_ms,warped,is_rhd=next(camera)
+          counts['preprocess_count']+=1
           if last_source_id is not None and frame_id>last_source_id+1:
             counts['source_frames_skipped']+=frame_id-last_source_id-1
           last_source_id=frame_id
-          # Source time is based on monotonic host clock, not wall time.
           age_before=max(0.,ns_ms(time.monotonic_ns()-capture_ns))
         else:
           warped=scratch
-          warped[0,0,0,0]=n%256  # each sample changes without changing the model layout
-          frame_id=n;pre_ms=0.;is_rhd=False;age_before=None
+          warped[0,0,0,0]=n%256
+          frame_id=n;pre_ms=0.;is_rhd=False;age_before=None;capture_ns=None
         packed=packed_scalars(spec,is_rhd,0.)
-        timing=peer.infer(warped,packed,frame_id,reset=(n==0))
-        total=timing['wire_ms']+pre_ms
-        current={'sample':n,'frame_id':frame_id,'capture_age_ms':age_before,
-                 'preprocess_ms':pre_ms,'wire_ms':timing['wire_ms'],'send_ms':timing['send_ms'],
-                 'recv_ms':timing['recv_ms'], 'capture_to_reply_ms':(age_before+timing['wire_ms']) if age_before is not None else None,
-                 'server_total_ms':timing['server_total_ms'],'server_npu_ms':timing['server_npu_ms'],
-                 'server_queue_ms':timing['server_queue_ms'],'model_outputs':timing['output_floats'],
-                 'over_50ms':int(total>50.)}
-        writer.writerow(current)
-        if n%20==0:f.flush()
-        records.append(current)
-        counts['frames']+=1
-        counts['over_50_ms']+=int(total>50.)
+        item={'sample':n,'frame_id':frame_id,'capture_age_ms':age_before,
+              'capture_ns':capture_ns,'preprocess_ms':pre_ms}
+        if pipeline:
+          if not pipeline.send_frame(item,warped,packed,reset=(counts['frames_sent']==0)):
+            counts['pipeline_full_skips']+=1
+          else:
+            counts['frames_sent']+=1
+        else:
+          timing=peer.infer(warped,packed,frame_id,reset=(counts['frames_sent']==0))
+          timing['link_overhead_ms']=timing['wire_ms']-timing['server_total_ms']
+          counts['frames_sent']+=1
+          record_result(item,timing,time.monotonic_ns())
         n+=1
-        if n%20==0:
-          print(f'{n} frames; latest NPU {timing["server_npu_ms"]:.1f}ms, network+server {timing["wire_ms"]:.1f}ms; over50 {counts["over_50_ms"]}',flush=True)
-    counts['elapsed_s']=round(time.monotonic()-begin,3)
-    counts['achieved_fps']=round(n/max(.001,counts['elapsed_s']),3)
+      if pipeline:
+        pipeline.wait_idle()
+        for item,timing,received in pipeline.drain():
+          record_result(item,timing,received)
+      counts['elapsed_s']=round(time.monotonic()-began,3)
+      counts['achieved_fps']=round(counts['frames']/max(.001,counts['elapsed_s']),3)
+      counts['sent_fps']=round(counts['frames_sent']/max(.001,counts['elapsed_s']),3)
   except (KeyboardInterrupt,StopIteration):
     errors.append('Stopped or camerad finished before benchmark duration')
   except Exception as exc:
     errors.append(f'{type(exc).__name__}: {exc}')
     print('Benchmark error: '+errors[-1],file=sys.stderr,flush=True)
   finally:
-    if peer:
+    if pipeline:
+      # On error the CSV with-block has closed. Preserve completed in-flight
+      # replies from the receiver queue rather than silently discarding them.
+      late = pipeline.drain()
+      if late and 'writer' in locals() and 'record_result' in locals():
+        with path.open('a',newline='') as tail:
+          writer=csv.DictWriter(tail,fieldnames=fields)
+          for item,timing,received in late:
+            record_result(item,timing,received)
+      pipeline.close()
+    elif peer:
       peer.close()
+    if began is not None and 'elapsed_s' not in counts:
+      counts['elapsed_s']=round(time.monotonic()-began,3)
+      counts['achieved_fps']=round(counts['frames']/max(.001,counts['elapsed_s']),3)
+      counts['sent_fps']=round(counts['frames_sent']/max(.001,counts['elapsed_s']),3)
     meta['finished_utc']=datetime.now(timezone.utc).isoformat()
     summary={'meta':meta,'counts':counts,'errors':errors,'inference_verified':not errors and counts['frames']>0,
-             'controls_affected':False,'data_interpretation':'Independent shadow-only probe, no vehicle control. CPU warp not numerical parity validated.',
+             'controls_affected':False,
+             'data_interpretation':'Independent shadow-only probe, no vehicle control. CPU warp not numerical parity validated. Pipelining improves throughput, not necessarily latency.',
              'timing_ms':{k:pct([r[k] for r in records if r[k] is not None])
-                          for k in ('preprocess_ms','wire_ms','send_ms','recv_ms','capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms')},
-             'gate_note':'A successful standalone connected bench is not permission to enable model authority.'}
+                          for k in ('preprocess_ms','wire_ms','send_ms','recv_ms','link_overhead_ms',
+                                    'capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms')},
+             'gate_note':'A successful connected benchmark is not approval for model authority.'}
     (output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     print(json.dumps({'output':str(output),'counts':counts,'errors':errors,'timing_ms':summary['timing_ms']},indent=2),flush=True)
     return 0 if not errors and counts['frames'] else 1
@@ -495,6 +653,8 @@ def parse_args(argv=None):
   p.add_argument('--rate',type=float,default=5.0,help='Default 5Hz; --rate 20 for 20Hz connected stress test, stationary only')
   p.add_argument('--seconds',type=float,default=60.)
   p.add_argument('--timeout',type=float,default=5.)
+  p.add_argument('--pipeline-depth',type=int,choices=(0,2,3),default=0,
+                 help='0=legacy synchronous (A/B baseline); 2=two outstanding requests; 3=experimental. Throughput only, never vehicle control.')
   p.add_argument('--camera-timeout',type=float,default=25.)
   p.add_argument('--output',default=f'/data/jetlink-shadow-{datetime.now().strftime("%Y%m%d-%H%M%S")}')
   p.add_argument('--allow-other-network',action='store_true',help='Disable USB-only route check')
