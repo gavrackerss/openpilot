@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""XNOR Jetlink connected shadow/latency benchmark, v2.
+"""XNOR Jetlink connected shadow transport benchmark, v3.
 
 Subscribes to camerad in a separate, non-realtime process; never imports/patches
 modeld, publishes messages, accesses CAN, or writes openpilot Params. Synthetic
@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-VERSION = '2.0'
+VERSION = '3.0'
 SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
 NBYTES = 768749892
 HEADER = struct.Struct('<IHHIIIQ4x')
@@ -46,6 +46,9 @@ PING, PONG, LEAVE = 15, 16, 19
 PADDED = 1 << 7
 RESET_QUEUES = 1
 MAX_BODY = 16 * 1024 * 1024
+DATAGRAM_MAGIC = 0x4D52464A
+DATAGRAM_HEADER = struct.Struct('<IIIII')
+DATAGRAM_PAYLOAD = 65000
 RUNNING = True
 
 
@@ -66,6 +69,91 @@ def bounded_recv(sock: socket.socket, n: int) -> bytes:
   return bytes(chunks)
 
 
+def recv_timed(sock: socket.socket, n: int):
+  """Read exactly n bytes and record the instant its FIRST byte arrived.
+
+  This is comma-side first-response timing, not an Android clock reading.
+  """
+  chunks=bytearray(n)
+  view=memoryview(chunks)
+  got=0
+  first_ns=None
+  calls=0
+  while got<n:
+    count=sock.recv_into(view[got:])
+    now=time.perf_counter_ns()
+    calls+=1
+    if count==0:
+      raise ConnectionError('Jetlink server disconnected during receive')
+    if first_ns is None:
+      first_ns=now
+    got+=count
+  return bytes(chunks),first_ns,time.perf_counter_ns(),calls
+
+
+def udp_parts(parts, token, seq):
+  """Exactly the seven-or-more equally sized Jetlink FrameDatagrams chunks.
+
+  Header + frame + padding is treated as one stream of byte views, without
+  copying a ~393KB numpy array into a second buffer.
+  """
+  total=sum(p.nbytes for p in parts)
+  chunks=max(1,(total+DATAGRAM_PAYLOAD-1)//DATAGRAM_PAYLOAD)
+  base,extra=divmod(total,chunks)
+  offset=0
+  for i in range(chunks):
+    length=base+(i<extra)
+    header=DATAGRAM_HEADER.pack(DATAGRAM_MAGIC, token, seq, offset, total)
+    remaining=length
+    skip=offset
+    slices=[memoryview(header)]
+    for part in parts:
+      if skip>=part.nbytes:
+        skip-=part.nbytes
+        continue
+      take=min(remaining,part.nbytes-skip)
+      slices.append(part[skip:skip+take])
+      remaining-=take
+      skip=0
+      if remaining==0:break
+    if remaining:
+      raise RuntimeError('Jetlink datagram partition error')
+    yield slices
+    offset+=length
+
+
+def tcp_info(sock):
+  """Linux TCP_INFO: only stable early fields; None on unsupported kernels."""
+  if not hasattr(socket,'TCP_INFO'):
+    return {'tcp_rtt_ms':None,'tcp_retrans_total':None,'tcp_unacked':None}
+  try:
+    info=sock.getsockopt(socket.IPPROTO_TCP,socket.TCP_INFO,104)
+    if len(info)<104:
+      raise ValueError('TCP_INFO too short')
+    return {
+      'tcp_rtt_ms':int.from_bytes(info[68:72],sys.byteorder)/1000.0,
+      'tcp_retrans_total':int.from_bytes(info[100:104],sys.byteorder),
+      'tcp_unacked':int.from_bytes(info[24:28],sys.byteorder),
+    }
+  except (OSError,ValueError):
+    return {'tcp_rtt_ms':None,'tcp_retrans_total':None,'tcp_unacked':None}
+
+
+def usb0_stats():
+  fields=('rx_dropped','tx_dropped','rx_errors','tx_errors','rx_packets','tx_packets')
+  root=Path('/sys/class/net/usb0/statistics')
+  values={}
+  for field in fields:
+    try:values[field]=int((root/field).read_text().strip())
+    except (OSError,ValueError):values[field]=None
+  return values
+
+
+def usbstats_diff(before,after):
+  return {key:after[key]-before[key] if before.get(key) is not None and after.get(key) is not None else None
+          for key in after}
+
+
 class JetlinkTCP:
   """Small self-contained Jetlink v3 TCP transport; no gadget, no CAN hooks."""
   def __init__(self, host: str, port: int, timeout: float):
@@ -76,6 +164,10 @@ class JetlinkTCP:
     self.spec = None
     self.host = host
     self.port = port
+    self.udp = None
+    self.udp_token = None
+    self.datagram_port = None
+    self.last_rx = {}
 
   def send(self, kind: int, payload=b'', flags: int = 0):
     self.seq += 1
@@ -87,26 +179,37 @@ class JetlinkTCP:
       parts.append(memoryview(b'\x00'))
     head = memoryview(HEADER.pack(MAGIC, PROTOCOL, kind, seq, flags, n, 0))
     pending = [head] + parts
-    while pending:
-      # sendmsg gathers the 32-byte header + image + scalar buffers in one syscall.
-      sent = self.sock.sendmsg(pending)
-      if sent <= 0:
-        raise ConnectionError('Jetlink send failed')
-      while pending and sent >= len(pending[0]):
-        sent -= len(pending[0])
-        pending.pop(0)
-      if sent and pending:
-        pending[0] = pending[0][sent:]
+    if kind == INFER_REQ and self.udp is not None:
+      for piece in udp_parts(pending,self.udp_token,seq):
+        n=self.udp.sendmsg(piece)
+        if n!=sum(p.nbytes for p in piece):
+          raise ConnectionError('Short Jetlink frame datagram send')
+    else:
+      while pending:
+        # Same TCP sendmsg path as V2; keep it as a comparable baseline.
+        sent = self.sock.sendmsg(pending)
+        if sent <= 0:
+          raise ConnectionError('Jetlink send failed')
+        while pending and sent >= len(pending[0]):
+          sent -= len(pending[0])
+          pending.pop(0)
+        if sent and pending:
+          pending[0] = pending[0][sent:]
     return seq
 
   def recv(self):
-    h = bounded_recv(self.sock, HEADER.size)
+    h,first_ns,header_done,header_reads=recv_timed(self.sock,HEADER.size)
     magic, version, kind, seq, flags, length, _ = HEADER.unpack(h)
     if magic != MAGIC or version != PROTOCOL:
       raise ValueError('Jetlink v3 header mismatch')
     if length > MAX_BODY:
       raise ValueError(f'Refusing Jetlink payload length {length}')
-    raw = bounded_recv(self.sock, length + (1 if flags & PADDED else 0))
+    if length+(1 if flags & PADDED else 0):
+      raw,_,body_done,body_reads=recv_timed(self.sock,length+(1 if flags & PADDED else 0))
+    else:
+      raw=b'';body_done=header_done;body_reads=0
+    self.last_rx={'first_ns':first_ns,'header_done_ns':header_done,'body_done_ns':body_done,
+                  'header_reads':header_reads,'body_reads':body_reads}
     return kind, seq, flags, raw[:length]
 
   def expect(self, expected: int, seq: int, timeout: float):
@@ -129,10 +232,44 @@ class JetlinkTCP:
       raise RuntimeError(f'Unexpected Jetlink reply type={kind} seq={got}; wanted={expected}/{seq}')
     raise TimeoutError(f'Jetlink {expected} timed out')
 
-  def hello(self):
-    client = {'name': 'xnor-connected-shadow-v1', 'nonce': secrets.token_hex(4), 'link': {'kind': 'tcp'}}
+  def hello(self,usb_link=False):
+    link = {'kind':'usb','usb_speed':'high-speed'} if usb_link else {'kind':'tcp'}
+    client = {'name': 'xnor-transport-shadow-v3', 'nonce': secrets.token_hex(4), 'link': link}
     seq = self.send(HELLO_REQ, json.dumps({'client': client}).encode())
     return json.loads(self.expect(HELLO_RESP, seq, 5.0))
+
+
+  def enable_datagrams(self,hello):
+    """Only accept a UDP frame port explicitly offered by the Jetlink server.
+
+    No fallback to TCP: a successful A/B must genuinely use UDP frames.
+    Reply messages always arrive over the original TCP socket.
+    """
+    port=hello.get('frame_port')
+    token=hello.get('frame_token')
+    if not isinstance(port,int) or not(1<=port<=65535) or not isinstance(token,int) or token==0:
+      raise RuntimeError('This Android Jetlink build did not offer UDP frames over USB. '
+                         'TCP profiling still works with --transport tcp; the Android server needs its '
+                         'USB-NCM peer classification enabled before a UDP A/B can run.')
+    udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+    try:
+      udp.setsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF,4<<20)
+      udp.connect((self.host,port))
+    except BaseException:
+      udp.close()
+      raise
+    self.udp=udp
+    self.udp_token=token
+    self.datagram_port=port
+
+  def ping_samples(self,count=10):
+    times=[]
+    for _ in range(count):
+      before=time.perf_counter_ns()
+      seq=self.send(PING)
+      self.expect(PONG,seq,3.0)
+      times.append((time.perf_counter_ns()-before)/1e6)
+    return times
 
   def load_existing(self, wait: float = 90.0):
     # Request the exact compiled LS2 engine already prepared on Tensor G6;
@@ -176,7 +313,7 @@ class JetlinkTCP:
     t_recv = time.perf_counter_ns()
     return self.decode_infer_reply(resp, frame_id, t0, t_sent, t_recv)
 
-  def decode_infer_reply(self, resp: bytes, frame_id: int, t0: int, t_sent: int, t_recv: int):
+  def decode_infer_reply(self, resp: bytes, frame_id: int, t0: int, t_sent: int, t_recv: int, rx=None):
     if len(resp) < INFER_REPLY.size:
       raise RuntimeError('Short LS2 response header')
     got_id, status, gpu_us, queue_us, total_us = INFER_REPLY.unpack_from(resp)
@@ -191,7 +328,17 @@ class JetlinkTCP:
     if not np.isfinite(out).all():
       raise RuntimeError('LS2 returned non-finite outputs')
     wire_ms = (t_recv-t0)/1e6
+    rx=rx or self.last_rx
+    first_ns=rx.get('first_ns')
+    header_done_ns=rx.get('header_done_ns')
+    body_done_ns=rx.get('body_done_ns')
+    tcp=tcp_info(self.sock)
     return {
+      'response_first_byte_wait_ms':(first_ns-t_sent)/1e6 if first_ns else None,
+      'response_body_read_ms':(body_done_ns-first_ns)/1e6 if first_ns and body_done_ns else None,
+      'response_header_read_ms':(header_done_ns-first_ns)/1e6 if first_ns and header_done_ns else None,
+      'response_read_syscalls':rx.get('header_reads',0)+rx.get('body_reads',0),
+      **tcp,
       'wire_ms': wire_ms, 'send_ms':(t_sent-t0)/1e6, 'recv_ms':(t_recv-t_sent)/1e6,
       'server_total_ms':total_us/1000, 'server_npu_ms':gpu_us/1000, 'server_queue_ms':queue_us/1000,
       'link_overhead_ms': wire_ms-total_us/1000,
@@ -199,6 +346,9 @@ class JetlinkTCP:
     }
 
   def close(self):
+    if self.udp is not None:
+      self.udp.close()
+      self.udp=None
     try:
       self.sock.close()
     except Exception:
@@ -223,6 +373,8 @@ class PipelinedInference:
     self.results = queue.Queue()
     self.error = None
     self.stop_event = threading.Event()
+    self.udp_lost = 0
+    self.udp_expired = 0
     self.worker = threading.Thread(target=self._reader, name='jetlink-shadow-receiver', daemon=True)
 
   def start(self):
@@ -270,15 +422,31 @@ class PipelinedInference:
           raise RuntimeError(f'Unexpected reply type {kind} during pipelined inference')
         with self.lock:
           entry = self.pending.pop(seq, None)
+          if entry is not None and self.peer.udp is not None:
+            # Jetlink's UDP reassembler never answers incomplete older frames.
+            older=[old for old in self.pending if old<seq]
+            for old in older:self.pending.pop(old)
+            self.udp_lost+=len(older)
         if entry is None:
+          if self.peer.udp is not None:
+            continue  # an answer for a UDP request already expired
           raise RuntimeError(f'Unmatched Jetlink inference response seq={seq}')
         item, t0, t_sent = entry
-        timing = self.peer.decode_infer_reply(raw, item['frame_id'], t0, t_sent, received)
+        timing = self.peer.decode_infer_reply(raw, item['frame_id'], t0, t_sent, received,rx=dict(self.peer.last_rx))
         self.results.put((item, timing, received))
     except BaseException as exc:
       if not self.stop_event.is_set():
         self.error = exc
         self.stop_event.set()
+
+  def expire_udp(self,older_than_s=0.35):
+    """A lost UDP frame has no reply. Keep its slot bounded and account for it."""
+    if self.peer.udp is None:return
+    cutoff=time.perf_counter_ns()-int(older_than_s*1e9)
+    with self.lock:
+      expired=[seq for seq,(_,t0,_) in self.pending.items() if t0<cutoff]
+      for seq in expired:self.pending.pop(seq)
+      self.udp_expired+=len(expired)
 
   def drain(self):
     out=[]
@@ -289,6 +457,7 @@ class PipelinedInference:
   def wait_idle(self, deadline_s=4.0):
     until = time.monotonic()+deadline_s
     while self.outstanding() and time.monotonic()<until and self.error is None:
+      self.expire_udp()
       time.sleep(.01)
     if self.error is not None:
       raise RuntimeError(f'Jetlink receive thread failed: {self.error}') from self.error
@@ -505,11 +674,12 @@ def bench(args):
   output.mkdir(parents=True,exist_ok=False)
   meta={'version':VERSION,'mode':args.mode,'host':args.host,'port':args.port,'rate_requested_hz':args.rate,
         'seconds_requested':args.seconds,'model_sha256':SHA,'no_control':True,'cwd':os.getcwd(),
-        'pipeline_depth':args.pipeline_depth, 'started_utc':datetime.now(timezone.utc).isoformat()}
+        'pipeline_depth':args.pipeline_depth,'transport':args.transport, 'started_utc':datetime.now(timezone.utc).isoformat()}
   records=[]
   errors=[]
   counts={'frames':0,'frames_sent':0,'over_50_ms':0,'capture_to_reply_over_50_ms':0,
-          'source_frames_skipped':0,'pipeline_full_skips':0,'preprocess_count':0}
+          'source_frames_skipped':0,'pipeline_full_skips':0,'preprocess_count':0,
+          'udp_lost_replies':0,'udp_expired_replies':0}
   peer=None
   pipeline=None
   began=None
@@ -517,18 +687,27 @@ def bench(args):
     meta['physical']=check_route(args.host,args.port,require_usb=not args.allow_other_network,
                                   require_panda=not args.skip_panda_check)
     peer=JetlinkTCP(args.host,args.port,args.timeout)
-    hello=peer.hello()
+    meta['usb0_before']=usb0_stats()
+    hello=peer.hello(usb_link=not args.allow_other_network)
+    meta['ping_rtt_ms']=pct(peer.ping_samples(args.pings))
+    meta['udp_advertised']=bool(hello.get('frame_port') and hello.get('frame_token'))
+    if args.transport=='udp':
+      peer.enable_datagrams(hello)
+    meta['datagram_port']=peer.datagram_port
     meta['server']={k:hello.get(k) for k in ('loaded','backend','device','runtime_version','protocol','engine_state')}
     spec=peer.load_existing()
     meta['spec']={k:spec.get(k) for k in ('sha256','frame_skip','input_shapes','output_shapes','output_slices')}
     meta['wire_payload_bytes']={'upload':INFER_HEADER.size+warped_bytes(spec)+scalar_count(spec)*4,
                                 'download':INFER_REPLY.size+output_reply_count(spec)*4}
     print(json.dumps({'connected':True,'mode':args.mode,'server':meta['server'],
-                      'pipeline_depth':args.pipeline_depth,
+                      'pipeline_depth':args.pipeline_depth, 'transport':args.transport,
+                      'udp_advertised':meta['udp_advertised'], 'idle_ping_ms':meta['ping_rtt_ms'],
                       'wire_payload_bytes':meta['wire_payload_bytes']},indent=2),flush=True)
     fields=['sample','frame_id','capture_age_ms','preprocess_ms','wire_ms','send_ms','recv_ms',
             'link_overhead_ms','capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms',
-            'model_outputs','over_50ms']
+            'model_outputs','over_50ms',
+            'response_first_byte_wait_ms','response_body_read_ms','response_header_read_ms',
+            'response_read_syscalls','tcp_rtt_ms','tcp_retrans_total','tcp_unacked']
     path=output/'frames.csv'
     with path.open('w',newline='') as f:
       writer=csv.DictWriter(f,fieldnames=fields)
@@ -554,20 +733,23 @@ def bench(args):
              'recv_ms':timing['recv_ms'],'link_overhead_ms':timing['link_overhead_ms'],
              'capture_to_reply_ms':capture_to_reply,'server_total_ms':timing['server_total_ms'],
              'server_npu_ms':timing['server_npu_ms'],'server_queue_ms':timing['server_queue_ms'],
-             'model_outputs':timing['output_floats'],'over_50ms':int(total>50.)}
+             'model_outputs':timing['output_floats'],'over_50ms':int(total>50.),
+             **{k:timing.get(k) for k in ('response_first_byte_wait_ms','response_body_read_ms',
+                 'response_header_read_ms','response_read_syscalls','tcp_rtt_ms','tcp_retrans_total','tcp_unacked')}}
         writer.writerow(row)
         records.append(row)
         counts['frames']+=1
         counts['over_50_ms']+=int(total>50.)
         counts['capture_to_reply_over_50_ms']+=int(capture_to_reply is not None and capture_to_reply>50.)
         if counts['frames'] % 20 == 0:
-          f.flush()
+          if not f.closed:f.flush()
           print(f"{counts['frames']} replies; NPU {timing['server_npu_ms']:.1f}ms, "
                 f"round-trip {timing['wire_ms']:.1f}ms, pipeline outstanding "
                 f"{pipeline.outstanding() if pipeline else 0}",flush=True)
 
       while RUNNING and time.monotonic()-began < args.seconds:
         if pipeline:
+          pipeline.expire_udp()
           for item,timing,received in pipeline.drain():
             record_result(item,timing,received)
           if pipeline.error is not None:
@@ -610,6 +792,9 @@ def bench(args):
       counts['elapsed_s']=round(time.monotonic()-began,3)
       counts['achieved_fps']=round(counts['frames']/max(.001,counts['elapsed_s']),3)
       counts['sent_fps']=round(counts['frames_sent']/max(.001,counts['elapsed_s']),3)
+      if pipeline:
+        counts['udp_lost_replies']=pipeline.udp_lost
+        counts['udp_expired_replies']=pipeline.udp_expired
   except (KeyboardInterrupt,StopIteration):
     errors.append('Stopped or camerad finished before benchmark duration')
   except Exception as exc:
@@ -633,12 +818,20 @@ def bench(args):
       counts['achieved_fps']=round(counts['frames']/max(.001,counts['elapsed_s']),3)
       counts['sent_fps']=round(counts['frames_sent']/max(.001,counts['elapsed_s']),3)
     meta['finished_utc']=datetime.now(timezone.utc).isoformat()
+    if pipeline:
+      counts['udp_lost_replies']=pipeline.udp_lost
+      counts['udp_expired_replies']=pipeline.udp_expired
+    meta['usb0_after']=usb0_stats()
+    if 'usb0_before' in meta:
+      meta['usb0_counters_delta']=usbstats_diff(meta['usb0_before'],meta['usb0_after'])
     summary={'meta':meta,'counts':counts,'errors':errors,'inference_verified':not errors and counts['frames']>0,
              'controls_affected':False,
              'data_interpretation':'Independent shadow-only probe, no vehicle control. CPU warp not numerical parity validated. Pipelining improves throughput, not necessarily latency.',
              'timing_ms':{k:pct([r[k] for r in records if r[k] is not None])
                           for k in ('preprocess_ms','wire_ms','send_ms','recv_ms','link_overhead_ms',
-                                    'capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms')},
+                                    'capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms',
+                                    'response_first_byte_wait_ms','response_body_read_ms','response_header_read_ms',
+                                    'response_read_syscalls','tcp_rtt_ms','tcp_unacked')},
              'gate_note':'A successful connected benchmark is not approval for model authority.'}
     (output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     print(json.dumps({'output':str(output),'counts':counts,'errors':errors,'timing_ms':summary['timing_ms']},indent=2),flush=True)
@@ -653,6 +846,9 @@ def parse_args(argv=None):
   p.add_argument('--rate',type=float,default=5.0,help='Default 5Hz; --rate 20 for 20Hz connected stress test, stationary only')
   p.add_argument('--seconds',type=float,default=60.)
   p.add_argument('--timeout',type=float,default=5.)
+  p.add_argument('--transport',choices=('tcp','udp'),default='tcp',
+                 help='TCP baseline or UDP frame upload (only when Android server advertises UDP port/token)')
+  p.add_argument('--pings',type=int,default=10,help='Idle Jetlink PING roundtrips before model test')
   p.add_argument('--pipeline-depth',type=int,choices=(0,2,3),default=0,
                  help='0=legacy synchronous (A/B baseline); 2=two outstanding requests; 3=experimental. Throughput only, never vehicle control.')
   p.add_argument('--camera-timeout',type=float,default=25.)
@@ -661,6 +857,9 @@ def parse_args(argv=None):
   p.add_argument('--skip-panda-check',action='store_true',help='Disable xnor panda enumeration check')
   args=p.parse_args(argv)
   if not(0<args.rate<=20) or not(0<args.seconds<=900):p.error('rate 0..20 and seconds 0..900 required')
+  if not(0<=args.pings<=100):p.error('pings must be 0..100')
+  if args.transport=='udp' and args.pipeline_depth==0:p.error('UDP requires --pipeline-depth 2 for bounded loss tracking')
+  if args.transport=='udp' and args.allow_other_network:p.error('UDP frames only permitted with verified usb0 routing')
   return args
 
 
