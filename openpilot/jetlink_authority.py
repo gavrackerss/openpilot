@@ -455,6 +455,21 @@ def attach(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
                            name=lambda sha: 'XNOR LS2 Tensor G6')
 
 
+
+def prepare_only(model, bufs, transforms, inputs):
+  """Retain the local model's dropped-frame warp/queue update while joining.
+
+  JoiningModelState.run does not expose the fork's prepare_only argument.
+  When the resident small model is active, preserve ModelState.run(...,True)
+  without evaluating an output. Do not run a separate local inference while
+  the remote model is active (it owns the frame in that state).
+  """
+  small = getattr(model, '_small', None)
+  if small is not None and getattr(model, '_active', None) is small:
+    return small._model.run(bufs, transforms, inputs, True)
+  return None
+
+
 def handed_over(model) -> bool:
   count = getattr(model, 'handovers', None)
   if count is None:
