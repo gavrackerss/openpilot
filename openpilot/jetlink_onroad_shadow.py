@@ -87,7 +87,9 @@ def summary_for(path):
             'no_control': data.get('meta', {}).get('no_control'),
             'onroad_shadow': data.get('meta', {}).get('onroad_shadow'),
             'comparison_matched_frames': (data.get('prediction_comparison') or {}).get('matched_frames'),
-            'full_numerical_parity_verified': False}
+            'full_numerical_parity_verified': False,
+            'shadow_prediction_samples': (data.get('shadow_prediction_feed') or {}).get('valid_predictions'),
+            'shadow_prediction_invalid': (data.get('shadow_prediction_feed') or {}).get('invalid_predictions')}
   except (ValueError, OSError, AttributeError):
     return None
 
@@ -98,7 +100,8 @@ def runner_args(path, host):
           '--seconds', str(RUN_SECONDS), '--rate', '20', '--pipeline-depth', '2',
           '--transport', 'udp', '--udp-payload-bytes', '65000',
           '--udp-send-mode', 'sendmsg', '--reply-guard-ms', '0',
-          '--dump-outputs-every', '20', '--compare-local', '--fetch-stage-report',
+          '--dump-outputs-every', '20', '--compare-local',
+          '--shadow-predictions', '--prediction-every', '2', '--fetch-stage-report',
           '--host', host, '--output', str(path)]
 
 

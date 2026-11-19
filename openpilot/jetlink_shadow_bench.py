@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-VERSION = '5.7-prediction-compare'
+VERSION = '5.8-prediction-shadow-feed'
 SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
 NBYTES = 768749892
 HEADER = struct.Struct('<IHHIIIQ4x')
@@ -506,12 +506,13 @@ class PipelinedInference:
   queuing on the phone and allows 20Hz *throughput* even when each response
   takes >50ms; it does not change the per-frame latency or drive the car.
   """
-  def __init__(self, peer: JetlinkTCP, depth: int, *, dump_outputs_every: int = 0):
+  def __init__(self, peer: JetlinkTCP, depth: int, *, dump_outputs_every: int = 0, prediction_every: int = 0):
     if depth not in (2, 3):
       raise ValueError('Pipeline depth must be 2 or 3')
     self.peer = peer
     self.depth = depth
     self.dump_outputs_every = dump_outputs_every
+    self.prediction_every = prediction_every
     self.lock = threading.Lock()
     self.changed = threading.Condition(self.lock)
     self.pending = {}
@@ -679,7 +680,8 @@ class PipelinedInference:
           rx = dict(self.peer.last_rx)
           timing = self.peer.decode_infer_reply(
               raw, item['frame_id'], t0, t_sent, received, rx=rx,
-              capture_output=(self.dump_outputs_every > 0 and item.get('sample',0) % self.dump_outputs_every == 0))
+              capture_output=((self.dump_outputs_every > 0 and item.get('sample',0) % self.dump_outputs_every == 0)
+                              or (self.prediction_every > 0 and item.get('sample',0) % self.prediction_every == 0)))
           timing.update(self.overlap_diagnostics(seq, t_sent, rx.get('first_ns'), received, windows))
           self.results.put((item, timing, received))
         finally:
@@ -1002,6 +1004,8 @@ def bench(args):
         'tcp_quickack':args.tcp_quickack,
         'dump_outputs_every':args.dump_outputs_every,
         'compare_local_modelv2':getattr(args,'compare_local',False),
+        'shadow_prediction_feed':getattr(args,'shadow_predictions',False),
+        'prediction_every':getattr(args,'prediction_every',None) if getattr(args,'shadow_predictions',False) else None,
         'pacing':('camera_event' if args.mode=='camera' and args.pacing!='timer' else 'timer'),
         'max_camera_age_ms':args.max_camera_age_ms,
         'reply_guard_ms':args.reply_guard_ms,'reply_guard_min_age_ms':args.reply_guard_min_age_ms,
@@ -1024,6 +1028,8 @@ def bench(args):
   joined_stage_rows=[]
   comparator=None
   comparison_summary=None
+  prediction_recorder=None
+  prediction_summary=None
   try:
     meta['physical']=check_route(args.host,args.port,require_usb=not args.allow_other_network,
                                   require_panda=not args.skip_panda_check)
@@ -1050,6 +1056,9 @@ def bench(args):
       from openpilot.jetlink_prediction_compare import PredictionObserver
       comparator=PredictionObserver(output,spec)
       comparator.poll()
+    if getattr(args,'shadow_predictions',False):
+      from openpilot.jetlink_prediction_shadow import ShadowPredictionRecorder
+      prediction_recorder=ShadowPredictionRecorder(output,spec)
     meta['wire_payload_bytes']={'upload':INFER_HEADER.size+warped_bytes(spec)+scalar_count(spec)*4,
                                 'download':INFER_REPLY.size+output_reply_count(spec)*4}
     print(json.dumps({'connected':True,'mode':args.mode,'server':meta['server'],
@@ -1088,17 +1097,25 @@ def bench(args):
     last_reply_rx_ns=None
     last_send_start_ns=None
     if args.pipeline_depth:
-      pipeline=PipelinedInference(peer,args.pipeline_depth,dump_outputs_every=args.dump_outputs_every)
+      pipeline=PipelinedInference(peer,args.pipeline_depth,dump_outputs_every=args.dump_outputs_every,
+                                  prediction_every=(args.prediction_every if args.shadow_predictions else 0))
       pipeline.start()
 
     def record_result(item,timing,received):
       nonlocal last_progress,last_reply_rx_ns
       snapshot=timing.pop('_output',None)
       if snapshot is not None:
-        output_snapshots.append((item['sample'],item['frame_id'],snapshot))
-        if comparator is not None and item.get('capture_ns') is not None:
-          comparator.poll()
-          comparator.offer_remote(item['frame_id'],item['capture_ns'],received,snapshot)
+        sample_id = item['sample']
+        capture_ns = item.get('capture_ns')
+        if args.dump_outputs_every > 0 and sample_id % args.dump_outputs_every == 0:
+          output_snapshots.append((sample_id,item['frame_id'],snapshot))
+          if comparator is not None and capture_ns is not None:
+            comparator.poll()
+            comparator.offer_remote(item['frame_id'],capture_ns,received,snapshot)
+        if (prediction_recorder is not None and capture_ns is not None
+            and sample_id % args.prediction_every == 0):
+          prediction_recorder.offer(item['frame_id'],capture_ns,received,snapshot,
+                                    npu_ms=timing.get('server_npu_ms'))
       pre_ms=item['preprocess_ms']
       capture_ns=item['capture_ns']
       capture_to_reply=(received-capture_ns)/1e6 if capture_ns is not None else None
@@ -1231,7 +1248,8 @@ def bench(args):
                                          if last_send_start_ns is not None else None)
         last_send_start_ns=item['send_start_ns']
         timing=peer.infer(warped,packed,frame_id,reset=(counts['frames_sent']==0),
-                          capture_output=(args.dump_outputs_every>0 and n%args.dump_outputs_every==0))
+                          capture_output=((args.dump_outputs_every>0 and n%args.dump_outputs_every==0)
+                                          or (args.shadow_predictions and n%args.prediction_every==0)))
         timing['link_overhead_ms']=timing['wire_ms']-timing['server_total_ms']
         counts['frames_sent']+=1
         if camera is not None:last_accepted_id=frame_id
@@ -1323,6 +1341,11 @@ def bench(args):
         comparison_summary=comparator.finish()
       except Exception as exc:
         errors.append(f'Local model agreement report failed: {type(exc).__name__}: {exc}')
+    if prediction_recorder is not None:
+      try:
+        prediction_summary=prediction_recorder.finish()
+      except Exception as exc:
+        errors.append(f'Shadow prediction report failed: {type(exc).__name__}: {exc}')
     if output_snapshots:
       try:
         np.savez_compressed(output/'output_samples.npz',
@@ -1361,6 +1384,7 @@ def bench(args):
                    cycle_p95 is not None and cycle_p95<=50.)
     summary={'meta':meta,'counts':counts,'errors':errors,
              'prediction_comparison': comparison_summary,
+             'shadow_prediction_feed': prediction_summary,
              'cadence_gate':{'qualified':gate_qualified,'pass':gate_pass if gate_qualified else None,
                              'reason':('180s camera run required for 20 FPS / p95 <= 50ms gate'
                                        if not gate_qualified else 'observational shadow-only cadence gate'),
@@ -1403,6 +1427,10 @@ def parse_args(argv=None):
                  help='PASSIVE observation only: allow real on-road camera frames, never publish predictions or control anything')
   p.add_argument('--compare-local',action='store_true',
                  help='Sample same-frame local modelV2 geometry/probabilities without changing modeld; no parity/authority claims')
+  p.add_argument('--shadow-predictions',action='store_true',
+                 help='Opt-in read-only LS2 geometry feed (JSONL+atomic latest); never publishes modeld predictions')
+  p.add_argument('--prediction-every',type=int,default=2,
+                 help='Record one of every N remote predictions to the shadow feed; 2 is ~10Hz at 20FPS')
   p.add_argument('--host',default='10.169.232.180')
   p.add_argument('--port',type=int,default=5599)
   p.add_argument('--rate',type=float,default=5.0,
@@ -1452,6 +1480,10 @@ def parse_args(argv=None):
   if args.transport=='udp' and args.allow_other_network:p.error('UDP frames only permitted with verified usb0 routing')
   if args.compare_local and (not args.onroad_shadow or args.dump_outputs_every==0):
     p.error('--compare-local requires --onroad-shadow and --dump-outputs-every > 0')
+  if not 1 <= args.prediction_every <= 100:
+    p.error('--prediction-every must be 1..100')
+  if args.shadow_predictions and not args.onroad_shadow:
+    p.error('--shadow-predictions requires --onroad-shadow')
   if args.onroad_shadow and (args.mode!='camera' or args.transport!='udp' or args.allow_other_network or args.skip_panda_check):
     p.error('--onroad-shadow requires --mode camera --transport udp, verified USB and xnor panda')
   if args.udp_send_mode=='sendmmsg' and args.transport!='udp':p.error('sendmmsg requires --transport udp')
