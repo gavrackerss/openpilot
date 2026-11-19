@@ -133,6 +133,7 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     audioFeedback @97;
     accEnabled @99;
     accDisabled @100;
+    bigModelLoading @101; # Jetlink model swap settling / engagement hold
 
     soundsUnavailableDEPRECATED @47;
   }
@@ -1096,6 +1097,7 @@ struct ModelDataV2 {
 
   # e2e lateral planner
   action @26: Action;
+  big @27 :Bool; # remote LS2 was active for this published prediction
 
   gpuExecutionTimeDEPRECATED @17 :Float32;
   navEnabledDEPRECATED @22 :Bool;
