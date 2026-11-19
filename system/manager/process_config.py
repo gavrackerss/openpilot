@@ -1,4 +1,5 @@
 import os
+import time
 import operator
 import platform
 
@@ -86,6 +87,19 @@ def tesla_v275_shadow(started: bool, params: Params, CP: car.CarParams) -> bool:
     return False
 
 
+# XNOR_JETLINK_ONROAD_SHADOW_PREDICATE_BEGIN
+def xnor_jetlink_onroad_shadow(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """Opt-in, bounded Tesla on-road Jetlink performance observer; never modeld."""
+  try:
+    arm = '/data/jetlink_xnor/ONROAD_SHADOW_ENABLED'
+    age = time.time() - os.path.getmtime(arm)
+    return (bool(started) and getattr(CP, 'brand', '') == 'tesla'
+            and 0 <= age <= 7200)
+  except OSError:
+    return False
+
+# XNOR_JETLINK_ONROAD_SHADOW_PREDICATE_END
+
 def xnor_jetlink_probe(started: bool, params: Params, CP: car.CarParams) -> bool:
   """Jetlink link diagnostics only, offroad only, no USB reconfiguration.
 
@@ -160,6 +174,9 @@ procs = [
   NativeProcess("mapd", "selfdrive", ["./mapd"], always_run),
   PythonProcess("v275shadowd", "selfdrive.v275_shadow_manager", tesla_v275_shadow),
   PythonProcess("xnorjetlinkd", "openpilot.jetlink_xnor_probe", xnor_jetlink_probe),
+  # XNOR_JETLINK_ONROAD_SHADOW_PROCESS_BEGIN
+  PythonProcess("xnorjetlinkshadowd", "openpilot.jetlink_onroad_shadow", xnor_jetlink_onroad_shadow),
+  # XNOR_JETLINK_ONROAD_SHADOW_PROCESS_END
   NativeProcess("_pandad", "selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "selfdrive.locationd.calibrationd", only_onroad),
   PythonProcess("torqued", "selfdrive.locationd.torqued", only_onroad),
