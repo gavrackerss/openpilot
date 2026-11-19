@@ -2,6 +2,8 @@
 import os
 import time
 import threading
+import json
+from pathlib import Path
 
 import cereal.messaging as messaging
 
@@ -105,6 +107,17 @@ class SelfdriveD:
     self.CS_prev = car.CarState.new_message()
     self.AM = AlertManager()
     self.events = Events()
+    # Zoompilot's existing swap/settling tracker. Optional, no effect without
+    # Jetlink installed or when no remote LS2 model is selected.
+    self.jetlink_swaps = None
+    self.jetlink_record = Path('/dev/shm/jetlink/modeld.json')
+    self.jetlink_last_read = 0.0
+    self.jetlink_runtime = {}
+    try:
+      from jetlink.openpilot.events import SwapEvents
+      self.jetlink_swaps = SwapEvents(DT_CTRL)
+    except Exception:
+      cloudlog.warning('Jetlink swap events unavailable (local model unaffected)')
 
     self.initialized = False
     self.enabled = False
@@ -143,10 +156,36 @@ class SelfdriveD:
     elif self.CP.passive:
       self.events.add(EventName.dashcamMode, static=True)
 
+  def _update_jetlink_swap_events(self):
+    if self.jetlink_swaps is None:
+      return
+    now = time.monotonic()
+    if now - self.jetlink_last_read >= 0.1:
+      self.jetlink_last_read = now
+      try:
+        self.jetlink_runtime = json.loads(self.jetlink_record.read_text())
+      except (OSError, ValueError, TypeError):
+        self.jetlink_runtime = {}
+    status = self.jetlink_runtime
+    status_fresh = isinstance(status.get('at'), (float, int)) and 0 <= now - status['at'] <= 2.
+    model_fresh = self.sm.alive['modelV2'] and self.sm.valid['modelV2']
+    big = bool(self.sm['modelV2'].big) if model_fresh else False
+    if big and not status_fresh:
+      # A missing or stale handover record must NEVER permit engagement.
+      self.events.add(EventName.bigModelLoading)
+    flags = self.jetlink_swaps.update(model_fresh and status_fresh, big,
+                                      bool(self.enabled or self.active),
+                                      status.get('state', 'none') if status_fresh else 'none')
+    if flags.no_entry:
+      self.events.add(EventName.bigModelLoading)
+    if flags.link_lost:
+      cloudlog.warning('Jetlink big model handed back to local while driving')
+
   def update_events(self, CS):
     """Compute onroadEvents from carState"""
 
     self.events.clear()
+    self._update_jetlink_swap_events()
 
     if self.sm['controlsState'].lateralControlState.which() == 'debugState':
       self.events.add(EventName.joystickDebug)

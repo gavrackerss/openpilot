@@ -92,6 +92,10 @@ def xnor_jetlink_onroad_shadow(started: bool, params: Params, CP: car.CarParams)
   """Opt-in, bounded Tesla on-road Jetlink performance observer; never modeld."""
   try:
     arm = '/data/jetlink_xnor/ONROAD_SHADOW_ENABLED'
+    # Never allow the parallel V5.8 observer to compete with an armed
+    # authoritative Jetlink model for the Pixel's single inference server.
+    if os.path.isfile('/data/jetlink_xnor/AUTHORITY_ENABLED'):
+      return False
     age = time.time() - os.path.getmtime(arm)
     return (bool(started) and getattr(CP, 'brand', '') == 'tesla'
             and 0 <= age <= 7200)
