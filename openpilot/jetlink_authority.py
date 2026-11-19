@@ -24,7 +24,7 @@ import numpy as np
 
 from openpilot.common.swaglog import cloudlog
 
-VERSION = '5.9.1-xnor-custom-pixel-jetlink'
+VERSION = '5.9.2-xnor-custom-pixel-dual-modeld'
 MODEL_SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
 MODEL_NBYTES = 768749892
 MODEL_HW = (128, 256)
@@ -174,7 +174,13 @@ class _CameraWarp:
 
   def run(self, bufs: dict, transforms: dict):
     from openpilot.jetlink_shadow_bench import warp_indices
-    for i, name in enumerate(('img', 'big_img')):
+    # Modeld_v2 bundles can use a different road image key (e.g. new_img);
+    # use the source camera designation, not a hardcoded network-input key.
+    road = next((k for k in bufs if 'big' not in k), None)
+    wide = next((k for k in bufs if 'big' in k), None)
+    if road is None or wide is None or road not in transforms or wide not in transforms:
+      raise ValueError('Both road and wide camera inputs are required')
+    for i, name in enumerate((road, wide)):
       buf, matrix = bufs[name], np.asarray(transforms[name], dtype=np.float32)
       if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
         raise ValueError('Invalid modeld camera calibration')
@@ -285,16 +291,23 @@ def _reset_small(small):
   small.prev_desire.fill(0)
 
 
-def attach(small_model, cam_w: int, cam_h: int):
+def attach(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
   """Connect the custom APK to upstream Zoompilot's joining/fallback model."""
   if not enabled():
     return small_model
+  if runner not in ('stock', 'tinygrad'):
+    raise ValueError(f'Unsupported local runner: {runner}')
 
   from jetlink.openpilot.joining import JoiningModelState
   from jetlink.openpilot.model_state import JetlinkModelState, Trips
   from openpilot.jetlink_shadow_bench import (JetlinkTCP, model_hw, output_reply_count,
                                                packed_scalars)
   from openpilot.selfdrive.modeld.parse_model_outputs import Parser
+  # LS2's action semantics are independent of the selected local bundle.
+  # Reuse the stock LS2 plan-to-action implementation for the remote output.
+  ls2_action = None
+  if runner == 'tinygrad':
+    from openpilot.selfdrive.modeld.modeld import get_action_from_model as ls2_action
 
   warp = _CameraWarp(cam_w, cam_h)
 
@@ -332,7 +345,14 @@ def attach(small_model, cam_w: int, cam_h: int):
       self.chestnut = True
       self.lat_delay = 0.0
       self.PLANPLUS_CONTROL = 1.0
-      self.vision_input_names = ['img', 'big_img']
+      # During the swap, modeld has already assembled the current frame's
+      # buffers using the *local* bundle's keys. Keep those keys stable.
+      self.vision_input_names = list(getattr(small_model, 'vision_input_names', ('img', 'big_img')))
+      self.constants = getattr(small_model, 'constants', None)
+      self.LAT_SMOOTH_SECONDS = getattr(small_model, 'LAT_SMOOTH_SECONDS', 0.)
+      self.LONG_SMOOTH_SECONDS = getattr(small_model, 'LONG_SMOOTH_SECONDS', 0.)
+      if ls2_action is not None:
+        self.get_action_from_model = ls2_action
       self.parser = Parser()
       self.prev_desire = np.zeros(8, dtype=np.float32)
       self._frame_id = 0
@@ -384,7 +404,12 @@ def attach(small_model, cam_w: int, cam_h: int):
     def run(self, bufs, transforms, inputs, after_enqueue=None):
       started = time.perf_counter()
       image = warp.run(bufs, transforms)
-      desire = np.asarray(inputs['desire_pulse'], dtype=np.float32).reshape(-1)
+      # Stock modeld uses desire_pulse; selected tinygrad bundles may use
+      # 'desire'. This only adapts input names, not remote output semantics.
+      desire_key = next((k for k in inputs if k.startswith('desire')), None)
+      if desire_key is None:
+        raise ValueError('Local modeld did not supply a desire input')
+      desire = np.asarray(inputs[desire_key], dtype=np.float32).reshape(-1)
       traffic = np.asarray(inputs['traffic_convention'], dtype=np.float32).reshape(-1)
       action_t = np.asarray(inputs['action_t'], dtype=np.float32).reshape(-1)
       if desire.size != 8 or traffic.size != 2 or action_t.size != 2:
@@ -422,7 +447,7 @@ def attach(small_model, cam_w: int, cam_h: int):
     return _Remote(client, spec)
 
   # No other server, USB gadget owner, or separate publish service is added.
-  cloudlog.warning('xnor-jetlink: custom APK join staged, local model remains active until Zoompilot handover')
+  cloudlog.warning('xnor-jetlink: %s local model with custom Pixel join staged; Zoompilot owns handover', runner)
   return JoiningModelState(_Small(small_model), connect, build,
                            reset_small=lambda: _reset_small(small_model),
                            progress=_Progress(), log=cloudlog,
