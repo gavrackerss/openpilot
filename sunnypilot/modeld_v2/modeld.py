@@ -418,7 +418,8 @@ def main(demo=False):
       # Zoompilot owns all handovers, lag demotions and reconnections. Preserve
       # the existing local runner's prepare_only semantics when Jetlink is off.
       model.frame_drop_ratio = frame_drop_ratio
-      model_output = None if prepare_only else model.run(bufs, transforms, inputs)
+      model_output = (jetlink_authority.prepare_only(model, bufs, transforms, inputs) if prepare_only
+                      else model.run(bufs, transforms, inputs))
       if jetlink_authority.handed_over(model):
         run_count = 0
         frame_dropped_filter.x = 0.
