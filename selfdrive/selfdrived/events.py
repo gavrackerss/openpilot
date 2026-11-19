@@ -413,6 +413,10 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.NO_ENTRY: NoEntryAlert("System Initializing"),
   },
 
+  EventName.bigModelLoading: {
+    ET.NO_ENTRY: NoEntryAlert("Large Model Switching"),
+  },
+
   EventName.startup: {
     ET.PERMANENT: StartupAlert("Be ready to take over at any time")
   },
