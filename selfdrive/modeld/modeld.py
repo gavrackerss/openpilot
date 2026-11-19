@@ -427,6 +427,8 @@ def main(demo=False):
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen)
+      # Zoompilot's modelV2.big identifies the actual publisher on this frame.
+      modelv2_send.modelV2.big = jetlink_authority.remote_active(model)
 
       desire_state = modelv2_send.modelV2.meta.desireState
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
