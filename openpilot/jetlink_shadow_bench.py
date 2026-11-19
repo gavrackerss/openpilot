@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""XNOR Jetlink connected shadow transport benchmark, v3.
+"""XNOR Jetlink connected shadow transport benchmark, v5.6-onroad.
 
 Subscribes to camerad in a separate, non-realtime process; never imports/patches
 modeld, publishes messages, accesses CAN, or writes openpilot Params. Synthetic
@@ -8,12 +8,28 @@ NV12 road/wide frames and the same nearest-neighbour planar YUV layout as
 openpilot's compile_warp.py. The CPU implementation is *not* proven numerically
 identical to the tinygrad warp; DO NOT use its outputs for driving.
 
-Only run while stationary, in Park, without driving controls engaged.
+Timer pacing is the safe default after real-world V5 camera-event pacing increased
+USB2 TCP response stalls. --reply-guard-ms optionally holds a *bounded* new
+upload near the expected previous reply, with detailed overlap instrumentation.
+Camera event pacing remains opt-in for A/B diagnostics, not recommended.
+
+V5.3 adds an opt-in Linux sendmmsg() UDP upload batch, retaining the tested
+V5.2 sendmsg() path as default. No model, camera, Android or control changes.
+
+V5.5 adds an opt-in post-run phone timing trace download from the instrumented v0.5 Jetlink APK.
+V5.6 offers an opt-in Linux TCP_QUICKACK A/B for the *return* path and separately
+measures receive-completion intervals (delivery cadence) and age-at-reply. This
+is an experiment, not an established speed fix; baseline behaviour is unchanged.
+Parked mode remains the default. --onroad-shadow allows a separate, passive
+vision-only observer while driving; never publish or control from these outputs.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import ctypes
+import errno
+from collections import deque
 import json
 import math
 import queue
@@ -27,11 +43,12 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 
 import numpy as np
 
-VERSION = '3.0'
+VERSION = '5.6-onroad-shadow'
 SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
 NBYTES = 768749892
 HEADER = struct.Struct('<IHHIIIQ4x')
@@ -42,6 +59,7 @@ PROTOCOL = 3
 HELLO_REQ, HELLO_RESP = 1, 2
 ENGINE_REQ, ENGINE_RESP, PROGRESS = 3, 4, 7
 INFER_REQ, INFER_RESP, ERROR = 8, 9, 14
+STATE_REQ, STATE_RESP = 12, 13
 PING, PONG, LEAVE = 15, 16, 19
 PADDED = 1 << 7
 RESET_QUEUES = 1
@@ -91,14 +109,16 @@ def recv_timed(sock: socket.socket, n: int):
   return bytes(chunks),first_ns,time.perf_counter_ns(),calls
 
 
-def udp_parts(parts, token, seq):
+def udp_parts(parts, token, seq, payload_bytes=DATAGRAM_PAYLOAD):
   """Exactly the seven-or-more equally sized Jetlink FrameDatagrams chunks.
 
   Header + frame + padding is treated as one stream of byte views, without
   copying a ~393KB numpy array into a second buffer.
   """
+  if not 1024 <= payload_bytes <= DATAGRAM_PAYLOAD:
+    raise ValueError('UDP fragment payload must be 1024..65000 bytes')
   total=sum(p.nbytes for p in parts)
-  chunks=max(1,(total+DATAGRAM_PAYLOAD-1)//DATAGRAM_PAYLOAD)
+  chunks=max(1,(total+payload_bytes-1)//payload_bytes)
   base,extra=divmod(total,chunks)
   offset=0
   for i in range(chunks):
@@ -120,6 +140,86 @@ def udp_parts(parts, token, seq):
       raise RuntimeError('Jetlink datagram partition error')
     yield slices
     offset+=length
+
+
+
+# Optional Linux UDP sendmmsg() A/B optimisation. Default V5.2 sendmsg() is
+# unchanged. This batches the existing Jetlink datagrams into one kernel call;
+# neither the datagram header, payload partitioning nor server protocol change.
+# Writable numpy image/scalar buffers are referenced without copying ~393 KB.
+class _IOVec(ctypes.Structure):
+  _fields_ = [('iov_base', ctypes.c_void_p), ('iov_len', ctypes.c_size_t)]
+
+
+class _MsgHdr(ctypes.Structure):
+  _fields_ = [('msg_name', ctypes.c_void_p), ('msg_namelen', ctypes.c_uint),
+              ('msg_iov', ctypes.POINTER(_IOVec)), ('msg_iovlen', ctypes.c_size_t),
+              ('msg_control', ctypes.c_void_p), ('msg_controllen', ctypes.c_size_t),
+              ('msg_flags', ctypes.c_int)]
+
+
+class _MMsgHdr(ctypes.Structure):
+  _fields_ = [('msg_hdr', _MsgHdr), ('msg_len', ctypes.c_uint)]
+
+
+def udp_sendmmsg(sock: socket.socket, datagrams):
+  """Send existing UDP datagrams in one or more Linux sendmmsg syscalls.
+
+  Returns (number of datagrams, syscalls). Do not fall back silently to TCP.
+  Payloads must remain alive and unmodified throughout this synchronous call.
+  """
+  libc = ctypes.CDLL(None, use_errno=True)
+  sendmmsg = getattr(libc, 'sendmmsg', None)
+  if sendmmsg is None:
+    raise RuntimeError('Linux sendmmsg() unavailable; use --udp-send-mode sendmsg')
+  sendmmsg.argtypes = [ctypes.c_int, ctypes.POINTER(_MMsgHdr), ctypes.c_uint, ctypes.c_uint]
+  sendmmsg.restype = ctypes.c_int
+  datagrams = list(datagrams)
+  if not datagrams:
+    return 0, 0
+  if len(datagrams)>1024:
+    raise ValueError('Too many datagrams for one sendmmsg batch')
+  msg_array = (_MMsgHdr * len(datagrams))()
+  keepalive = []
+  totals = []
+  for i, parts in enumerate(datagrams):
+    vec = (_IOVec * len(parts))()
+    keepalive.append(vec)
+    total = 0
+    for j, part in enumerate(parts):
+      part = memoryview(part).cast('B')
+      # numpy-backed parts are already writable/contiguous; the tiny immutable
+      # Jetlink headers need private buffers (<=32 bytes), but not the image.
+      try:
+        owner = (ctypes.c_char * len(part)).from_buffer(part)
+      except (TypeError, BufferError):
+        owner = ctypes.create_string_buffer(part.tobytes())
+      keepalive.append(owner)
+      vec[j].iov_base = ctypes.addressof(owner)
+      vec[j].iov_len = len(part)
+      total += len(part)
+    msg_array[i].msg_hdr.msg_iov = ctypes.cast(vec, ctypes.POINTER(_IOVec))
+    msg_array[i].msg_hdr.msg_iovlen = len(parts)
+    totals.append(total)
+  submitted = 0
+  calls = 0
+  while submitted < len(datagrams):
+    tail = ctypes.cast(ctypes.byref(msg_array, submitted * ctypes.sizeof(_MMsgHdr)),
+                       ctypes.POINTER(_MMsgHdr))
+    ret = sendmmsg(sock.fileno(), tail, len(datagrams) - submitted, 0)
+    calls += 1
+    if ret < 0:
+      code = ctypes.get_errno()
+      if code == errno.EINTR:
+        continue
+      raise OSError(code, 'sendmmsg USB UDP upload failed')
+    if ret == 0:
+      raise ConnectionError('Jetlink sendmmsg submitted no datagrams')
+    for i in range(submitted, submitted + ret):
+      if msg_array[i].msg_len != totals[i]:
+        raise ConnectionError(f'Short Jetlink UDP datagram: {msg_array[i].msg_len}/{totals[i]}')
+    submitted += ret
+  return submitted, calls
 
 
 def tcp_info(sock):
@@ -168,6 +268,33 @@ class JetlinkTCP:
     self.udp_token = None
     self.datagram_port = None
     self.last_rx = {}
+    self.udp_payload_bytes = DATAGRAM_PAYLOAD
+    self.udp_datagrams_sent = 0
+    self.udp_send_syscalls = 0
+    self.udp_send_mode = 'sendmsg'
+    self.udp_batches_sent = 0
+    self.stage_trace_supported = False
+    self.tcp_quickack = False
+    self.tcp_quickack_sets = 0
+
+  def configure_tcp_quickack(self, enabled: bool):
+    """Opt-in Linux quick ACKs; never silently fall back if unavailable."""
+    if enabled and not hasattr(socket, 'TCP_QUICKACK'):
+      raise RuntimeError('TCP_QUICKACK not supported on this comma kernel/Python; disable --tcp-quickack')
+    self.tcp_quickack = bool(enabled)
+    if enabled:
+      self.acknowledge_promptly()
+
+  def acknowledge_promptly(self):
+    """Request immediate ACK after a complete TCP response (A/B only).
+
+    TCP_QUICKACK is Linux-only and transient. Re-arming for each inference
+    response is intentional. It cannot bypass USB or shorten NPU execution.
+    No other TCP or UDP socket configuration changes.
+    """
+    if self.tcp_quickack:
+      self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+      self.tcp_quickack_sets += 1
 
   def send(self, kind: int, payload=b'', flags: int = 0):
     self.seq += 1
@@ -180,10 +307,19 @@ class JetlinkTCP:
     head = memoryview(HEADER.pack(MAGIC, PROTOCOL, kind, seq, flags, n, 0))
     pending = [head] + parts
     if kind == INFER_REQ and self.udp is not None:
-      for piece in udp_parts(pending,self.udp_token,seq):
-        n=self.udp.sendmsg(piece)
-        if n!=sum(p.nbytes for p in piece):
-          raise ConnectionError('Short Jetlink frame datagram send')
+      pieces = udp_parts(pending,self.udp_token,seq,self.udp_payload_bytes)
+      if self.udp_send_mode == 'sendmmsg':
+        n, calls = udp_sendmmsg(self.udp, pieces)
+        self.udp_datagrams_sent += n
+        self.udp_send_syscalls += calls
+        self.udp_batches_sent += 1
+      else:
+        for piece in pieces:
+          n=self.udp.sendmsg(piece)
+          self.udp_send_syscalls += 1
+          if n!=sum(p.nbytes for p in piece):
+            raise ConnectionError('Short Jetlink frame datagram send')
+          self.udp_datagrams_sent += 1
     else:
       while pending:
         # Same TCP sendmsg path as V2; keep it as a comparable baseline.
@@ -234,7 +370,7 @@ class JetlinkTCP:
 
   def hello(self,usb_link=False):
     link = {'kind':'usb','usb_speed':'high-speed'} if usb_link else {'kind':'tcp'}
-    client = {'name': 'xnor-transport-shadow-v3', 'nonce': secrets.token_hex(4), 'link': link}
+    client = {'name': 'xnor-transport-shadow-v5', 'nonce': secrets.token_hex(4), 'link': link}
     seq = self.send(HELLO_REQ, json.dumps({'client': client}).encode())
     return json.loads(self.expect(HELLO_RESP, seq, 5.0))
 
@@ -297,7 +433,7 @@ class JetlinkTCP:
     self.spec = spec
     return spec
 
-  def infer(self, warped: np.ndarray, packed: np.ndarray, frame_id: int, *, reset: bool = False):
+  def infer(self, warped: np.ndarray, packed: np.ndarray, frame_id: int, *, reset: bool = False, capture_output=False):
     if self.spec is None:
       raise RuntimeError('ENGINE_REQ must succeed before infer')
     img = np.ascontiguousarray(warped, dtype=np.uint8)
@@ -311,9 +447,10 @@ class JetlinkTCP:
     t_sent = time.perf_counter_ns()
     resp = self.expect(INFER_RESP, seq, 3.0)
     t_recv = time.perf_counter_ns()
-    return self.decode_infer_reply(resp, frame_id, t0, t_sent, t_recv)
+    self.acknowledge_promptly()
+    return self.decode_infer_reply(resp, frame_id, t0, t_sent, t_recv, capture_output=capture_output)
 
-  def decode_infer_reply(self, resp: bytes, frame_id: int, t0: int, t_sent: int, t_recv: int, rx=None):
+  def decode_infer_reply(self, resp: bytes, frame_id: int, t0: int, t_sent: int, t_recv: int, rx=None, *, capture_output=False):
     if len(resp) < INFER_REPLY.size:
       raise RuntimeError('Short LS2 response header')
     got_id, status, gpu_us, queue_us, total_us = INFER_REPLY.unpack_from(resp)
@@ -343,6 +480,12 @@ class JetlinkTCP:
       'server_total_ms':total_us/1000, 'server_npu_ms':gpu_us/1000, 'server_queue_ms':queue_us/1000,
       'link_overhead_ms': wire_ms-total_us/1000,
       'output_floats':expected,
+      # Snapshot only selected frames for offline output-parity work. The JPEG/NV12
+      # camera buffers are NOT written and no model output is published.
+      '_output':out.copy() if capture_output else None,
+      # This is a residual measured on different clocks/measurement boundaries.
+      # It includes UDP delivery, Android reassembly/scheduling/output and TCP return.
+      'post_upload_unattributed_ms':((first_ns-t_sent)/1e6-total_us/1000) if first_ns else None,
     }
 
   def close(self):
@@ -363,14 +506,21 @@ class PipelinedInference:
   queuing on the phone and allows 20Hz *throughput* even when each response
   takes >50ms; it does not change the per-frame latency or drive the car.
   """
-  def __init__(self, peer: JetlinkTCP, depth: int):
+  def __init__(self, peer: JetlinkTCP, depth: int, *, dump_outputs_every: int = 0):
     if depth not in (2, 3):
       raise ValueError('Pipeline depth must be 2 or 3')
     self.peer = peer
     self.depth = depth
+    self.dump_outputs_every = dump_outputs_every
     self.lock = threading.Lock()
+    self.changed = threading.Condition(self.lock)
     self.pending = {}
+    self.processing_results = 0  # receiver decoded but not yet published to result queue
+    # Small history of actual UDP upload windows; no disk writes on the hot path.
+    self.send_windows = deque(maxlen=128)
     self.results = queue.Queue()
+    self.state_response = queue.Queue(maxsize=1)
+    self.pending_state_seq = None
     self.error = None
     self.stop_event = threading.Event()
     self.udp_lost = 0
@@ -388,19 +538,99 @@ class PipelinedInference:
     scalars = np.ascontiguousarray(packed, dtype='<f4')
     if img.nbytes != warped_bytes(self.peer.spec) or scalars.nbytes != 4*scalar_count(self.peer.spec):
       raise ValueError('Invalid LS2 frame or scalar input size')
-    with self.lock:
+    with self.changed:
       if len(self.pending) >= self.depth:
         return False
+      # Snapshot outstanding work before submitting: useful for associating
+      # 50 ms response stalls with competing upload traffic.
+      item['outstanding_at_send'] = len(self.pending)
+      oldest = min((t_sent for _item, _t0, t_sent in self.pending.values()), default=None)
+      item['oldest_outstanding_age_ms'] = ((time.perf_counter_ns() - oldest) / 1e6
+                                           if oldest is not None else None)
       t0 = time.perf_counter_ns()
+      item['send_start_ns'] = t0
       seq = self.peer.send(INFER_REQ, (INFER_HEADER.pack(item['frame_id'] & 0xffffffff,
                             RESET_QUEUES if reset else 0), img, scalars))
       sent = time.perf_counter_ns()
       self.pending[seq] = (item, t0, sent)
+      self.send_windows.append((seq, t0, sent))
     return True
+
+  def await_reply_window(self, *, max_wait_ms: float, min_age_ms: float):
+    """Optional bounded admission guard, never a full serialised pipeline.
+
+    Applied ONLY at a timer tick, before capturing the next camera frame.
+    Wait for an imminent previous reply to reduce USB2 TX/RX competition.
+    Returning a timeout does not block the next frame indefinitely.
+    """
+    if max_wait_ms <= 0:
+      return 0., False, False
+    with self.changed:
+      if self.error is not None or not self.pending:
+        return 0., False, False
+      oldest = min(t_sent for _item, _t0, t_sent in self.pending.values())
+      age_ms = (time.perf_counter_ns() - oldest) / 1e6
+      if not(min_age_ms <= age_ms <= 150.):
+        return 0., False, False
+      oldest_seq = min(self.pending, key=lambda seq: self.pending[seq][2])
+      started = time.perf_counter_ns()
+      deadline = started + int(max_wait_ms * 1e6)
+      # Condition.wait releases the lock so the receiver can retire a reply.
+      # Recheck after spurious notifications; never wait past the deadline.
+      while oldest_seq in self.pending and self.error is None and not self.stop_event.is_set():
+        remaining_ns = deadline - time.perf_counter_ns()
+        if remaining_ns <= 0:
+          break
+        self.changed.wait(timeout=remaining_ns / 1e9)
+      waited = (time.perf_counter_ns() - started) / 1e6
+      return waited, True, oldest_seq not in self.pending
+
+  @staticmethod
+  def overlap_diagnostics(seq, sent_ns, first_ns, received_ns, windows):
+    """Track *other* uploads during this reply's pre-first-byte wait.
+
+    Purely correlational: USB packets, scheduler latency and TCP buffering
+    cannot be separated from send timestamps on the comma alone.
+    """
+    if first_ns is None or first_ns < sent_ns:
+      return {'other_uploads_before_first_byte': None,
+              'other_upload_ms_before_first_byte': None,
+              'other_upload_overlaps_response_read': None}
+    others = [(start, end) for other_seq, start, end in windows if other_seq != seq]
+    waits = [max(0, min(end, first_ns) - max(start, sent_ns)) for start, end in others]
+    return {'other_uploads_before_first_byte': sum(x > 0 for x in waits),
+            'other_upload_ms_before_first_byte': sum(waits) / 1e6,
+            'other_upload_overlaps_response_read': int(any(start < received_ns and end > first_ns
+                                                            for start, end in others))}
 
   def outstanding(self):
     with self.lock:
       return len(self.pending)
+
+  def unfinished(self):
+    """Account for replies taken from pending but not yet queued for draining."""
+    with self.lock:
+      return len(self.pending) + self.processing_results
+
+  def request_stage_report(self, timeout=15.0):
+    """Request the opt-in timing ring AFTER all image replies have drained.
+
+    Uses the existing receiver; never competes with it for TCP reads.
+    """
+    if self.error is not None or self.unfinished():
+      raise RuntimeError('Stage trace requires a healthy, idle inference pipeline')
+    with self.changed:
+      if self.pending_state_seq is not None:
+        raise RuntimeError('Duplicate stage trace request')
+      seq = self.peer.send(STATE_REQ, json.dumps({'ls2_stage_diagnostics':True}).encode())
+      self.pending_state_seq = seq
+    try:
+      result = self.state_response.get(timeout=timeout)
+    except queue.Empty as exc:
+      raise TimeoutError('Android STATE_RESP stage trace timed out') from exc
+    if self.error is not None:
+      raise RuntimeError(f'Stage trace receiver failed: {self.error}')
+    return result
 
   def _reader(self):
     try:
@@ -411,8 +641,17 @@ class PipelinedInference:
           if self.outstanding() > 0:
             raise TimeoutError('Jetlink inference response timed out (3s with requests outstanding)') from exc
           continue
-        received = time.perf_counter_ns()
+        received = time.perf_counter_ns()  # capture before optional socket ACK work
+        if kind == INFER_RESP:
+          self.peer.acknowledge_promptly()
         if kind == PROGRESS:
+          continue
+        if kind == STATE_RESP:
+          with self.changed:
+            if self.pending_state_seq != seq:
+              raise RuntimeError(f'Unexpected STATE_RESP seq={seq}')
+            self.pending_state_seq = None
+          self.state_response.put(json.loads(raw))
           continue
         if kind == ERROR:
           try: detail = json.loads(raw)
@@ -420,20 +659,33 @@ class PipelinedInference:
           raise RuntimeError(f'Jetlink server error during inference: {detail}')
         if kind != INFER_RESP:
           raise RuntimeError(f'Unexpected reply type {kind} during pipelined inference')
-        with self.lock:
+        with self.changed:
           entry = self.pending.pop(seq, None)
           if entry is not None and self.peer.udp is not None:
             # Jetlink's UDP reassembler never answers incomplete older frames.
             older=[old for old in self.pending if old<seq]
             for old in older:self.pending.pop(old)
             self.udp_lost+=len(older)
+          windows = tuple(self.send_windows)
+          if entry is not None:
+            self.processing_results += 1
+            self.changed.notify_all()
         if entry is None:
           if self.peer.udp is not None:
             continue  # an answer for a UDP request already expired
           raise RuntimeError(f'Unmatched Jetlink inference response seq={seq}')
-        item, t0, t_sent = entry
-        timing = self.peer.decode_infer_reply(raw, item['frame_id'], t0, t_sent, received,rx=dict(self.peer.last_rx))
-        self.results.put((item, timing, received))
+        try:
+          item, t0, t_sent = entry
+          rx = dict(self.peer.last_rx)
+          timing = self.peer.decode_infer_reply(
+              raw, item['frame_id'], t0, t_sent, received, rx=rx,
+              capture_output=(self.dump_outputs_every > 0 and item.get('sample',0) % self.dump_outputs_every == 0))
+          timing.update(self.overlap_diagnostics(seq, t_sent, rx.get('first_ns'), received, windows))
+          self.results.put((item, timing, received))
+        finally:
+          with self.changed:
+            self.processing_results -= 1
+            self.changed.notify_all()
     except BaseException as exc:
       if not self.stop_event.is_set():
         self.error = exc
@@ -443,10 +695,12 @@ class PipelinedInference:
     """A lost UDP frame has no reply. Keep its slot bounded and account for it."""
     if self.peer.udp is None:return
     cutoff=time.perf_counter_ns()-int(older_than_s*1e9)
-    with self.lock:
+    with self.changed:
       expired=[seq for seq,(_,t0,_) in self.pending.items() if t0<cutoff]
       for seq in expired:self.pending.pop(seq)
       self.udp_expired+=len(expired)
+      if expired:
+        self.changed.notify_all()
 
   def drain(self):
     out=[]
@@ -456,13 +710,13 @@ class PipelinedInference:
 
   def wait_idle(self, deadline_s=4.0):
     until = time.monotonic()+deadline_s
-    while self.outstanding() and time.monotonic()<until and self.error is None:
+    while self.unfinished() and time.monotonic()<until and self.error is None:
       self.expire_udp()
-      time.sleep(.01)
+      time.sleep(.002)
     if self.error is not None:
       raise RuntimeError(f'Jetlink receive thread failed: {self.error}') from self.error
-    if self.outstanding():
-      raise TimeoutError(f'{self.outstanding()} pending Jetlink inference responses at end of benchmark')
+    if self.unfinished():
+      raise TimeoutError(f'{self.unfinished()} unfinished Jetlink inference responses at end of benchmark')
 
   def close(self):
     self.stop_event.set()
@@ -592,9 +846,29 @@ def parked(sm):
   return True,None
 
 
+def onroad_observation_allowed(sm):
+  """Observe camera frames on-road only with live state; never touch controls.
+
+  This does NOT assert that remote predictions are safe for driving. Its sole
+  purpose is to permit a distinct, non-publishing performance observer to run
+  in parallel with the stock authoritative modeld.
+  """
+  for key in ('deviceState', 'carState'):
+    if not sm.seen.get(key, False):
+      return False, f'Waiting for live {key} before on-road shadow'
+    if not sm.alive.get(key, False):
+      return False, f'Stale {key}; on-road shadow stopped'
+  if not bool(sm['deviceState'].started):
+    return False, 'Off-road transition; on-road shadow stopped'
+  return True, None
+
+
 def camera_frames(args,spec):
-  """Yield independent frames from camerad, with current calibration.
-  Separate VisionIPC subscriber, no modeld process changes or live messages.
+  """Yield real VisionIPC camera events, *before* doing the costly NV12 warp.
+
+  A caller that is backed up must still consume events so the independent
+  subscriber cannot accumulate stale frames while the Pixel has two jobs.
+  This is deliberately separate from production modeld; it publishes nothing.
   """
   from msgq.visionipc import VisionIpcClient, VisionStreamType
   from cereal.messaging import SubMaster
@@ -613,8 +887,8 @@ def camera_frames(args,spec):
   has_both=VisionStreamType.VISION_STREAM_ROAD in streams and VisionStreamType.VISION_STREAM_WIDE_ROAD in streams
   main_wide=VisionStreamType.VISION_STREAM_ROAD not in streams
   main=VisionIpcClient('camerad',VisionStreamType.VISION_STREAM_WIDE_ROAD if main_wide else VisionStreamType.VISION_STREAM_ROAD, True)
-  extra=VisionIpcClient('camerad',VisionStreamType.VISION_STREAM_WIDE_ROAD,False)
-  for client in [main]+([extra] if has_both else []):
+  extra=VisionIpcClient('camerad',VisionStreamType.VISION_STREAM_WIDE_ROAD,False) if has_both else None
+  for client in [main]+([extra] if extra is not None else []):
     while RUNNING and not client.connect(False):
       if time.monotonic()-start>args.camera_timeout:
         raise RuntimeError('Timed out connecting to camerad')
@@ -626,19 +900,25 @@ def camera_frames(args,spec):
   out=np.empty((2,6,h,w),dtype=np.uint8)
   last_calib=None
   maps=None
-  last_log=0
+  last_frame_id=None
   while RUNNING:
-    buf0=main.recv()
+    buf0=main.recv()  # camera event is the pacing signal; no independent sleep
+    received_ns=time.monotonic_ns()
     if buf0 is None:
       raise RuntimeError('Main camera stream ended')
-    buf1=extra.recv() if has_both else buf0
-    if buf1 is None:
-      raise RuntimeError('Wide camera stream ended')
+    if extra is not None:
+      buf1=extra.recv()
+      received_ns=time.monotonic_ns()  # frame pair is available at this point
+      if buf1 is None:
+        raise RuntimeError('Wide camera stream ended')
+    else:
+      buf1=buf0
     sm.update(0)
-    ok,reason=parked(sm)
+    ok,reason=(onroad_observation_allowed(sm) if args.onroad_shadow else parked(sm))
     if not ok:
-      # A few frames are allowed for the first carState message to arrive.
-      if reason.startswith('No live carState') and time.monotonic()-start<args.camera_timeout:
+      # During initial startup wait briefly for live device/car state.
+      if (reason.startswith(('No live carState', 'Waiting for live'))
+          and time.monotonic()-start<args.camera_timeout):
         continue
       raise RuntimeError(reason)
     if not all(sm.seen.get(n,False) for n in ('liveCalibration','deviceState','roadCameraState')):
@@ -647,52 +927,118 @@ def camera_frames(args,spec):
     calib=tuple(sm['liveCalibration'].rpyCalib)
     dev=str(sm['deviceState'].deviceType)
     sensor=str(sm['roadCameraState'].sensor)
-    state=(calib,dev,sensor,main.width,main.height,extra.width if has_both else main.width,extra.height if has_both else main.height)
+    state=(calib,dev,sensor,main.width,main.height,extra.width if extra is not None else main.width,extra.height if extra is not None else main.height)
     if state!=last_calib:
       dc=DEVICE_CAMERAS[(dev,sensor)]
       f=np.asarray(calib,dtype=np.float32)
       main_mat=get_warp_matrix(f,dc.ecam.intrinsics if main_wide else dc.fcam.intrinsics,False).astype(np.float32)
       wide_mat=get_warp_matrix(f,dc.ecam.intrinsics,True).astype(np.float32)
       maps=[warp_indices(main.width,main.height,h*2,w*2,main_mat),
-            warp_indices(extra.width if has_both else main.width,extra.height if has_both else main.height,h*2,w*2,wide_mat)]
+            warp_indices(extra.width if extra is not None else main.width,
+                         extra.height if extra is not None else main.height,h*2,w*2,wide_mat)]
       last_calib=state
     timestamp_eof=int(main.timestamp_eof)
     frame_id=int(main.frame_id)
-    rgbh=bool(sm['driverMonitoringState'].isRHD) if sm.seen.get('driverMonitoringState',False) else False
-    # Precomputation of mapping is deliberately excluded from hot-frame timings.
-    t0=time.perf_counter_ns()
-    for index,b in enumerate((buf0,buf1)):
-      source=np.frombuffer(b.data,dtype=np.uint8)
-      np.take(source,maps[index],out=out[index].reshape(-1))
-    preparation=ns_ms(time.perf_counter_ns()-t0)
-    yield frame_id,timestamp_eof,preparation,out,rgbh
+    if last_frame_id is not None and frame_id < last_frame_id:
+      raise RuntimeError('camerad frame IDs moved backwards: refusing stale stream')
+    last_frame_id=frame_id
+    is_rhd=bool(sm['driverMonitoringState'].isRHD) if sm.seen.get('driverMonitoringState',False) else False
+    pair_skew_ms=abs(int(main.timestamp_sof)-int(extra.timestamp_sof))/1e6 if extra is not None else 0.
+    # No numpy.take here: caller checks capacity and frame age first.
+    yield (frame_id,timestamp_eof,received_ns,buf0,buf1,maps,out,is_rhd,pair_skew_ms)
 
+
+def prepare_camera_event(event):
+  """Warp one accepted frame, reusing its preallocated packed-image buffer."""
+  _fid,_capture,_received,b0,b1,maps,out,_rhd,_skew=event
+  started=time.perf_counter_ns()
+  for index,b in enumerate((b0,b1)):
+    source=np.frombuffer(b.data,dtype=np.uint8)
+    np.take(source,maps[index],out=out[index].reshape(-1))
+  return out,ns_ms(time.perf_counter_ns()-started)
+
+
+def camera_admission(*, frame_id, last_frame_id, capture_ns, now_ns,
+                     busy=False, max_age_ms=100.0):
+  """Drop stale/busy/repeated camera events without preprocessing them."""
+  if last_frame_id is not None and frame_id<=last_frame_id:
+    return 'duplicate'
+  if busy:
+    return 'pipeline_full'
+  if max_age_ms>0 and (now_ns-capture_ns)>max_age_ms*1e6:
+    return 'stale'
+  return 'accept'
+
+
+def stall_analysis(rows, threshold_ms=80.):
+  """Correlate slow first-byte replies with competing uploads, without inferring cause."""
+  values = [r for r in rows if r.get('response_first_byte_wait_ms') is not None]
+  slow = [r for r in values if r['response_first_byte_wait_ms'] >= threshold_ms]
+  fast = [r for r in values if r['response_first_byte_wait_ms'] < threshold_ms]
+  def group(group_rows):
+    overlaps = [r.get('other_uploads_before_first_byte') for r in group_rows]
+    measured = [x for x in overlaps if x is not None]
+    npu = [r['server_npu_ms'] for r in group_rows if r.get('server_npu_ms') is not None]
+    overhead = [r['link_overhead_ms'] for r in group_rows if r.get('link_overhead_ms') is not None]
+    return {'frames':len(group_rows),
+            'npu_ms_mean':round(sum(npu)/len(npu),3) if npu else None,
+            'link_overhead_ms_mean':round(sum(overhead)/len(overhead),3) if overhead else None,
+            'other_uploads_during_wait_mean':(round(sum(measured)/len(measured),3)
+                                              if measured else None),
+            'any_other_uploads_percent':(round(100*sum(x>0 for x in measured)/len(measured),1)
+                                         if measured else None)}
+  return {'first_byte_stall_threshold_ms':threshold_ms,
+          'stalled_frames':group(slow),'non_stalled_frames':group(fast),
+          'note':'Counts overlapping comma send() intervals; does not capture USB/network queuing or Android scheduling.'}
 
 
 def bench(args):
   output=Path(args.output).expanduser()
   output.mkdir(parents=True,exist_ok=False)
   meta={'version':VERSION,'mode':args.mode,'host':args.host,'port':args.port,'rate_requested_hz':args.rate,
-        'seconds_requested':args.seconds,'model_sha256':SHA,'no_control':True,'cwd':os.getcwd(),
-        'pipeline_depth':args.pipeline_depth,'transport':args.transport, 'started_utc':datetime.now(timezone.utc).isoformat()}
+        'seconds_requested':args.seconds,'model_sha256':SHA,'no_control':True,'onroad_shadow':args.onroad_shadow,'cwd':os.getcwd(),
+        'pipeline_depth':args.pipeline_depth,'transport':args.transport,
+        'udp_send_mode':args.udp_send_mode,
+        'tcp_quickack':args.tcp_quickack,
+        'dump_outputs_every':args.dump_outputs_every,
+        'pacing':('camera_event' if args.mode=='camera' and args.pacing!='timer' else 'timer'),
+        'max_camera_age_ms':args.max_camera_age_ms,
+        'reply_guard_ms':args.reply_guard_ms,'reply_guard_min_age_ms':args.reply_guard_min_age_ms,
+        'started_utc':datetime.now(timezone.utc).isoformat()}
   records=[]
+  output_snapshots=[]
   errors=[]
   counts={'frames':0,'frames_sent':0,'over_50_ms':0,'capture_to_reply_over_50_ms':0,
           'source_frames_skipped':0,'pipeline_full_skips':0,'preprocess_count':0,
+          'camera_events':0,'stale_frames_dropped':0,'repeated_camera_frames':0,
+          'camera_pair_skew_over_10ms':0,
+          'reply_guard_waits':0,'reply_guard_released':0,'reply_guard_timed_out':0,
+          'reply_guard_waited_ms_total':0.,
           'udp_lost_replies':0,'udp_expired_replies':0}
   peer=None
   pipeline=None
   began=None
+  stage_report=None
+  stage_rows=[]
+  joined_stage_rows=[]
   try:
     meta['physical']=check_route(args.host,args.port,require_usb=not args.allow_other_network,
                                   require_panda=not args.skip_panda_check)
     peer=JetlinkTCP(args.host,args.port,args.timeout)
+    if args.tcp_quickack:
+      peer.configure_tcp_quickack(True)
     meta['usb0_before']=usb0_stats()
     hello=peer.hello(usb_link=not args.allow_other_network)
+    meta['ls2_stage_diagnostics_supported']=bool(hello.get('ls2_stage_diagnostics'))
+    if args.fetch_stage_report and not meta['ls2_stage_diagnostics_supported']:
+      raise RuntimeError('Stage tracing unavailable in this Android Jetlink app. Install the signed V0.5 diagnostics APK first; original V5.4 still works without --fetch-stage-report.')
     meta['ping_rtt_ms']=pct(peer.ping_samples(args.pings))
     meta['udp_advertised']=bool(hello.get('frame_port') and hello.get('frame_token'))
     if args.transport=='udp':
       peer.enable_datagrams(hello)
+    peer.udp_payload_bytes=args.udp_payload_bytes
+    peer.udp_send_mode=args.udp_send_mode
+    meta['udp_payload_bytes']=args.udp_payload_bytes if peer.udp else None
     meta['datagram_port']=peer.datagram_port
     meta['server']={k:hello.get(k) for k in ('loaded','backend','device','runtime_version','protocol','engine_state')}
     spec=peer.load_existing()
@@ -701,115 +1047,249 @@ def bench(args):
                                 'download':INFER_REPLY.size+output_reply_count(spec)*4}
     print(json.dumps({'connected':True,'mode':args.mode,'server':meta['server'],
                       'pipeline_depth':args.pipeline_depth, 'transport':args.transport,
+                      'udp_send_mode':args.udp_send_mode,
                       'udp_advertised':meta['udp_advertised'], 'idle_ping_ms':meta['ping_rtt_ms'],
                       'wire_payload_bytes':meta['wire_payload_bytes']},indent=2),flush=True)
     fields=['sample','frame_id','capture_age_ms','preprocess_ms','wire_ms','send_ms','recv_ms',
-            'link_overhead_ms','capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms',
-            'model_outputs','over_50ms',
+            'link_overhead_ms','capture_to_reply_ms','camera_delivery_age_ms','camera_event_to_send_ms',
+                                    'camera_pair_skew_ms',
+                                    'server_total_ms','server_npu_ms','server_queue_ms',
+            'model_outputs','over_50ms','preprocess_plus_wire_ms',
+            'reply_rx_interval_ms','send_start_interval_ms',
             'response_first_byte_wait_ms','response_body_read_ms','response_header_read_ms',
-            'response_read_syscalls','tcp_rtt_ms','tcp_retrans_total','tcp_unacked']
+            'post_upload_unattributed_ms','preprocess_done_to_upload_begin_ms',
+            'capture_to_upload_begin_ms','receiver_result_queue_delay_ms',
+            'response_read_syscalls','tcp_rtt_ms','tcp_retrans_total','tcp_unacked',
+            'outstanding_at_send','oldest_outstanding_age_ms',
+            'other_uploads_before_first_byte','other_upload_ms_before_first_byte',
+            'other_upload_overlaps_response_read']
     path=output/'frames.csv'
-    with path.open('w',newline='') as f:
-      writer=csv.DictWriter(f,fieldnames=fields)
-      writer.writeheader()
-      began=time.monotonic()
-      next_due=began
-      last_source_id=None
-      camera=camera_frames(args,spec) if args.mode=='camera' else None
-      rng=np.random.default_rng(0xC0A0)
-      scratch=(rng.integers(0,256,(2,6,*model_hw(spec)),dtype=np.uint8) if args.mode=='synthetic' else None)
-      n=0
-      if args.pipeline_depth:
-        pipeline=PipelinedInference(peer,args.pipeline_depth)
-        pipeline.start()
+    # Keep the fast path free of synchronous CSV disk I/O. At most 900 s * 20 Hz
+    # gives 18,000 small result dicts; write once in finally, even on exceptions.
+    began=time.monotonic()
+    next_due=began
+    last_source_id=None
+    last_accepted_id=None
+    event_paced=(args.mode=='camera' and args.pacing!='timer')
+    camera=camera_frames(args,spec) if args.mode=='camera' else None
+    rng=np.random.default_rng(0xC0A0)
+    scratch=(rng.integers(0,256,(2,6,*model_hw(spec)),dtype=np.uint8) if args.mode=='synthetic' else None)
+    scalars_lhd=packed_scalars(spec,False,0.)
+    scalars_rhd=packed_scalars(spec,True,0.)
+    last_progress=time.monotonic()
+    n=0
+    last_reply_rx_ns=None
+    last_send_start_ns=None
+    if args.pipeline_depth:
+      pipeline=PipelinedInference(peer,args.pipeline_depth,dump_outputs_every=args.dump_outputs_every)
+      pipeline.start()
 
-      def record_result(item,timing,received):
-        pre_ms=item['preprocess_ms']
-        capture_ns=item['capture_ns']
-        capture_to_reply=(received-capture_ns)/1e6 if capture_ns is not None else None
-        total=timing['wire_ms']+pre_ms
-        row={'sample':item['sample'],'frame_id':item['frame_id'],'capture_age_ms':item['capture_age_ms'],
-             'preprocess_ms':pre_ms,'wire_ms':timing['wire_ms'],'send_ms':timing['send_ms'],
-             'recv_ms':timing['recv_ms'],'link_overhead_ms':timing['link_overhead_ms'],
-             'capture_to_reply_ms':capture_to_reply,'server_total_ms':timing['server_total_ms'],
-             'server_npu_ms':timing['server_npu_ms'],'server_queue_ms':timing['server_queue_ms'],
-             'model_outputs':timing['output_floats'],'over_50ms':int(total>50.),
-             **{k:timing.get(k) for k in ('response_first_byte_wait_ms','response_body_read_ms',
-                 'response_header_read_ms','response_read_syscalls','tcp_rtt_ms','tcp_retrans_total','tcp_unacked')}}
-        writer.writerow(row)
-        records.append(row)
-        counts['frames']+=1
-        counts['over_50_ms']+=int(total>50.)
-        counts['capture_to_reply_over_50_ms']+=int(capture_to_reply is not None and capture_to_reply>50.)
-        if counts['frames'] % 20 == 0:
-          if not f.closed:f.flush()
-          print(f"{counts['frames']} replies; NPU {timing['server_npu_ms']:.1f}ms, "
-                f"round-trip {timing['wire_ms']:.1f}ms, pipeline outstanding "
-                f"{pipeline.outstanding() if pipeline else 0}",flush=True)
+    def record_result(item,timing,received):
+      nonlocal last_progress,last_reply_rx_ns
+      snapshot=timing.pop('_output',None)
+      if snapshot is not None:
+        output_snapshots.append((item['sample'],item['frame_id'],snapshot))
+      pre_ms=item['preprocess_ms']
+      capture_ns=item['capture_ns']
+      capture_to_reply=(received-capture_ns)/1e6 if capture_ns is not None else None
+      total=timing['wire_ms']+pre_ms
+      # True receive-completion cadence. Distinct from processing latency and
+      # dequeue lag; measured on the receiver thread's timestamp, not now().
+      reply_rx_interval_ms=(ns_ms(received-last_reply_rx_ns)
+                            if last_reply_rx_ns is not None else None)
+      last_reply_rx_ns=received
+      row={'sample':item['sample'],'frame_id':item['frame_id'],'capture_age_ms':item['capture_age_ms'],
+           'preprocess_ms':pre_ms,'wire_ms':timing['wire_ms'],'send_ms':timing['send_ms'],
+           'recv_ms':timing['recv_ms'],'link_overhead_ms':timing['link_overhead_ms'],
+           'capture_to_reply_ms':capture_to_reply,
+           'camera_delivery_age_ms':item.get('camera_delivery_age_ms'),
+           'camera_event_to_send_ms':item.get('camera_event_to_send_ms'),
+           'camera_pair_skew_ms':item.get('camera_pair_skew_ms'),
+           'preprocess_done_to_upload_begin_ms':(
+             ns_ms(item['send_start_ns']-item['prep_finished_ns'])
+             if item.get('send_start_ns') is not None and item.get('prep_finished_ns') is not None else None),
+           'capture_to_upload_begin_ms':(
+             ns_ms(item['send_start_ns']-capture_ns)
+             if item.get('send_start_ns') is not None and capture_ns is not None else None),
+           'receiver_result_queue_delay_ms':ns_ms(time.perf_counter_ns()-received),
+           'post_upload_unattributed_ms':timing.get('post_upload_unattributed_ms'),
+           'server_total_ms':timing['server_total_ms'],
+           'server_npu_ms':timing['server_npu_ms'],'server_queue_ms':timing['server_queue_ms'],
+           'model_outputs':timing['output_floats'],'over_50ms':int(total>50.),
+           'preprocess_plus_wire_ms':total,
+           'reply_rx_interval_ms':reply_rx_interval_ms,
+           'send_start_interval_ms':item.get('send_start_interval_ms'),
+           'outstanding_at_send':item.get('outstanding_at_send'),
+           'oldest_outstanding_age_ms':item.get('oldest_outstanding_age_ms'),
+           **{k:timing.get(k) for k in ('response_first_byte_wait_ms','response_body_read_ms',
+               'response_header_read_ms','response_read_syscalls','tcp_rtt_ms','tcp_retrans_total','tcp_unacked',
+               'other_uploads_before_first_byte','other_upload_ms_before_first_byte',
+               'other_upload_overlaps_response_read')}}
+      records.append(row)
+      counts['frames']+=1
+      counts['over_50_ms']+=int(total>50.)
+      counts['capture_to_reply_over_50_ms']+=int(capture_to_reply is not None and capture_to_reply>50.)
+      if args.progress_seconds and time.monotonic()-last_progress>=args.progress_seconds:
+        last_progress=time.monotonic()
+        print(f"{counts['frames']} replies; NPU {timing['server_npu_ms']:.1f}ms, "
+              f"round-trip {timing['wire_ms']:.1f}ms, pipeline outstanding "
+              f"{pipeline.outstanding() if pipeline else 0}",flush=True)
 
-      while RUNNING and time.monotonic()-began < args.seconds:
-        if pipeline:
-          pipeline.expire_udp()
-          for item,timing,received in pipeline.drain():
-            record_result(item,timing,received)
-          if pipeline.error is not None:
-            raise RuntimeError(f'Jetlink receiver failed: {pipeline.error}') from pipeline.error
-        if args.rate>0 and time.monotonic()<next_due:
-          # V1's min() could become negative between the test and this call.
-          time.sleep(max(0.,min(.01,next_due-time.monotonic())))
-          continue
-        if args.rate>0:
-          next_due=max(next_due+1.0/args.rate,time.monotonic())
-        if camera is not None:
-          frame_id,capture_ns,pre_ms,warped,is_rhd=next(camera)
-          counts['preprocess_count']+=1
-          if last_source_id is not None and frame_id>last_source_id+1:
-            counts['source_frames_skipped']+=frame_id-last_source_id-1
-          last_source_id=frame_id
-          age_before=max(0.,ns_ms(time.monotonic_ns()-capture_ns))
-        else:
-          warped=scratch
-          warped[0,0,0,0]=n%256
-          frame_id=n;pre_ms=0.;is_rhd=False;age_before=None;capture_ns=None
-        packed=packed_scalars(spec,is_rhd,0.)
-        item={'sample':n,'frame_id':frame_id,'capture_age_ms':age_before,
-              'capture_ns':capture_ns,'preprocess_ms':pre_ms}
-        if pipeline:
-          if not pipeline.send_frame(item,warped,packed,reset=(counts['frames_sent']==0)):
-            counts['pipeline_full_skips']+=1
-          else:
-            counts['frames_sent']+=1
-        else:
-          timing=peer.infer(warped,packed,frame_id,reset=(counts['frames_sent']==0))
-          timing['link_overhead_ms']=timing['wire_ms']-timing['server_total_ms']
-          counts['frames_sent']+=1
-          record_result(item,timing,time.monotonic_ns())
-        n+=1
+    while RUNNING and time.monotonic()-began < args.seconds:
       if pipeline:
-        pipeline.wait_idle()
+        pipeline.expire_udp()
         for item,timing,received in pipeline.drain():
           record_result(item,timing,received)
-      counts['elapsed_s']=round(time.monotonic()-began,3)
-      counts['achieved_fps']=round(counts['frames']/max(.001,counts['elapsed_s']),3)
-      counts['sent_fps']=round(counts['frames_sent']/max(.001,counts['elapsed_s']),3)
+        if pipeline.error is not None:
+          raise RuntimeError(f'Jetlink receiver failed: {pipeline.error}') from pipeline.error
+      # Synthetic and explicit timer A/B keep their original software cadence.
+      # Camera-event mode instead blocks on VisionIPC recv, just like the
+      # production modeld pipeline, with NO independent 20-Hz sleep.
+      if not event_paced and args.rate>0 and time.monotonic()<next_due:
+        time.sleep(max(0.,next_due-time.monotonic()))
+        continue
+      if not event_paced and args.rate>0:
+        # Optional A/B guard: avoid beginning a large UDP upload in the few
+        # milliseconds around a pending reply. Keep BOTH slots available and
+        # cap the wait. Default zero means timing is V5.1-comparable.
+        if pipeline and peer.udp is not None and args.reply_guard_ms > 0:
+          waited, did_wait, released = pipeline.await_reply_window(
+              max_wait_ms=args.reply_guard_ms, min_age_ms=args.reply_guard_min_age_ms)
+          if did_wait:
+            counts['reply_guard_waits'] += 1
+            counts['reply_guard_waited_ms_total'] += waited
+            counts['reply_guard_released' if released else 'reply_guard_timed_out'] += 1
+            # The reader may have accumulated results while we waited.
+            for item,timing,received in pipeline.drain():
+              record_result(item,timing,received)
+        next_due=max(next_due+1.0/args.rate,time.monotonic())
+      if camera is not None:
+        event=next(camera)  # consume EVERY camerad event even when full
+        frame_id,capture_ns,received_ns,*_=event
+        counts['camera_events']+=1
+        counts['camera_pair_skew_over_10ms']+=int(event[8]>10.)
+        if last_source_id is not None and frame_id>last_source_id+1:
+          counts['source_frames_skipped']+=frame_id-last_source_id-1
+        if last_source_id is None or frame_id>last_source_id:
+          last_source_id=frame_id
+        busy=bool(pipeline and pipeline.outstanding()>=pipeline.depth)
+        decision=camera_admission(frame_id=frame_id,last_frame_id=last_accepted_id,
+                   capture_ns=capture_ns,now_ns=time.monotonic_ns(),busy=busy,
+                   max_age_ms=args.max_camera_age_ms)
+        if decision!='accept':
+          if decision=='pipeline_full':counts['pipeline_full_skips']+=1
+          elif decision=='stale':counts['stale_frames_dropped']+=1
+          else:counts['repeated_camera_frames']+=1
+          continue
+        warped,pre_ms=prepare_camera_event(event)
+        prep_finished_ns=time.perf_counter_ns()
+        counts['preprocess_count']+=1
+        is_rhd=event[7]
+        age_before=max(0.,ns_ms(time.monotonic_ns()-capture_ns))
+        camera_delivery_age_ms=max(0.,ns_ms(received_ns-capture_ns))
+        camera_pair_skew_ms=event[8]
+      else:
+        if pipeline and pipeline.outstanding()>=pipeline.depth:
+          counts['pipeline_full_skips']+=1
+          continue
+        warped=scratch
+        warped[0,0,0,0]=n%256
+        frame_id=n;pre_ms=0.;is_rhd=False;age_before=None;capture_ns=None
+        received_ns=None;camera_delivery_age_ms=None;camera_pair_skew_ms=None
+        prep_finished_ns=None
+      packed=scalars_rhd if is_rhd else scalars_lhd
+      item={'sample':n,'frame_id':frame_id,'capture_age_ms':age_before,
+            'capture_ns':capture_ns,'preprocess_ms':pre_ms,
+            'prep_finished_ns':prep_finished_ns,
+            'camera_delivery_age_ms':camera_delivery_age_ms,
+            'camera_pair_skew_ms':camera_pair_skew_ms,
+            'camera_event_to_send_ms':ns_ms(time.monotonic_ns()-received_ns) if received_ns else None}
       if pipeline:
-        counts['udp_lost_replies']=pipeline.udp_lost
-        counts['udp_expired_replies']=pipeline.udp_expired
+        if not pipeline.send_frame(item,warped,packed,reset=(counts['frames_sent']==0)):
+          counts['pipeline_full_skips']+=1
+        else:
+          item['send_start_interval_ms']=(ns_ms(item['send_start_ns']-last_send_start_ns)
+                                           if last_send_start_ns is not None else None)
+          last_send_start_ns=item['send_start_ns']
+          counts['frames_sent']+=1
+          if camera is not None:last_accepted_id=frame_id
+      else:
+        item['send_start_ns']=time.perf_counter_ns()
+        item['send_start_interval_ms']=(ns_ms(item['send_start_ns']-last_send_start_ns)
+                                         if last_send_start_ns is not None else None)
+        last_send_start_ns=item['send_start_ns']
+        timing=peer.infer(warped,packed,frame_id,reset=(counts['frames_sent']==0),
+                          capture_output=(args.dump_outputs_every>0 and n%args.dump_outputs_every==0))
+        timing['link_overhead_ms']=timing['wire_ms']-timing['server_total_ms']
+        counts['frames_sent']+=1
+        if camera is not None:last_accepted_id=frame_id
+        record_result(item,timing,time.monotonic_ns())
+      n+=1
+    if pipeline:
+      pipeline.wait_idle()
+      for item,timing,received in pipeline.drain():
+        record_result(item,timing,received)
+    # Exclude diagnostic transfer from the timed test. Existing INFER_RESP bytes
+    # and UDP/TCP hot paths remain unchanged; STATE_REQ is sent after draining.
+    timed_end=time.monotonic()
+    if args.fetch_stage_report:
+      if pipeline:
+        stage_report=pipeline.request_stage_report()
+      else:
+        seq=peer.send(STATE_REQ,json.dumps({'ls2_stage_diagnostics':True}).encode())
+        stage_report=json.loads(peer.expect(STATE_RESP,seq,15.0))
+      stage_payload=stage_report.get('ls2_stage_diagnostics')
+      if not isinstance(stage_payload,dict) or stage_payload.get('schema')!=1:
+        raise RuntimeError('Android STATE_RESP lacked LS2 stage-diagnostics schema v1')
+      stage_rows=stage_payload.get('frames',[])
+      if not stage_rows:
+        raise RuntimeError('Android returned no frame stage records')
+      counts['stage_trace_records']=len(stage_rows)
+    counts['elapsed_s']=round(timed_end-began,3)
+    counts['achieved_fps']=round(counts['frames']/max(.001,counts['elapsed_s']),3)
+    counts['sent_fps']=round(counts['frames_sent']/max(.001,counts['elapsed_s']),3)
+    if pipeline:
+      counts['udp_lost_replies']=pipeline.udp_lost
+      counts['udp_expired_replies']=pipeline.udp_expired
   except (KeyboardInterrupt,StopIteration):
     errors.append('Stopped or camerad finished before benchmark duration')
   except Exception as exc:
     errors.append(f'{type(exc).__name__}: {exc}')
-    print('Benchmark error: '+errors[-1],file=sys.stderr,flush=True)
+    (output/'error_traceback.txt').write_text(traceback.format_exc())
+    print('Benchmark error: '+errors[-1]+' (see error_traceback.txt)',file=sys.stderr,flush=True)
   finally:
+    # These artifacts are generated after benchmark measurement, never during
+    # the 20 Hz timed loop. Clock-domain differences preclude direct subtraction
+    # of phone and comma timestamps; only within-device durations are compared.
+    if stage_report is not None:
+      try:
+        (output/'phone_stage_report.json').write_text(json.dumps(stage_report,indent=2)+'\n')
+        by_frame={int(s['frame_id']):s for s in stage_rows if 'frame_id' in s}
+        for row in records:
+          phone=by_frame.get(int(row['frame_id']))
+          if phone is None:continue
+          merged={'frame_id':row['frame_id'],'sample':row['sample'],
+                  'capture_to_reply_ms':row.get('capture_to_reply_ms'),
+                  'wire_ms':row.get('wire_ms'),
+                  'post_upload_unattributed_ms':row.get('post_upload_unattributed_ms'),
+                  'server_total_ms':row.get('server_total_ms')}
+          merged.update({k.replace('_us','_ms'):round(v/1000.,6) if k.endswith('_us') and isinstance(v,(int,float)) and v>=0 else v
+                         for k,v in phone.items()})
+          joined_stage_rows.append(merged)
+        if joined_stage_rows:
+          keys=list(dict.fromkeys(k for row in joined_stage_rows for k in row))
+          with (output/'joined_stage_frames.csv').open('w',newline='') as f:
+            writer=csv.DictWriter(f,fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(joined_stage_rows)
+      except (OSError,ValueError,TypeError,KeyError) as exc:
+        errors.append(f'Phone stage trace export failed: {exc}')
     if pipeline:
-      # On error the CSV with-block has closed. Preserve completed in-flight
-      # replies from the receiver queue rather than silently discarding them.
+      # Preserve completed in-flight replies even on an error.
       late = pipeline.drain()
-      if late and 'writer' in locals() and 'record_result' in locals():
-        with path.open('a',newline='') as tail:
-          writer=csv.DictWriter(tail,fieldnames=fields)
-          for item,timing,received in late:
-            record_result(item,timing,received)
+      if late and 'record_result' in locals():
+        for item,timing,received in late:
+          record_result(item,timing,received)
       pipeline.close()
     elif peer:
       peer.close()
@@ -817,6 +1297,30 @@ def bench(args):
       counts['elapsed_s']=round(time.monotonic()-began,3)
       counts['achieved_fps']=round(counts['frames']/max(.001,counts['elapsed_s']),3)
       counts['sent_fps']=round(counts['frames_sent']/max(.001,counts['elapsed_s']),3)
+    # Flush results once, outside the camera/network hot path.
+    if 'fields' in locals() and 'path' in locals():
+      try:
+        with path.open('w',newline='') as f:
+          writer=csv.DictWriter(f,fieldnames=fields)
+          writer.writeheader()
+          writer.writerows(records)
+      except OSError as exc:
+        errors.append(f'CSV write error: {exc}')
+    if output_snapshots:
+      try:
+        np.savez_compressed(output/'output_samples.npz',
+                            sample=np.array([x[0] for x in output_snapshots],dtype=np.int64),
+                            frame_id=np.array([x[1] for x in output_snapshots],dtype=np.int64),
+                            outputs=np.stack([x[2] for x in output_snapshots]))
+        meta['captured_output_samples']=len(output_snapshots)
+      except (OSError,ValueError) as exc:
+        errors.append(f'Output snapshot write failed: {exc}')
+    if peer:
+      meta['udp_datagrams_sent']=peer.udp_datagrams_sent
+      meta['udp_send_syscalls']=peer.udp_send_syscalls
+      meta['udp_batches_sent']=getattr(peer,'udp_batches_sent',0)
+      meta['udp_syscalls_per_datagram']=round(peer.udp_send_syscalls/max(1,peer.udp_datagrams_sent),3)
+      meta['tcp_quickack_sets']=getattr(peer,'tcp_quickack_sets',0)
     meta['finished_utc']=datetime.now(timezone.utc).isoformat()
     if pipeline:
       counts['udp_lost_replies']=pipeline.udp_lost
@@ -824,14 +1328,50 @@ def bench(args):
     meta['usb0_after']=usb0_stats()
     if 'usb0_before' in meta:
       meta['usb0_counters_delta']=usbstats_diff(meta['usb0_before'],meta['usb0_after'])
-    summary={'meta':meta,'counts':counts,'errors':errors,'inference_verified':not errors and counts['frames']>0,
+    stage_metrics={k.replace('_us','_ms'):pct([r[k] for r in joined_stage_rows if isinstance(r.get(k),(int,float)) and r[k]>=0])
+                   for k in ('datagram_assembly_ms','datagram_ready_to_handle_ms','host_lock_wait_ms',
+                             'infer_call_ms','before_reply_ms','reply_pack_ms','reply_tcp_write_ms','reply_write_ms','handle_to_reply_ms')
+                   if any(isinstance(r.get(k),(int,float)) and r[k]>=0 for r in joined_stage_rows)}
+    # Frames above 50ms here mean preprocess+transport roundtrip, NOT an
+    # inter-frame/cycle deadline. Report cycle and age-at-reply separately.
+    cadence=[r['reply_rx_interval_ms'] for r in records
+             if r.get('reply_rx_interval_ms') is not None]
+    cycle_p95=pct(cadence).get('p95') if cadence else None
+    elapsed=counts.get('elapsed_s',0.)
+    gate_qualified=bool(args.mode=='camera' and elapsed >= 180. and counts['frames'] >= 2)
+    no_errors=not errors and counts.get('udp_lost_replies',0)==0 and counts.get('udp_expired_replies',0)==0
+    gate_pass=bool(gate_qualified and no_errors and counts['achieved_fps']>=20. and
+                   cycle_p95 is not None and cycle_p95<=50.)
+    summary={'meta':meta,'counts':counts,'errors':errors,
+             'cadence_gate':{'qualified':gate_qualified,'pass':gate_pass if gate_qualified else None,
+                             'reason':('180s camera run required for 20 FPS / p95 <= 50ms gate'
+                                       if not gate_qualified else 'observational shadow-only cadence gate'),
+                             'throughput_min_fps':20.,'reply_cycle_p95_max_ms':50.,
+                             'reply_cycle_p95_ms':cycle_p95,
+                             'capture_to_reply_is_separate':True},
+             'phone_stage_trace_available':bool(stage_report),
+             'phone_stage_timing_ms':stage_metrics,
+             'phone_stage_trace_note':'Phone *_us durations are converted into ms here; phone and comma monotonic clock epochs are not aligned. Reassembly begins on the first accepted UDP packet in userspace, not the kernel receive timestamp. Timings are observational only.', 'inference_verified':not errors and counts['frames']>0,
              'controls_affected':False,
-             'data_interpretation':'Independent shadow-only probe, no vehicle control. CPU warp not numerical parity validated. Pipelining improves throughput, not necessarily latency.',
+             'data_interpretation':'Independent passive on-road shadow only' if args.onroad_shadow else 'Independent parked-only shadow probe',
              'timing_ms':{k:pct([r[k] for r in records if r[k] is not None])
                           for k in ('preprocess_ms','wire_ms','send_ms','recv_ms','link_overhead_ms',
-                                    'capture_to_reply_ms','server_total_ms','server_npu_ms','server_queue_ms',
+                                    'capture_to_reply_ms','reply_rx_interval_ms','send_start_interval_ms',
+                                    'preprocess_plus_wire_ms','camera_delivery_age_ms','camera_event_to_send_ms',
+                                    'camera_pair_skew_ms',
+                                    'server_total_ms','server_npu_ms','server_queue_ms',
                                     'response_first_byte_wait_ms','response_body_read_ms','response_header_read_ms',
-                                    'response_read_syscalls','tcp_rtt_ms','tcp_unacked')},
+                                    'post_upload_unattributed_ms','preprocess_done_to_upload_begin_ms',
+                                    'capture_to_upload_begin_ms','receiver_result_queue_delay_ms',
+                                    'response_read_syscalls','tcp_rtt_ms','tcp_unacked',
+                                    'outstanding_at_send','oldest_outstanding_age_ms',
+                                    'other_uploads_before_first_byte','other_upload_ms_before_first_byte',
+                                    'other_upload_overlaps_response_read')},
+             'latency_budget_note':('post_upload_unattributed_ms = response_first_byte_wait_ms - '
+               'server_total_ms; it aggregates network, Android processing outside server timer, '
+               'scheduling and response propagation, not pure network delay. This is not an Android '
+               'per-stage timestamp. Capture-to-reply is computed using comma capture clocks.'),
+             'stall_analysis':stall_analysis(records),
              'gate_note':'A successful connected benchmark is not approval for model authority.'}
     (output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     print(json.dumps({'output':str(output),'counts':counts,'errors':errors,'timing_ms':summary['timing_ms']},indent=2),flush=True)
@@ -841,14 +1381,37 @@ def bench(args):
 def parse_args(argv=None):
   p=argparse.ArgumentParser(description=__doc__)
   p.add_argument('--mode',choices=('synthetic','camera'),default='synthetic',help='camera: real NV12 frames, 2 cameras; synthetic: full-size Jetlink LS2 tensors')
+  p.add_argument('--onroad-shadow',action='store_true',
+                 help='PASSIVE observation only: allow real on-road camera frames, never publish predictions or control anything')
   p.add_argument('--host',default='10.169.232.180')
   p.add_argument('--port',type=int,default=5599)
-  p.add_argument('--rate',type=float,default=5.0,help='Default 5Hz; --rate 20 for 20Hz connected stress test, stationary only')
+  p.add_argument('--rate',type=float,default=5.0,
+                 help='Timer-mode/synthetic pacing Hz; ignored in camera-event mode, where camerad sets cadence')
+  p.add_argument('--pacing',choices=('camera','timer'),default='timer',
+                 help='Camera mode: timer=stable 20 Hz (default), camera=event-paced regression A/B only')
+  p.add_argument('--reply-guard-ms',type=float,default=0.,
+                 help='Optional 0..12 ms wait for an imminent previous TCP reply before UDP upload (0=off)')
+  p.add_argument('--reply-guard-min-age-ms',type=float,default=40.,
+                 help='Guard only when oldest in-flight upload finished at least this many ms ago (default 40)')
+  p.add_argument('--max-camera-age-ms',type=float,default=100.,
+                 help='Reject camerad frames older than this before sending; 0 disables (default 100 ms)')
   p.add_argument('--seconds',type=float,default=60.)
   p.add_argument('--timeout',type=float,default=5.)
   p.add_argument('--transport',choices=('tcp','udp'),default='tcp',
                  help='TCP baseline or UDP frame upload (only when Android server advertises UDP port/token)')
   p.add_argument('--pings',type=int,default=10,help='Idle Jetlink PING roundtrips before model test')
+  p.add_argument('--tcp-quickack',action='store_true',
+                 help='Opt-in Linux TCP_QUICKACK for reply transport A/B; default OFF (V5.5-equivalent). No phone APK change.')
+  p.add_argument('--fetch-stage-report',action='store_true',
+                 help='Require V0.5 instrumented Jetlink APK and fetch 5000-frame phone timing ring after test. No extra per-frame transport.')
+  p.add_argument('--dump-outputs-every',type=int,default=0,
+                 help='Opt-in: save one LS2 output vector per N completed frames to NPZ for offline parity work (0=off)')
+  p.add_argument('--udp-send-mode',choices=('sendmsg','sendmmsg'),default='sendmsg',
+                 help='UDP upload: V5.2 sendmsg default, or opt-in Linux sendmmsg syscall batching A/B')
+  p.add_argument('--udp-payload-bytes',type=int,choices=(8192,16384,32768,65000),default=65000,
+                 help='Experimental UDP frame fragment size (8K/16K/32K/65K); 65K is unchanged V3 baseline')
+  p.add_argument('--progress-seconds',type=float,default=5.,
+                 help='Progress print interval in seconds (0 disables, default 5)')
   p.add_argument('--pipeline-depth',type=int,choices=(0,2,3),default=0,
                  help='0=legacy synchronous (A/B baseline); 2=two outstanding requests; 3=experimental. Throughput only, never vehicle control.')
   p.add_argument('--camera-timeout',type=float,default=25.)
@@ -858,8 +1421,18 @@ def parse_args(argv=None):
   args=p.parse_args(argv)
   if not(0<args.rate<=20) or not(0<args.seconds<=900):p.error('rate 0..20 and seconds 0..900 required')
   if not(0<=args.pings<=100):p.error('pings must be 0..100')
+  if not(0<=args.dump_outputs_every<=10000):p.error('dump outputs every must be 0..10000')
+  if not(0<=args.progress_seconds<=60):p.error('progress interval must be 0..60 seconds')
+  if not(0<=args.max_camera_age_ms<=1000):p.error('max camera age must be 0..1000 ms')
+  if not(0<=args.reply_guard_ms<=12):p.error('reply guard must be 0..12 ms')
+  if not(0<=args.reply_guard_min_age_ms<=150):p.error('reply guard minimum age must be 0..150 ms')
+  if args.reply_guard_ms and (args.pacing != 'timer' or args.transport != 'udp' or args.pipeline_depth == 0):
+    p.error('reply guard requires --pacing timer --transport udp --pipeline-depth 2 or 3')
   if args.transport=='udp' and args.pipeline_depth==0:p.error('UDP requires --pipeline-depth 2 for bounded loss tracking')
   if args.transport=='udp' and args.allow_other_network:p.error('UDP frames only permitted with verified usb0 routing')
+  if args.onroad_shadow and (args.mode!='camera' or args.transport!='udp' or args.allow_other_network or args.skip_panda_check):
+    p.error('--onroad-shadow requires --mode camera --transport udp, verified USB and xnor panda')
+  if args.udp_send_mode=='sendmmsg' and args.transport!='udp':p.error('sendmmsg requires --transport udp')
   return args
 
 
