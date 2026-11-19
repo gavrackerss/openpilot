@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-VERSION = '5.6-onroad-shadow'
+VERSION = '5.7-prediction-compare'
 SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
 NBYTES = 768749892
 HEADER = struct.Struct('<IHHIIIQ4x')
@@ -369,7 +369,7 @@ class JetlinkTCP:
     raise TimeoutError(f'Jetlink {expected} timed out')
 
   def hello(self,usb_link=False):
-    link = {'kind':'usb','usb_speed':'high-speed'} if usb_link else {'kind':'tcp'}
+    link = {'kind':'usb'} if usb_link else {'kind':'tcp'}  # USB speed unknown: never advertise fabricated USB 2
     client = {'name': 'xnor-transport-shadow-v5', 'nonce': secrets.token_hex(4), 'link': link}
     seq = self.send(HELLO_REQ, json.dumps({'client': client}).encode())
     return json.loads(self.expect(HELLO_RESP, seq, 5.0))
@@ -1001,6 +1001,7 @@ def bench(args):
         'udp_send_mode':args.udp_send_mode,
         'tcp_quickack':args.tcp_quickack,
         'dump_outputs_every':args.dump_outputs_every,
+        'compare_local_modelv2':getattr(args,'compare_local',False),
         'pacing':('camera_event' if args.mode=='camera' and args.pacing!='timer' else 'timer'),
         'max_camera_age_ms':args.max_camera_age_ms,
         'reply_guard_ms':args.reply_guard_ms,'reply_guard_min_age_ms':args.reply_guard_min_age_ms,
@@ -1021,6 +1022,8 @@ def bench(args):
   stage_report=None
   stage_rows=[]
   joined_stage_rows=[]
+  comparator=None
+  comparison_summary=None
   try:
     meta['physical']=check_route(args.host,args.port,require_usb=not args.allow_other_network,
                                   require_panda=not args.skip_panda_check)
@@ -1043,6 +1046,10 @@ def bench(args):
     meta['server']={k:hello.get(k) for k in ('loaded','backend','device','runtime_version','protocol','engine_state')}
     spec=peer.load_existing()
     meta['spec']={k:spec.get(k) for k in ('sha256','frame_skip','input_shapes','output_shapes','output_slices')}
+    if getattr(args,'compare_local',False):
+      from openpilot.jetlink_prediction_compare import PredictionObserver
+      comparator=PredictionObserver(output,spec)
+      comparator.poll()
     meta['wire_payload_bytes']={'upload':INFER_HEADER.size+warped_bytes(spec)+scalar_count(spec)*4,
                                 'download':INFER_REPLY.size+output_reply_count(spec)*4}
     print(json.dumps({'connected':True,'mode':args.mode,'server':meta['server'],
@@ -1089,6 +1096,9 @@ def bench(args):
       snapshot=timing.pop('_output',None)
       if snapshot is not None:
         output_snapshots.append((item['sample'],item['frame_id'],snapshot))
+        if comparator is not None and item.get('capture_ns') is not None:
+          comparator.poll()
+          comparator.offer_remote(item['frame_id'],item['capture_ns'],received,snapshot)
       pre_ms=item['preprocess_ms']
       capture_ns=item['capture_ns']
       capture_to_reply=(received-capture_ns)/1e6 if capture_ns is not None else None
@@ -1136,6 +1146,8 @@ def bench(args):
               f"{pipeline.outstanding() if pipeline else 0}",flush=True)
 
     while RUNNING and time.monotonic()-began < args.seconds:
+      if comparator is not None:
+        comparator.poll()
       if pipeline:
         pipeline.expire_udp()
         for item,timing,received in pipeline.drain():
@@ -1306,6 +1318,11 @@ def bench(args):
           writer.writerows(records)
       except OSError as exc:
         errors.append(f'CSV write error: {exc}')
+    if comparator is not None:
+      try:
+        comparison_summary=comparator.finish()
+      except Exception as exc:
+        errors.append(f'Local model agreement report failed: {type(exc).__name__}: {exc}')
     if output_snapshots:
       try:
         np.savez_compressed(output/'output_samples.npz',
@@ -1343,6 +1360,7 @@ def bench(args):
     gate_pass=bool(gate_qualified and no_errors and counts['achieved_fps']>=20. and
                    cycle_p95 is not None and cycle_p95<=50.)
     summary={'meta':meta,'counts':counts,'errors':errors,
+             'prediction_comparison': comparison_summary,
              'cadence_gate':{'qualified':gate_qualified,'pass':gate_pass if gate_qualified else None,
                              'reason':('180s camera run required for 20 FPS / p95 <= 50ms gate'
                                        if not gate_qualified else 'observational shadow-only cadence gate'),
@@ -1383,6 +1401,8 @@ def parse_args(argv=None):
   p.add_argument('--mode',choices=('synthetic','camera'),default='synthetic',help='camera: real NV12 frames, 2 cameras; synthetic: full-size Jetlink LS2 tensors')
   p.add_argument('--onroad-shadow',action='store_true',
                  help='PASSIVE observation only: allow real on-road camera frames, never publish predictions or control anything')
+  p.add_argument('--compare-local',action='store_true',
+                 help='Sample same-frame local modelV2 geometry/probabilities without changing modeld; no parity/authority claims')
   p.add_argument('--host',default='10.169.232.180')
   p.add_argument('--port',type=int,default=5599)
   p.add_argument('--rate',type=float,default=5.0,
@@ -1430,6 +1450,8 @@ def parse_args(argv=None):
     p.error('reply guard requires --pacing timer --transport udp --pipeline-depth 2 or 3')
   if args.transport=='udp' and args.pipeline_depth==0:p.error('UDP requires --pipeline-depth 2 for bounded loss tracking')
   if args.transport=='udp' and args.allow_other_network:p.error('UDP frames only permitted with verified usb0 routing')
+  if args.compare_local and (not args.onroad_shadow or args.dump_outputs_every==0):
+    p.error('--compare-local requires --onroad-shadow and --dump-outputs-every > 0')
   if args.onroad_shadow and (args.mode!='camera' or args.transport!='udp' or args.allow_other_network or args.skip_panda_check):
     p.error('--onroad-shadow requires --mode camera --transport udp, verified USB and xnor panda')
   if args.udp_send_mode=='sendmmsg' and args.transport!='udp':p.error('sendmmsg requires --transport udp')

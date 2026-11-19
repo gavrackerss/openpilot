@@ -85,7 +85,9 @@ def summary_for(path):
             'capture_to_reply_p95_ms': data.get('timing_ms', {}).get('capture_to_reply_ms', {}).get('p95'),
             'errors': data.get('errors'),
             'no_control': data.get('meta', {}).get('no_control'),
-            'onroad_shadow': data.get('meta', {}).get('onroad_shadow')}
+            'onroad_shadow': data.get('meta', {}).get('onroad_shadow'),
+            'comparison_matched_frames': (data.get('prediction_comparison') or {}).get('matched_frames'),
+            'full_numerical_parity_verified': False}
   except (ValueError, OSError, AttributeError):
     return None
 
@@ -96,7 +98,7 @@ def runner_args(path, host):
           '--seconds', str(RUN_SECONDS), '--rate', '20', '--pipeline-depth', '2',
           '--transport', 'udp', '--udp-payload-bytes', '65000',
           '--udp-send-mode', 'sendmsg', '--reply-guard-ms', '0',
-          '--dump-outputs-every', '100', '--fetch-stage-report',
+          '--dump-outputs-every', '20', '--compare-local', '--fetch-stage-report',
           '--host', host, '--output', str(path)]
 
 
