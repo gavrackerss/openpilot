@@ -1,56 +1,152 @@
 #!/usr/bin/env python3
-"""XNOR Android tether adapter for Zoompilot's authority/fallback implementation.
+"""XNOR V5.9 Pixel-app adapter for Zoompilot's model handover/fallback.
 
-The model selector, frame holds, fallback and reconnect logic are *not* forked:
-they are jetlink.openpilot.joining.JoiningModelState and
-jetlink.openpilot.model_state.JetlinkModelState, pinned in gavrackerss/jetlink.
+Transport and inference replies come from the *existing custom XNOR Android
+Jetlink app*, via the tested V5.8 JetlinkTCP/PipelinedInference implementation.
+Model selection, handover, demotion, frame-drop response and retry remain with
+Zoompilot jetlink.openpilot.joining.JoiningModelState. This is not a separate
+prediction publication path. The existing small model remains the fallback.
 
-The phone exposes TCP/UDP over Android USB tethering. Zoompilot's stock cable
-mode has the inverse USB roles, so the adapter connects outward to the phone.
-No separate IPC prediction selector or manager gadget owner is used.
+Experimental integration: authority remains disabled by default. A passing
+unit test or successful shadow run does not qualify vehicle-control behavior.
 """
 from __future__ import annotations
 
-import ctypes
+from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
+import queue
 import subprocess
+import threading
+import time
+
 import numpy as np
 
 from openpilot.common.swaglog import cloudlog
 
-VERSION = 'xn5.9-zoompilot-seam'
-SHA256 = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
-NBYTES = 768749892
+VERSION = '5.9.1-xnor-custom-pixel-jetlink'
+MODEL_SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
+MODEL_NBYTES = 768749892
+MODEL_HW = (128, 256)
 HOST, PORT = '10.169.232.180', 5599
 ARM = Path('/data/jetlink_xnor/AUTHORITY_ENABLED')
 QUALIFIED = Path('/data/jetlink_xnor/LS2_AUTHORITY_QUALIFIED')
-MODEL_HW = (128, 256)
+
+# Actual V5.8 phone response: 2,066 prediction floats followed by 2 padding
+# floats. The 16,384-float hidden state is retained *on the phone*.
+REPLY_FLOATS = 2068
+PREDICTION_FLOATS = 2066
+MAX_REPLY_AGE_NS = 120_000_000
+MAX_REPLY_FRAME_LAG = 2
+WAIT_FIRST_S = 0.085
+WAIT_FRAME_S = 0.037
+PENDING_EXPIRE_S = 0.17
+
+# Verified from the V5.8 Android ENGINE_RESP saved in the real drive summaries.
+OUTPUT_SLICES = {
+  'lane_lines': (0, 528),
+  'lane_lines_prob': (528, 536),
+  'road_edges': (536, 800),
+  'meta': (800, 855),
+  'desire_pred': (855, 887),
+  'pose': (887, 899),
+  'wide_from_device_euler': (899, 905),
+  'road_transform': (905, 917),
+  'plan': (917, 1907),
+  'lead': (1907, 2051),
+  'lead_prob': (2051, 2054),
+  'desire_state': (2054, 2062),
+  # 'action' exists at 2062:2066, but the existing stock planner computes
+  # the action from the parsed LS2 plan. Do not guess raw action semantics.
+}
 
 
 def tether_route_valid() -> bool:
   try:
-    res = subprocess.run(['ip', 'route', 'get', HOST], check=True,
-                         capture_output=True, text=True, timeout=1.0)
-    return ' dev usb0 ' in f' {res.stdout} '
+    route = subprocess.run(['ip', 'route', 'get', HOST], check=True,
+                           capture_output=True, text=True, timeout=1.0).stdout
+    return ' dev usb0 ' in f' {route} '
   except (OSError, subprocess.SubprocessError):
     return False
 
 
 def enabled() -> bool:
-  # The independent qualification marker is *not* shipped with this port.
-  return ARM.is_file() and QUALIFIED.is_file() and tether_route_valid()
+  # Arm only the *joining mechanism*. It must keep retrying in the background
+  # if the Pixel is plugged in AFTER modeld starts; the small model drives.
+  # The actual transport route is checked in connect() on every attempt.
+  return ARM.is_file() and QUALIFIED.is_file()
+
+
+def validate_spec(spec: dict) -> None:
+  """Refuse a different compiled model or an unexpected custom-APK schema."""
+  if not isinstance(spec, dict) or spec.get('sha256') != MODEL_SHA:
+    raise ValueError('Pixel model SHA is not the validated LS2 model')
+  # ENGINE_RESP may omit nbytes; ENGINE_REQ already supplies the exact value.
+  if spec.get('nbytes') is not None and int(spec['nbytes']) != MODEL_NBYTES:
+    raise ValueError('Pixel LS2 model size changed')
+  if int(spec.get('frame_skip', -1)) != 4:
+    raise ValueError('Unexpected Pixel recurrent-state stride')
+  shapes = spec.get('input_shapes') or {}
+  if tuple(shapes.get('new_img', ())) != (2, 6, *MODEL_HW):
+    raise ValueError('Unexpected Pixel LS2 image tensor')
+  if tuple(shapes.get('desire', ())) != (8,):
+    raise ValueError('Unexpected Pixel LS2 desire tensor')
+  if tuple(shapes.get('action_t', ())) != (1, 2):
+    raise ValueError('Unexpected Pixel LS2 action timing tensor')
+  if tuple(shapes.get('traffic_convention', ())) != (1, 2):
+    raise ValueError('Unexpected Pixel LS2 traffic-convention tensor')
+  if tuple((spec.get('output_shapes') or {}).get('outputs', ())) != (1, 18452):
+    raise ValueError('Unexpected Pixel LS2 model output length')
+  slices = spec.get('output_slices') or {}
+  for key, pair in OUTPUT_SLICES.items():
+    if tuple(slices.get(key, ())) != pair:
+      raise ValueError(f'Pixel output slice mismatch: {key}')
+  if tuple(slices.get('action', ())) != (2062, 2066):
+    raise ValueError('Pixel raw action head changed')
+  if tuple(slices.get('hidden_state', ())) != (2066, 18450):
+    raise ValueError('Pixel returned hidden state rather than phone-local history')
+  if tuple(slices.get('pad', ())) != (18450, 18452):
+    raise ValueError('Pixel output padding changed')
+
+
+def extract_prediction_heads(vector: np.ndarray, spec: dict, parser) -> dict:
+  """Decode the original custom-app 2068-float INFER_RESP with stock Parser."""
+  x = np.asarray(vector, dtype=np.float32).reshape(-1)
+  if x.size != REPLY_FLOATS or not np.isfinite(x).all():
+    raise ValueError(f'Invalid Pixel LS2 output (expected {REPLY_FLOATS} floats)')
+  if not isinstance(spec, dict):
+    raise ValueError('Missing server model specification')
+  out = {key: x[np.newaxis, start:stop].copy()
+         for key, (start, stop) in OUTPUT_SLICES.items()}
+  parsed = parser.parse_outputs(out)
+  required = {
+    'plan': (1, 33, 15),
+    'plan_stds': (1, 33, 15),
+    'lane_lines': (1, 4, 33, 2),
+    'road_edges': (1, 2, 33, 2),
+    'lead': (1, 3, 6, 4),
+    'lead_prob': (1, 3),
+    'desire_state': (1, 8),
+  }
+  for key, shape in required.items():
+    value = parsed.get(key)
+    if not isinstance(value, np.ndarray) or value.shape != shape or not np.isfinite(value).all():
+      raise ValueError(f'Invalid decoded Pixel prediction: {key}')
+  if any(not np.isfinite(a).all() for a in parsed.values() if isinstance(a, np.ndarray)):
+    raise ValueError('Pixel prediction contains nonfinite parsed values')
+  return parsed
 
 
 class _Progress:
-  def report(self, stage, fraction, message, **kwargs):
-    cloudlog.info('jetlink-authority %s %.3f %s', stage, fraction, message)
+  def report(self, stage, frac, message, **kwargs):
+    cloudlog.info('xnor-jetlink: %s %s', stage, message)
 
   def clear(self):
-    pass
+    return None
 
 
 class _Small:
-  """Adapt stock's run(...,prepare_only:bool) to Zoompilot run(...,after_enqueue)."""
+  """Map existing split-model run(...,prepare_only) onto Zoompilot's model."""
   def __init__(self, model):
     object.__setattr__(self, '_model', model)
 
@@ -61,38 +157,102 @@ class _Small:
     setattr(self._model, name, value)
 
   def run(self, bufs, transforms, inputs, after_enqueue=None):
-    result = self._model.run(bufs, transforms, inputs, False)
+    value = self._model.run(bufs, transforms, inputs, False)
     if after_enqueue is not None:
       after_enqueue()
-    return result
+    return value
 
 
-class _Warp:
-  """Use the *existing V5.8* NV12-to-LS2 mapping, not a new warp transform."""
-  def __init__(self, cam_w: int, cam_h: int):
-    from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-    self.cam_w, self.cam_h = cam_w, cam_h
-    self.buf_bytes = get_nv12_info(cam_w, cam_h)[3]
+class _CameraWarp:
+  """Use precisely V5.8's NV12 warp_indices with per-buffer dimensions."""
+  def __init__(self, main_w: int, main_h: int):
+    self.main_w, self.main_h = int(main_w), int(main_h)
     self.output = np.empty((2, 6, *MODEL_HW), dtype=np.uint8)
-    self._last = [None, None]
-    self._offsets = [None, None]
+    self._calibrations = [None, None]
+    self._maps = [None, None]
+    self._dimensions = [None, None]
 
-  def start(self, frame: int, big_frame: int, tfm: np.ndarray, big_tfm: np.ndarray):
+  def run(self, bufs: dict, transforms: dict):
     from openpilot.jetlink_shadow_bench import warp_indices
-    for i, (ptr, matrix) in enumerate(((frame, tfm), (big_frame, big_tfm))):
-      if not ptr or matrix.shape != (3, 3) or not np.isfinite(matrix).all():
-        raise ValueError('invalid frame pointer or calibration')
-      if self._last[i] is None or not np.array_equal(matrix, self._last[i]):
-        offsets = warp_indices(self.cam_w, self.cam_h, 256, 512, matrix)
-        if offsets.size != self.output[i].size or offsets.min() < 0 or offsets.max() >= self.buf_bytes:
-          raise ValueError('NV12 warp outside camera buffer')
-        self._offsets[i] = offsets
-        self._last[i] = matrix.copy()
-      raw = np.ctypeslib.as_array((ctypes.c_uint8 * self.buf_bytes).from_address(int(ptr)))
-      np.take(raw, self._offsets[i], out=self.output[i].reshape(-1))
+    for i, name in enumerate(('img', 'big_img')):
+      buf, matrix = bufs[name], np.asarray(transforms[name], dtype=np.float32)
+      if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        raise ValueError('Invalid modeld camera calibration')
+      src = np.frombuffer(buf.data, dtype=np.uint8)
+      cam_w, cam_h = int(getattr(buf, 'width', self.main_w)), int(getattr(buf, 'height', self.main_h))
+      if cam_w <= 0 or cam_h <= 0:
+        raise ValueError('Invalid modeld camera dimensions')
+      dims = (cam_w, cam_h)
+      if self._calibrations[i] is None or self._dimensions[i] != dims or not np.array_equal(self._calibrations[i], matrix):
+        indexes = warp_indices(cam_w, cam_h, MODEL_HW[0] * 2, MODEL_HW[1] * 2, matrix)
+        if indexes.size != self.output[i].size or indexes.min() < 0 or indexes.max() >= src.size:
+          raise ValueError('Pixel camera warp is outside the source frame')
+        self._maps[i] = indexes
+        self._calibrations[i] = matrix.copy()
+        self._dimensions[i] = dims
+      if self._maps[i].max() >= src.size:
+        raise ValueError('Pixel camera frame size changed during driving')
+      np.take(src, self._maps[i], out=self.output[i].reshape(-1))
+    return self.output
 
-  def wait(self):
-    pass
+
+class _PixelSession:
+  """Custom V5.8 TCP control/UDP upload/TCP reply session.
+
+  A pipeline reader thread is created *in the joining background thread*,
+  while Zoompilot keeps the small model authoritative. Its first receive is
+  deferred until handover, so standby PING has exactly one socket reader.
+  """
+  def __init__(self, peer, spec: dict):
+    from openpilot.jetlink_shadow_bench import PipelinedInference
+    self.peer, self.spec = peer, spec
+    self.dead = False
+    self.active = False
+    self._gate = threading.Event()
+    self._lock = threading.RLock()
+    self.pipeline = PipelinedInference(peer, depth=2, prediction_every=1)
+    self.pipeline.worker = threading.Thread(target=self._reader_when_active,
+                                            name='xnor-pixel-receiver', daemon=True)
+    self.pipeline.start()
+
+  def _reader_when_active(self):
+    # This thread was started off modeld's realtime core, before handover.
+    try:
+      from jetlink.transport.priority import background_thread
+      background_thread()
+    except Exception:
+      pass
+    self._gate.wait()
+    if not self.pipeline.stop_event.is_set():
+      self.pipeline._reader()
+
+  def ping(self, timeout=1.0):
+    from openpilot.jetlink_shadow_bench import PING, PONG
+    with self._lock:
+      if self.active or self.dead:
+        return 0.0
+      before = time.perf_counter()
+      seq = self.peer.send(PING)
+      self.peer.expect(PONG, seq, timeout)
+      return time.perf_counter() - before
+
+  def activate(self):
+    with self._lock:
+      if self.dead:
+        raise ConnectionError('Pixel session already closed')
+      self.active = True
+      self._gate.set()
+
+  def leave(self, reason, **measured):
+    # Closing a session rather than reusing a stream avoids cross-session
+    # replies; Zoompilot's joining state performs the retry/backoff.
+    self.dead = True
+
+  def close(self):
+    with self._lock:
+      self.dead = True
+      self._gate.set()
+    self.pipeline.close()
 
 
 class _Control:
@@ -100,7 +260,7 @@ class _Control:
 
   @staticmethod
   def in_control() -> bool:
-    # Missing/stale vehicle information blocks handover, never permits it.
+    # Zoompilot never swaps while engaged or while control state is stale.
     try:
       import cereal.messaging as messaging
       sm = _Control.sm
@@ -108,78 +268,175 @@ class _Control:
         _Control.sm = sm = messaging.SubMaster(['carState', 'carControl', 'selfdriveState'])
       sm.update(0)
       services = ['carState', 'carControl', 'selfdriveState']
-      return not (sm.all_alive(services) and sm.all_valid(services)) or (
-        sm['carControl'].enabled or sm['carControl'].latActive or
-        sm['selfdriveState'].enabled or sm['selfdriveState'].active)
+      return not (sm.all_alive(services) and sm.all_valid(services)) or bool(
+        sm['carControl'].enabled or getattr(sm['carControl'], 'latActive', False)
+        or sm['selfdriveState'].enabled or sm['selfdriveState'].active)
     except Exception:
       return True
 
 
 def _reset_small(small):
-  # Legacy split-model histories, preserving GPU tensor identities.
-  for array in small.numpy_inputs.values():
-    array.fill(0)
-  for tensor in small.img_queues.values():
-    tensor.assign(0).realize()
+  """Reset the already allocated local recurrent buffers after fallback."""
+  for a in small.numpy_inputs.values():
+    a.fill(0)
+  for t in small.img_queues.values():
+    t.assign(0).realize()
   small.full_input_queues.reset()
   small.prev_desire.fill(0)
 
 
 def attach(small_model, cam_w: int, cam_h: int):
-  """Keep local authority unless explicitly enabled and Jetlink is usable."""
+  """Connect the custom APK to upstream Zoompilot's joining/fallback model."""
   if not enabled():
     return small_model
-  from jetlink.client import JetlinkClient
-  from jetlink.openpilot.joining import JoiningModelState
-  from jetlink.openpilot.model_state import JetlinkModelState
-  from jetlink.openpilot.interface import ModelFace
-  from openpilot.selfdrive.modeld.parse_model_outputs import Parser
-  from openpilot.selfdrive.modeld.constants import ModelConstants
-  from openpilot.selfdrive.modeld.modeld import (
-    LAT_SMOOTH_SECONDS, LONG_SMOOTH_SECONDS, get_action_from_model)
 
-  warp = _Warp(cam_w, cam_h)
-  face = ModelFace(parser=Parser, frame_size=lambda w, h: warp.buf_bytes,
-                   desire_len=ModelConstants.DESIRE_LEN, constants=ModelConstants,
-                   lat_smooth_seconds=LAT_SMOOTH_SECONDS,
-                   long_smooth_seconds=LONG_SMOOTH_SECONDS,
-                   get_action_from_model=get_action_from_model)
+  from jetlink.openpilot.joining import JoiningModelState
+  from jetlink.openpilot.model_state import JetlinkModelState, Trips
+  from openpilot.jetlink_shadow_bench import (JetlinkTCP, model_hw, output_reply_count,
+                                               packed_scalars)
+  from openpilot.selfdrive.modeld.parse_model_outputs import Parser
+
+  warp = _CameraWarp(cam_w, cam_h)
 
   def connect(should_stop=None):
+    if should_stop is not None and should_stop():
+      raise InterruptedError('Zoompilot join stopped')
     if not tether_route_valid():
-      raise ConnectionError('Android USB tether unavailable')
-    client = JetlinkClient.open_tcp(HOST, PORT, deadline=3.0, name='xnor-modeld')
+      raise ConnectionError('USB tether lost while connecting to custom XNOR APK')
+    peer = JetlinkTCP(HOST, PORT, timeout=3.0)
     try:
-      hello = client.hello(timeout=5.0)
-      if hello.get('loaded') != SHA256:
-        raise RuntimeError('Tensor G6 does not have the validated LS2 model loaded')
-      spec = client.ensure_engine(SHA256, NBYTES, frame_skip=4, build_timeout=20.0,
-                                  should_stop=should_stop or (lambda: False))
-      if spec.sha256 != SHA256 or spec.model_hw != MODEL_HW or spec.output_shapes.get('outputs') != (1, 18452):
-        raise RuntimeError('Unexpected LS2 output specification')
-      return client, spec
+      hello = peer.hello(usb_link=True)
+      # This is the Android APK's proven UDP frame channel; don't silently
+      # substitute stock Jetlink/TCP when the custom endpoint is absent.
+      peer.enable_datagrams(hello)
+      peer.udp_send_mode = 'sendmmsg'
+      spec = peer.load_existing(wait=20.0)
+      validate_spec(spec)
+      if tuple(model_hw(spec)) != MODEL_HW or output_reply_count(spec) != REPLY_FLOATS:
+        raise ValueError('Pixel model geometry or reply length mismatch')
+      return _PixelSession(peer, spec), spec
     except Exception:
-      client.close()
+      peer.close()
       raise
 
-  def build(client, spec):
-    return JetlinkModelState(client, spec, warp, face=face, log=cloudlog,
-                             event=lambda *args, **kwargs: None)
+  class _Remote(JetlinkModelState):
+    """XNOR framing/output atop Zoompilot's tested hold/demotion policy.
 
+    Reuses JetlinkModelState._note_hold rather than introducing a separate
+    fallback threshold or selector. JoiningModelState owns all handovers.
+    """
+    def __init__(self, client: _PixelSession, spec: dict):
+      self.client, self._manifest = client, spec
+      # Zoompilot runtime records read spec.sha256 and checkpoint as attributes.
+      self.spec = SimpleNamespace(sha256=MODEL_SHA, checkpoint="XNOR Tensor G6 LS2")
+      self.chestnut = True
+      self.lat_delay = 0.0
+      self.PLANPLUS_CONTROL = 1.0
+      self.vision_input_names = ['img', 'big_img']
+      self.parser = Parser()
+      self.prev_desire = np.zeros(8, dtype=np.float32)
+      self._frame_id = 0
+      self._holds = deque()
+      self._holds_in_a_row = 0
+      self.behind = None
+      self.held = False
+      self.trips = Trips()
+      self._last = None
+      self._last_frame = 0
+      self._last_received_ns = 0
+      self.client.activate()
+
+    def _get_recent(self, wait_s: float):
+      pipe = self.client.pipeline
+      try:
+        pipe.expire_udp(older_than_s=PENDING_EXPIRE_S)
+        if pipe.error is not None:
+          raise RuntimeError('Custom XNOR reply thread failed') from pipe.error
+        results = pipe.drain()
+        if not results and wait_s > 0:
+          try:
+            results = [pipe.results.get(timeout=wait_s)] + pipe.drain()
+          except queue.Empty:
+            results = []
+        for item, timing, received_ns in results:
+          frame = int(item['frame_id'])
+          vector = timing.get('_output')
+          if vector is None:
+            raise ValueError('Custom Pixel reply missing raw predictions')
+          parsed = extract_prediction_heads(vector, self._manifest, self.parser)
+          if frame > self._last_frame:
+            self._last = parsed
+            self._last_frame = frame
+            self._last_received_ns = received_ns
+        if pipe.error is not None:
+          raise RuntimeError('Custom XNOR reply thread stopped') from pipe.error
+      except Exception:
+        self.client.dead = True
+        raise
+      if self._last is None:
+        return None
+      age_ns = time.perf_counter_ns() - self._last_received_ns
+      frame_lag = self._frame_id - self._last_frame
+      if age_ns < 0 or age_ns > MAX_REPLY_AGE_NS or not 0 <= frame_lag <= MAX_REPLY_FRAME_LAG:
+        return None
+      return self._last
+
+    def run(self, bufs, transforms, inputs, after_enqueue=None):
+      started = time.perf_counter()
+      image = warp.run(bufs, transforms)
+      desire = np.asarray(inputs['desire_pulse'], dtype=np.float32).reshape(-1)
+      traffic = np.asarray(inputs['traffic_convention'], dtype=np.float32).reshape(-1)
+      action_t = np.asarray(inputs['action_t'], dtype=np.float32).reshape(-1)
+      if desire.size != 8 or traffic.size != 2 or action_t.size != 2:
+        raise ValueError('Modeld scalar input dimensions differ from Pixel LS2')
+      # Keep the same zeroed 'none' desire bit as stock ModelState.run().
+      desire[0] = 0.0
+      pulse = np.where(desire - self.prev_desire > 0.99, desire, 0.0)
+      self.prev_desire[:] = desire
+      packed = np.concatenate((pulse, traffic, action_t)).astype(np.float32)
+      self._frame_id += 1
+      # Zoompilot publishes the small model from the previous frame on a
+      # transient late reply; our input still enters the Pixel's recurrent
+      # queue at 20 Hz, with at most two outstanding requests.
+      sent = self.client.pipeline.send_frame({'frame_id': self._frame_id}, image,
+                                              packed, reset=(self._frame_id == 1))
+      if after_enqueue is not None:
+        after_enqueue()
+      candidate = self._get_recent(WAIT_FIRST_S if self._last is None else WAIT_FRAME_S)
+      if candidate is None:
+        if self._last is None:
+          raise TimeoutError('Pixel did not return its first LS2 prediction in deadline')
+        # Stale data must not be published as a fresh driving plan.
+        raise TimeoutError('Pixel prediction exceeded frame-age/deadline budget')
+      self.held = self._last_frame < self._frame_id or not sent
+      self.behind = self._note_hold(self.held)  # Zoompilot's own fallback rule
+      self.trips.record(time.perf_counter() - started, 0)
+      if self.behind:
+        self.client.dead = True
+      return candidate
+
+    def close(self):
+      self.client.close()
+
+  def build(client: _PixelSession, spec: dict):
+    return _Remote(client, spec)
+
+  # No other server, USB gadget owner, or separate publish service is added.
+  cloudlog.warning('xnor-jetlink: custom APK join staged, local model remains active until Zoompilot handover')
   return JoiningModelState(_Small(small_model), connect, build,
                            reset_small=lambda: _reset_small(small_model),
                            progress=_Progress(), log=cloudlog,
                            in_control=_Control.in_control,
-                           name=lambda sha: 'LS2 ' + str(sha)[:12])
+                           name=lambda sha: 'XNOR LS2 Tensor G6')
 
 
 def handed_over(model) -> bool:
   count = getattr(model, 'handovers', None)
   if count is None:
     return False
-  old = getattr(handed_over, '_count', None)
+  previous = getattr(handed_over, '_count', None)
   handed_over._count = count
-  return old is not None and old != count
+  return previous is not None and previous != count
 
 
 def remote_active(model) -> bool:
