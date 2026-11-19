@@ -455,7 +455,6 @@ def attach(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
                            name=lambda sha: 'XNOR LS2 Tensor G6')
 
 
-
 def prepare_only(model, bufs, transforms, inputs):
   """Retain the local model's dropped-frame warp/queue update while joining.
 
