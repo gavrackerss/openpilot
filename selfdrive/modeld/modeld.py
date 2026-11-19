@@ -51,6 +51,19 @@ assert IMG_QUEUE_SHAPE[0] == 30
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
     plan = model_output['plan'][0]
+    if 'action' in model_output:
+      # The combined LS2 model carries a direct action head, as Zoompilot's
+      # modeld does. Never use the local plan-to-curvature function for it.
+      remote_action = np.asarray(model_output['action']).reshape(-1)
+      if remote_action.size < 2 or not np.isfinite(remote_action[:2]).all():
+        raise ValueError('Jetlink model action head invalid')
+      _accel, should_stop = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0],
+                                                plan[:, Plan.ACCELERATION][:, 0], ModelConstants.T_IDXS,
+                                                action_t=long_action_t)
+      return log.ModelDataV2.Action(desiredCurvature=float(remote_action[0]) / max(2.5, v_ego) ** 2,
+                                    desiredAcceleration=float(remote_action[1]),
+                                    shouldStop=bool(should_stop))
+
     desired_accel, should_stop = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
                                                      plan[:,Plan.ACCELERATION][:,0],
                                                      ModelConstants.T_IDXS,
@@ -271,6 +284,15 @@ def main(demo=False):
   if use_extra_client:
     cloudlog.warning(f"connected extra cam with buffer size: {vipc_client_extra.buffer_len} ({vipc_client_extra.width} x {vipc_client_extra.height})")
 
+  # Zoompilot's JoiningModelState keeps the selected small model resident,
+  # and is used only when the independent XNOR authority gate is armed.
+  # Import is deliberately deferred: no Jetlink checkout must still boot modeld.
+  from openpilot import jetlink_authority
+  try:
+    model = jetlink_authority.attach(model, vipc_client_main.width, vipc_client_main.height)
+  except Exception:
+    cloudlog.exception('jetlink-authority unavailable; retaining local modeld')
+
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry"])
   sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay"])
@@ -376,10 +398,22 @@ def main(demo=False):
     inputs:dict[str, np.ndarray] = {
       'desire_pulse': vec_desire,
       'traffic_convention': traffic_convention,
+      # Zoompilot's JetlinkModelState uses the same action-delay scalars.
+      'action_t': np.array([lat_delay + 1.5 * DT_MDL, long_delay + 1.5 * DT_MDL], dtype=np.float32),
     }
 
     mt1 = time.perf_counter()
-    model_output = model.run(bufs, transforms, inputs, prepare_only)
+    if hasattr(model, 'handovers'):
+      # Legacy small model uses run(..., prepare_only). The Zoompilot joined
+      # model instead uses run(..., after_enqueue), with the small adapter
+      # translating that signature without changing its normal execution.
+      model.frame_drop_ratio = frame_drop_ratio
+      model_output = None if prepare_only else model.run(bufs, transforms, inputs)
+      if jetlink_authority.handed_over(model):
+        run_count = 0
+        frame_dropped_filter.x = 0.
+    else:
+      model_output = model.run(bufs, transforms, inputs, prepare_only)
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
 
