@@ -446,10 +446,20 @@ def attach(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
   def build(client: _PixelSession, spec: dict):
     return _Remote(client, spec)
 
+  # The tinygrad runner uses input_queues, not stock img_queues. Capture
+  # Zoompilot's native reset JIT before entering modeld's realtime frame loop,
+  # preserving buffer identities and avoiding compilation on a failure frame.
+  # A failed reset preparation aborts the join, leaving the local model intact.
+  if runner == 'tinygrad':
+    from jetlink.openpilot.warp import prepare_reset
+    reset_small = prepare_reset(small_model)
+  else:
+    reset_small = lambda: _reset_small(small_model)
+
   # No other server, USB gadget owner, or separate publish service is added.
   cloudlog.warning('xnor-jetlink: %s local model with custom Pixel join staged; Zoompilot owns handover', runner)
   return JoiningModelState(_Small(small_model), connect, build,
-                           reset_small=lambda: _reset_small(small_model),
+                           reset_small=reset_small,
                            progress=_Progress(), log=cloudlog,
                            in_control=_Control.in_control,
                            name=lambda sha: 'XNOR LS2 Tensor G6')
