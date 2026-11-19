@@ -260,7 +260,8 @@ def main(demo=False):
   sentry.set_tag("daemon", PROCESS_NAME)
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
-  config_realtime_process(7, 54)
+  # Configure realtime only after constructing the local model and starting
+  # Zoompilot's background joiner: its worker threads must not inherit FIFO 54.
 
   # visionipc clients
   while True:
@@ -287,6 +288,14 @@ def main(demo=False):
 
   cloudlog.warning("loading model")
   model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height)
+  # V5.9.2: reuse the same custom-Pixel Zoompilot joining/fallback seam
+  # as stock modeld, without changing the selected local tinygrad bundle.
+  from openpilot import jetlink_authority
+  try:
+    model = jetlink_authority.attach(model, vipc_client_main.width, vipc_client_main.height, runner="tinygrad")
+  except Exception:
+    cloudlog.exception("Jetlink custom Pixel join unavailable; keeping the selected local model")
+  config_realtime_process(7, 54)
   cloudlog.warning("models loaded, modeld starting")
 
   # messaging
@@ -396,13 +405,26 @@ def main(demo=False):
     inputs:dict[str, np.ndarray] = {
       model.desire_key: vec_desire,
       'traffic_convention': traffic_convention,
+      # V5.9.2: remote LS2 needs delay scalars; the selected local bundle
+      # ignores extra keys that are not in its compiled input dictionary.
+      'action_t': np.array([lat_delay + 1.5 * DT_MDL, long_delay + 1.5 * DT_MDL], dtype=np.float32),
     }
 
     if 'lateral_control_params' in model.numpy_inputs:
       inputs['lateral_control_params'] = np.array([v_ego, lat_delay], dtype=np.float32)
 
     mt1 = time.perf_counter()
-    model_output = model.run(bufs, transforms, inputs, prepare_only)
+    if hasattr(model, 'handovers'):
+      # Zoompilot owns all handovers, lag demotions and reconnections. Preserve
+      # the existing local runner's prepare_only semantics when Jetlink is off.
+      model.frame_drop_ratio = frame_drop_ratio
+      model_output = (jetlink_authority.prepare_only(model, bufs, transforms, inputs) if prepare_only
+                      else model.run(bufs, transforms, inputs))
+      if jetlink_authority.handed_over(model):
+        run_count = 0
+        frame_dropped_filter.x = 0.
+    else:
+      model_output = model.run(bufs, transforms, inputs, prepare_only)
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
 
@@ -416,6 +438,7 @@ def main(demo=False):
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen, meta_constants)
+      modelv2_send.modelV2.big = jetlink_authority.remote_active(model)
 
       desire_state = modelv2_send.modelV2.meta.desireState
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
