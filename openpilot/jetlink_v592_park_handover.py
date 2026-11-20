@@ -47,27 +47,55 @@ def emit(event, **fields):
 
 
 class StateNotReady(RuntimeError):
-  """A subscription has not yet received current, valid vehicle-state data."""
+  """The read-only test has not received fresh *valid* state on a subscription."""
+  def __init__(self, missing, details):
+    self.missing = tuple(missing)
+    self.details = details
+    super().__init__(f'State unavailable/invalid: {details}')
+
+
+def _service_issue(sm, name):
+  """Report precisely why the service was rejected (not just 'stale')."""
+  seen = bool(sm.seen.get(name, False))
+  alive = bool(sm.alive.get(name, False))
+  valid = bool(sm.valid.get(name, False))
+  if not seen:
+    return 'not_received'
+  if not alive:
+    return 'stale'
+  if not valid:
+    return 'invalid_message'
+  return None
 
 
 def require_parked(sm) -> None:
-  """Fail closed on stale messages, motion, invalid CAN, gear or controls."""
+  """Read real car state every time; no test frame without valid calibration."""
   sm.update(0)
-  names = ['deviceState', 'carState', 'carControl', 'selfdriveState',
-           'roadCameraState', 'liveCalibration']
-  missing = [n for n in names if not sm.seen.get(n, False) or not sm.alive.get(n, False)
-             or not sm.valid.get(n, False)]
-  if missing:
-    raise StateNotReady(f'Live vehicle-state prerequisite missing/stale: {missing}')
-  ok, reason = parked(sm)
-  if not ok:
-    raise RuntimeError(f'Park/controls guard: {reason}')
-  if not bool(sm['carState'].canValid):
-    raise RuntimeError('Vehicle CAN is invalid; parked handover test stopped')
-  if not bool(sm['deviceState'].started):
-    raise RuntimeError('Comma is offroad, no live onroad cameras')
+
+  # Abort immediately on *any observed* motion, gear change or engagement,
+  # even if a slower ancillary service (liveCalibration at 4Hz) is invalid.
+  if sm.seen.get('carState', False):
+    ok, reason = parked(sm)
+    if not ok:
+      raise RuntimeError(f'Park/controls guard: {reason}')
+    if not bool(sm['carState'].canValid):
+      raise RuntimeError('Vehicle CAN is invalid; parked handover test stopped')
+  if sm.seen.get('carControl', False) and (
+      bool(sm['carControl'].enabled) or bool(getattr(sm['carControl'], 'latActive', False))):
+    raise RuntimeError('Vehicle controls engaged; parked test stopped')
+  if sm.seen.get('selfdriveState', False) and (
+      bool(sm['selfdriveState'].enabled) or bool(sm['selfdriveState'].active)):
+    raise RuntimeError('Openpilot engaged; parked test stopped')
+  if sm.seen.get('deviceState', False) and not bool(sm['deviceState'].started):
+    raise RuntimeError('Comma transitioned offroad; parked test stopped')
   if any((jet.ARM.exists(), jet.QUALIFIED.exists())):
     raise RuntimeError('Remote authority marker unexpectedly present; stop isolated test')
+
+  names = ['deviceState', 'carState', 'carControl', 'selfdriveState',
+           'roadCameraState', 'liveCalibration']
+  problems = {name: issue for name in names if (issue := _service_issue(sm, name))}
+  if problems:
+    raise StateNotReady(list(problems), problems)
 
 
 def await_fresh_parked_state(sm, timeout_s: float, phase: str):
@@ -79,6 +107,7 @@ def await_fresh_parked_state(sm, timeout_s: float, phase: str):
   """
   until = time.monotonic() + timeout_s
   last_error = None
+  previous = None
   while not STOP:
     try:
       require_parked(sm)
@@ -87,9 +116,12 @@ def await_fresh_parked_state(sm, timeout_s: float, phase: str):
       return
     except StateNotReady as exc:
       last_error = exc
+      if exc.details != previous:
+        emit('waiting_for_valid_vehicle_state', phase=phase, issues=exc.details)
+        previous = exc.details
       if time.monotonic() >= until:
         raise RuntimeError(f'{phase}: {last_error} after {timeout_s:g}s') from exc
-      sm.update(100)  # await messages rather than treating a single poll as definitive
+      sm.update(100)  # allow 4Hz calibration to arrive before using a frame
   raise RuntimeError('Parked handover test interrupted')
 
 
@@ -223,11 +255,26 @@ def test(args):
   saw_ready = saw_big = lost_link = saw_fallback = False
   started = time.monotonic()
   last_frame = None
+  calibration_recoveries = 0
   try:
     for event in camera:
       if STOP or time.monotonic() - started > args.seconds:
         break
-      require_parked(sm)
+      try:
+        require_parked(sm)
+      except StateNotReady as exc:
+        # Only ancillary 4Hz calibration can be retried here. Never postpone
+        # a loss of the safety-critical car/controls/device state.
+        if any(name != 'liveCalibration' for name in exc.missing):
+          raise RuntimeError(f'Critical vehicle state disappeared: {exc.details}') from exc
+        calibration_recoveries += 1
+        if calibration_recoveries > 5:
+          raise RuntimeError('Repeated liveCalibration losses (more than five); stopped') from exc
+        emit('live_calibration_refresh', count=calibration_recoveries,
+             frame=event[0], issues=exc.details)
+        await_fresh_parked_state(sm, min(args.state_timeout, 5.0),
+                                 phase='calibration_recovered')
+        continue  # discard the old camera frame; never evaluate stale warp
       _, _, received_ns, main_buf, wide_buf, _, _, rhd, skew = event
       if skew > 40:
         continue
@@ -294,6 +341,7 @@ def test(args):
               'runner': runner, 'ready': saw_ready, 'remote_frames': remote_frames,
               'local_frames': local_frames, 'fallback_frames': fallback_frames,
               'socket_loss_triggered': lost_link, 'fallback': saw_fallback,
+              'calibration_recoveries': calibration_recoveries,
               'handovers': model.handovers, 'last_frame': last_frame,
               'elapsed_s': round(time.monotonic() - started, 2),
               'authority_published': False, 'model_messages_published': 0}
