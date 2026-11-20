@@ -147,8 +147,31 @@ class _Progress:
 
 class _Small:
   """Map existing split-model run(...,prepare_only) onto Zoompilot's model."""
-  def __init__(self, model):
+  def __init__(self, model, *, normalize_stock_views=False):
     object.__setattr__(self, '_model', model)
+    # The stock update_imgs TinyJit was captured with RESHAPE(BUFFER)
+    # queue views. After a local warp, ModelState.run() stores its
+    # NOOP(BUFFER)-backed outputs; the next invocation otherwise fails
+    # TinyJit's expected_input_info comparison.
+    # Save the ORIGINAL view descriptor, not its allocated GPU buffer.
+    object.__setattr__(self, '_queue_view_templates',
+                       {name: tensor.uop for name, tensor in model.img_queues.items()}
+                       if normalize_stock_views else {})
+
+  def _normalize_img_queue_views(self):
+    # Preserve each NEW realized GPU buffer and its image history while
+    # restoring the captured RESHAPE view layout. No Tensor.assign(),
+    # allocation, GPU memory copy or JIT compilation occurs here.
+    for name, view in self._queue_view_templates.items():
+      tensor = self._model.img_queues[name]
+      if tuple(tensor.shape) != tuple(view.shape) or tensor.dtype != view.dtype:
+        raise RuntimeError(f'Stock local image queue changed shape/dtype: {name}')
+      if view.op.name != 'RESHAPE' or len(view.src) != 1:
+        raise RuntimeError(f'Unexpected stock TinyJit queue view: {name} {view.op}')
+      current_buffer = tensor.uop.base
+      if current_buffer.buffer is None or not current_buffer.buffer.is_initialized():
+        raise RuntimeError(f'Uninitialized image queue buffer: {name}')
+      tensor.uop = view.replace(src=(current_buffer,))
 
   def __getattr__(self, name):
     return getattr(self._model, name)
@@ -158,6 +181,7 @@ class _Small:
 
   def run(self, bufs, transforms, inputs, after_enqueue=None):
     value = self._model.run(bufs, transforms, inputs, False)
+    self._normalize_img_queue_views()
     if after_enqueue is not None:
       after_enqueue()
     return value
@@ -473,7 +497,7 @@ def attach(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
 
   # No other server, USB gadget owner, or separate publish service is added.
   cloudlog.warning('xnor-jetlink: %s local model with custom Pixel join staged; Zoompilot owns handover', runner)
-  return JoiningModelState(_Small(small_model), connect, build,
+  return JoiningModelState(_Small(small_model, normalize_stock_views=(runner == 'stock')), connect, build,
                            reset_small=reset_small,
                            progress=_Progress(), log=cloudlog,
                            in_control=_Control.in_control,
@@ -490,7 +514,9 @@ def prepare_only(model, bufs, transforms, inputs):
   """
   small = getattr(model, '_small', None)
   if small is not None and getattr(model, '_active', None) is small:
-    return small._model.run(bufs, transforms, inputs, True)
+    result = small._model.run(bufs, transforms, inputs, True)
+    small._normalize_img_queue_views()
+    return result
   return None
 
 
