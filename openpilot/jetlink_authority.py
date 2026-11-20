@@ -282,11 +282,26 @@ class _Control:
 
 
 def _reset_small(small):
-  """Reset the already allocated local recurrent buffers after fallback."""
+  """Zero the local model's existing history without invalidating TinyJit inputs.
+
+  Stock modeld's update_imgs is a precompiled TinyJit. Tensor.assign(0)
+  rewrites the image queue's UOp (RESHAPE(NOOP) -> NOOP), even when the
+  underlying GPU buffer remains the same. The next warp call then raises
+  JitError: expected_input_info mismatch. Copying zero bytes into the
+  ALREADY-ALLOCATED QCOM buffer leaves its UOp, shape and identity intact.
+
+  QCOMAllocator._copyin synchronizes the GPU before writing the buffer.
+  This is used only on demotion, not on every model frame.
+  """
   for a in small.numpy_inputs.values():
     a.fill(0)
   for t in small.img_queues.values():
-    t.assign(0).realize()
+    buf = t.uop.base.buffer
+    if not buf.is_initialized():
+      raise RuntimeError('Local image history GPU buffer not initialized during fallback')
+    # Buffer.copyin writes to the same GPU allocation. Crucially, it does
+    # not mutate the Tensor.uop captured as an argument by update_imgs.
+    buf.copyin(memoryview(bytearray(buf.nbytes)))
   small.full_input_queues.reset()
   small.prev_desire.fill(0)
 

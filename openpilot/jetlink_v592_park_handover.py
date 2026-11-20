@@ -15,7 +15,6 @@ from pathlib import Path
 import signal
 import sys
 import time
-from types import SimpleNamespace
 
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 os.environ.setdefault('OMP_NUM_THREADS', '1')
@@ -29,7 +28,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot import jetlink_authority as jet
-from openpilot.jetlink_shadow_bench import camera_frames, parked
+from openpilot.jetlink_shadow_bench import parked
 from jetlink.comma import gadget
 
 RESULT_DIR = Path('/data/jetlink_v592_park_test')
@@ -54,22 +53,44 @@ class StateNotReady(RuntimeError):
     super().__init__(f'State unavailable/invalid: {details}')
 
 
-def _service_issue(sm, name):
-  """Report precisely why the service was rejected (not just 'stale')."""
-  seen = bool(sm.seen.get(name, False))
-  alive = bool(sm.alive.get(name, False))
-  valid = bool(sm.valid.get(name, False))
-  if not seen:
+# SubMaster.alive uses 10 / service frequency. At carState's 100 Hz this
+# is just 100 ms; a live 20 Hz camera/GPU process can trip that repeatedly.
+# Use explicit MONOTONIC last-message ages instead: never trust an unbounded
+# cached value, and never infer Park from an absent or invalid message.
+MAX_STATE_AGE_S = {
+  'carState': 0.75,
+  'carControl': 0.75,
+  'selfdriveState': 0.75,
+  'roadCameraState': 1.0,
+  'liveCalibration': 3.0,  # normally 4 Hz
+  'deviceState': 3.0,
+}
+
+
+def _service_issue(sm, name, calibration_snapshot=None):
+  """Check message *age* and validity separately; keep vehicle guards strict.
+
+  Only this isolated parked test may use a previously fresh VALID 3-angle
+  calibration when a newer liveCalibration envelope is flagged invalid by
+  calibrationd's upstream cameraOdometry/carState health check. In that case
+  the service must still be sending fresh messages. No other invalid service
+  is accepted, and no cached vehicle speed, gear or control state is allowed.
+  """
+  if not sm.seen.get(name, False):
     return 'not_received'
-  if not alive:
+  rx_time = sm.recv_time.get(name, 0.)
+  age = time.monotonic() - rx_time
+  if rx_time <= 0 or age < 0 or age > MAX_STATE_AGE_S[name]:
     return 'stale'
-  if not valid:
+  if not sm.valid.get(name, False):
+    if name == 'liveCalibration' and calibration_snapshot is not None:
+      return None  # Fresh message; only the previously validated angles are used
     return 'invalid_message'
   return None
 
 
-def require_parked(sm) -> None:
-  """Read real car state every time; no test frame without valid calibration."""
+def require_parked(sm, calibration_snapshot=None) -> None:
+  """Read real vehicle state every time; optionally use validated parked RPY."""
   sm.update(0)
 
   # Abort immediately on *any observed* motion, gear change or engagement,
@@ -93,12 +114,12 @@ def require_parked(sm) -> None:
 
   names = ['deviceState', 'carState', 'carControl', 'selfdriveState',
            'roadCameraState', 'liveCalibration']
-  problems = {name: issue for name in names if (issue := _service_issue(sm, name))}
+  problems = {name: issue for name in names if (issue := _service_issue(sm, name, calibration_snapshot))}
   if problems:
     raise StateNotReady(list(problems), problems)
 
 
-def await_fresh_parked_state(sm, timeout_s: float, phase: str):
+def await_fresh_parked_state(sm, timeout_s: float, phase: str, calibration_snapshot=None):
   """Resubscribe patiently after blocking camera/model startup, never bypassing safety checks.
 
   Only StateNotReady is retryable. Motion, gear, engagement, invalid CAN,
@@ -110,7 +131,7 @@ def await_fresh_parked_state(sm, timeout_s: float, phase: str):
   previous = None
   while not STOP:
     try:
-      require_parked(sm)
+      require_parked(sm, calibration_snapshot)
       emit('vehicle_state_verified', phase=phase, gear=str(sm['carState'].gearShifter),
            speed=float(sm['carState'].vEgo), can_valid=True)
       return
@@ -143,6 +164,120 @@ def identify_runner() -> str:
   return found[0]
 
 
+
+
+def synchronized_live_camera_frames(state_sm, *, timeout_s: float):
+  """Capture a *matched, current* road/wide camera pair, never replay backlog.
+
+  The former test created VisionIPC subscribers BEFORE taking 5 seconds to load
+  another local model. The road stream was conflated but wide was queued, hence
+  the persistent 5700ms skew. This test needs only current frames, so both
+  subscribers conflate; the older timestamp is advanced until aligned.
+  Production modeld is not modified and remains the only vehicle publisher.
+  """
+  streams = VisionIpcClient.available_streams('camerad', block=False)
+  if not streams:
+    raise RuntimeError('No live camerad streams')
+  main_wide = VisionStreamType.VISION_STREAM_ROAD not in streams
+  main_stream = VisionStreamType.VISION_STREAM_WIDE_ROAD if main_wide else VisionStreamType.VISION_STREAM_ROAD
+  both = VisionStreamType.VISION_STREAM_ROAD in streams and VisionStreamType.VISION_STREAM_WIDE_ROAD in streams
+  # BOTH conflate to newest. A slow local inference must not create a wide
+  # camera backlog that makes all subsequent pairs permanently several seconds
+  # apart. Timestamp matching, not queue position, establishes synchrony.
+  main = VisionIpcClient('camerad', main_stream, True)
+  extra = VisionIpcClient('camerad', VisionStreamType.VISION_STREAM_WIDE_ROAD, True) if both else None
+  clients = [(main, 'road'), (extra, 'wide')]
+  connected_at = time.monotonic()
+  for client, name in clients:
+    if client is None:
+      continue
+    while not STOP and not client.connect(False):
+      if time.monotonic() - connected_at > timeout_s:
+        raise RuntimeError(f'Camera stream {name} connection timed out')
+      time.sleep(.1)
+  if STOP:
+    return
+
+  tolerance_ns = 25_000_000  # same 25ms allowance used by stock modeld pairing
+  max_pair_reads = 80
+  max_pair_seconds = 4.0
+  max_image_age_ns = 200_000_000
+  last_main_id = -1
+  unmatched_since = time.monotonic()
+  aged = 0
+  paired = 0
+
+  while not STOP:
+    road_buf = main.recv()
+    if road_buf is None:
+      raise RuntimeError('Road stream ended')
+    road_ts, road_eof, road_id = int(main.timestamp_sof), int(main.timestamp_eof), int(main.frame_id)
+    wide_buf, wide_ts, wide_eof = road_buf, road_ts, road_eof
+    road_advance = wide_advance = 0
+    if extra is not None:
+      wide_buf = extra.recv()
+      if wide_buf is None:
+        raise RuntimeError('Wide stream ended')
+      wide_ts, wide_eof = int(extra.timestamp_sof), int(extra.timestamp_eof)
+      initial_skew_ms = abs(road_ts-wide_ts)/1e6
+      begun = time.monotonic()
+      while abs(road_ts-wide_ts) > tolerance_ns and not STOP:
+        if time.monotonic() - begun > max_pair_seconds or road_advance + wide_advance >= max_pair_reads:
+          raise RuntimeError(
+            'Unable to synchronize current camera frames: '
+            f'initial_skew_ms={initial_skew_ms:.2f}, '
+            f'current_skew_ms={abs(road_ts-wide_ts)/1e6:.2f}, '
+            f'road_drained={road_advance}, wide_drained={wide_advance}')
+        # Check vehicle movement/engagement even when pairing blocks.
+        if (road_advance + wide_advance) % 8 == 0:
+          state_sm.update(0)
+          if state_sm.seen.get('carState', False):
+            safe, reason = parked(state_sm)
+            if not safe or not bool(state_sm['carState'].canValid):
+              raise RuntimeError(f'Vehicle not stationary/valid while synchronizing: {reason}')
+          if state_sm.seen.get('deviceState', False) and not bool(state_sm['deviceState'].started):
+            raise RuntimeError('Comma transitioned offroad during camera pairing')
+        if road_ts > wide_ts:
+          wide_buf = extra.recv()
+          if wide_buf is None:
+            raise RuntimeError('Wide stream ended while synchronizing')
+          wide_ts, wide_eof = int(extra.timestamp_sof), int(extra.timestamp_eof)
+          wide_advance += 1
+        else:
+          road_buf = main.recv()
+          if road_buf is None:
+            raise RuntimeError('Road stream ended while synchronizing')
+          road_ts, road_eof, road_id = int(main.timestamp_sof), int(main.timestamp_eof), int(main.frame_id)
+          road_advance += 1
+      if STOP:
+        return
+      if (road_advance + wide_advance) > 0 and paired == 0:
+        emit('camera_pair_aligned', initial_skew_ms=round(initial_skew_ms, 3),
+             aligned_skew_ms=round(abs(road_ts-wide_ts)/1e6, 3),
+             skipped_road=road_advance, skipped_wide=wide_advance,
+             frame=road_id)
+    if road_id <= last_main_id:
+      continue
+    last_main_id = road_id
+    # Check BOTH source capture times, not the receiver arrival timestamp.
+    now_ns = time.monotonic_ns()
+    ages = ((now_ns-road_eof)/1e6, (now_ns-wide_eof)/1e6)
+    if any(not (-100. <= age <= 200.) for age in ages):
+      aged += 1
+      if aged <= 2 or aged % 20 == 0:
+        emit('camera_source_not_current', frame=road_id,
+             road_age_ms=round(ages[0],2), wide_age_ms=round(ages[1],2), count=aged)
+      if time.monotonic() - unmatched_since > 8.0:
+        raise RuntimeError('No current synchronized camera pair available after 8 seconds')
+      continue
+    paired += 1
+    unmatched_since = time.monotonic()
+    # Output tuple matches the V5.9.2 parked test's existing loop. The buffers
+    # are the actual VisionIPC bytes used by the local model and Pixel adapter.
+    yield (road_id, road_eof, time.monotonic_ns(), road_buf, wide_buf,
+           None, None, False, abs(road_ts-wide_ts)/1e6)
+
+
 def select_local_model(runner, w, h):
   if runner == 'stock':
     from openpilot.selfdrive.modeld.modeld import ModelState
@@ -170,8 +305,8 @@ def build_inputs(model, runner, sm, cp):
   return inputs, lat_delay, long_delay
 
 
-def live_transforms(sm, main_wide):
-  calib = np.asarray(sm['liveCalibration'].rpyCalib, dtype=np.float32)
+def live_transforms(sm, main_wide, calibration_snapshot=None):
+  calib = np.asarray(calibration_snapshot if calibration_snapshot is not None else sm['liveCalibration'].rpyCalib, dtype=np.float32)
   if calib.size != 3 or not np.isfinite(calib).all():
     raise RuntimeError('Missing finite live camera calibration')
   dev = str(sm['deviceState'].deviceType)
@@ -211,6 +346,12 @@ def test(args):
   sm = messaging.SubMaster(['deviceState', 'carState', 'carControl', 'selfdriveState',
                             'roadCameraState', 'liveCalibration', 'liveDelay', 'driverMonitoringState'])
   await_fresh_parked_state(sm, args.state_timeout, phase='initial_vehicle_state')
+  # Freeze only camera pose while the car stays Parked. This RPY came from
+  # a freshly received, valid liveCalibration message; no guessed geometry.
+  calibration_snapshot = np.asarray(sm['liveCalibration'].rpyCalib, dtype=np.float32).reshape(-1).copy()
+  if calibration_snapshot.shape != (3,) or not np.isfinite(calibration_snapshot).all():
+    raise RuntimeError('Initial valid camera calibration has unusable angles')
+  emit('parked_calibration_snapshot_verified', rpy=calibration_snapshot.tolist())
 
   runner = identify_runner() if args.runner == 'auto' else args.runner
   active_streams = VisionIpcClient.available_streams('camerad', block=False)
@@ -220,20 +361,23 @@ def test(args):
   if main_wide and VisionStreamType.VISION_STREAM_WIDE_ROAD not in active_streams:
     raise RuntimeError('No usable road or wide camera stream')
 
-  # Reuse V5.8's validated VisionIPC *capture*, which reads actual live road
-  # camera NV12 and enforces Park on every camera event. The V5.9.2 adapter
-  # performs its OWN image warp and live model inference in this test.
-  cam_args = SimpleNamespace(camera_timeout=args.state_timeout, onroad_shadow=False)
-  camera = camera_frames(cam_args, {'input_shapes': {'new_img': [2, 6, 128, 256]}})
+  # Subscribe just long enough to obtain the actual camera dimensions.
+  # Close BEFORE loading the local model (which takes ~5s), otherwise queued
+  # wide-camera frames become ~5s older than the conflated road frames.
+  camera = synchronized_live_camera_frames(sm, timeout_s=args.state_timeout)
   first = next(camera)
   b0, b1 = first[3], first[4]
-  emit('cameras_ready', runner=runner, road=[b0.width, b0.height], wide=[b1.width, b1.height])
-  await_fresh_parked_state(sm, args.state_timeout, phase='after_camera_connection')
+  cam_w, cam_h = b0.width, b0.height
+  emit('cameras_ready', runner=runner, road=[cam_w, cam_h],
+       wide=[b1.width, b1.height], first_pair_skew_ms=round(first[8], 3))
+  camera.close()
+  del first, b0, b1
+  await_fresh_parked_state(sm, args.state_timeout, phase='after_camera_connection', calibration_snapshot=calibration_snapshot)
 
   emit('loading_real_local_model', runner=runner)
-  local = select_local_model(runner, b0.width, b0.height)
+  local = select_local_model(runner, cam_w, cam_h)
   emit('local_model_loaded')
-  await_fresh_parked_state(sm, args.state_timeout, phase='after_local_model_load')
+  await_fresh_parked_state(sm, args.state_timeout, phase='after_local_model_load', calibration_snapshot=calibration_snapshot)
   cp_bytes = Params().get('CarParams', block=False)
   if not cp_bytes:
     raise RuntimeError('CarParams unavailable; cannot use live actuator delays')
@@ -244,7 +388,7 @@ def test(args):
   saved = jet.enabled
   jet.enabled = lambda: True
   try:
-    model = jet.attach(local, b0.width, b0.height, runner=runner)
+    model = jet.attach(local, cam_w, cam_h, runner=runner)
   finally:
     jet.enabled = saved
   if not hasattr(model, 'big_model_state'):
@@ -256,31 +400,94 @@ def test(args):
   started = time.monotonic()
   last_frame = None
   calibration_recoveries = 0
+  critical_recoveries = 0
+  invalid_calibration_envelopes = 0
+  camera_too_old = 0
+  camera_skew_skips = 0
+  first_run_logged = False
+
+  # The stand-alone parked test already validates the *same* live SubMaster
+  # immediately before each inference frame. Feed that observed engagement
+  # state to Zoompilot rather than opening a second high-frequency subscriber
+  # with a separate, 100ms 'alive' threshold. This change is test-process-only.
+  # If this process has not just verified fresh state, refuse the swap.
+  last_verified_at = [0.0]
+  def test_in_control():
+    if STOP or time.monotonic() - last_verified_at[0] > 0.35:
+      return True
+    if any(_service_issue(sm, n, calibration_snapshot) for n in MAX_STATE_AGE_S):
+      return True
+    return (abs(float(sm['carState'].vEgo)) >= 0.2
+            or str(sm['carState'].gearShifter).split('.')[-1].lower() not in ('park', 'p')
+            or not bool(sm['carState'].canValid)
+            or not bool(sm['deviceState'].started)
+            or bool(sm['carControl'].enabled)
+            or bool(getattr(sm['carControl'], 'latActive', False))
+            or bool(sm['selfdriveState'].enabled)
+            or bool(sm['selfdriveState'].active))
+  model._ask_in_control = test_in_control
+
+  # This NEW subscriber starts after model loading, so neither camera can
+  # accumulate a several-second backlog during initialization.
+  camera = synchronized_live_camera_frames(sm, timeout_s=args.state_timeout)
   try:
+    first_live_pair = next(camera)
+    emit('fresh_camera_pair_after_model_load', frame=first_live_pair[0],
+         pair_skew_ms=round(first_live_pair[8], 3))
+    del first_live_pair
     for event in camera:
       if STOP or time.monotonic() - started > args.seconds:
         break
+      # Do not discard the camera frame just because the vehicle-state
+      # subscriber needs a fresh message. The parked generator may produce
+      # frames only every ~0.8 s (observed on this comma, while a second
+      # model is resident); carState's 0.75 s age budget is slightly shorter.
+      # Dropping that frame on each successful refresh caused infinite zero-
+      # inference loops, and eventually the Pixel's idle keepalive timed out.
       try:
-        require_parked(sm)
+        require_parked(sm, calibration_snapshot)
       except StateNotReady as exc:
-        # Only ancillary 4Hz calibration can be retried here. Never postpone
-        # a loss of the safety-critical car/controls/device state.
-        if any(name != 'liveCalibration' for name in exc.missing):
-          raise RuntimeError(f'Critical vehicle state disappeared: {exc.details}') from exc
-        calibration_recoveries += 1
-        if calibration_recoveries > 5:
-          raise RuntimeError('Repeated liveCalibration losses (more than five); stopped') from exc
-        emit('live_calibration_refresh', count=calibration_recoveries,
-             frame=event[0], issues=exc.details)
-        await_fresh_parked_state(sm, min(args.state_timeout, 5.0),
-                                 phase='calibration_recovered')
-        continue  # discard the old camera frame; never evaluate stale warp
+        critical = any(name != 'liveCalibration' for name in exc.missing)
+        if critical:
+          critical_recoveries += 1
+          if critical_recoveries <= 3 or critical_recoveries % 10 == 0:
+            emit('vehicle_state_refresh', count=critical_recoveries,
+                 frame=event[0], issues=exc.details)
+        else:
+          calibration_recoveries += 1
+          if calibration_recoveries <= 3 or calibration_recoveries % 10 == 0:
+            emit('live_calibration_refresh', count=calibration_recoveries,
+                 frame=event[0], issues=exc.details)
+        await_fresh_parked_state(sm, min(args.state_timeout, 3.0),
+                                 phase='critical_state_recovered' if critical else 'calibration_recovered',
+                                 calibration_snapshot=calibration_snapshot)
+        # Vehicle state is freshly verified NOW. We may use THIS SAME camera
+        # frame if it is still recent and synchronised, otherwise skip it.
+        # Never infer using old vehicle state or old camera buffers.
+        if critical_recoveries == 1 or calibration_recoveries == 1:
+          emit('parked_frame_state_recovered', frame=event[0],
+               camera_age_ms=round((time.monotonic_ns()-event[2])/1e6,1))
+      last_verified_at[0] = time.monotonic()
+      # An invalid calibration envelope can be caused by calibrationd's
+      # upstream health check. We use only the initial valid RPY, and only
+      # while fresh Park/CAN/control checks continue to pass.
+      if sm.seen.get('liveCalibration', False) and not sm.valid.get('liveCalibration', False):
+        invalid_calibration_envelopes += 1
+        if invalid_calibration_envelopes == 1:
+          emit('using_verified_parked_calibration_snapshot', reason='fresh_calibration_envelope_invalid')
       _, _, received_ns, main_buf, wide_buf, _, _, rhd, skew = event
       if skew > 40:
+        camera_skew_skips += 1
+        if camera_skew_skips <= 2 or camera_skew_skips % 10 == 0:
+          emit('camera_pair_skipped', count=camera_skew_skips, skew_ms=round(skew, 2), frame=event[0])
         continue
-      if time.monotonic_ns() - received_ns > 200_000_000:
+      age_ns = time.monotonic_ns() - received_ns
+      if age_ns < 0 or age_ns > 200_000_000:
+        camera_too_old += 1
+        if camera_too_old <= 2 or camera_too_old % 10 == 0:
+          emit('camera_age_skipped', count=camera_too_old, age_ms=round(age_ns/1e6, 1), frame=event[0])
         continue
-      main_mat, wide_mat = live_transforms(sm, main_wide)
+      main_mat, wide_mat = live_transforms(sm, main_wide, calibration_snapshot)
       keys = model.vision_input_names
       bufs = {n: wide_buf if 'big' in n else main_buf for n in keys}
       transforms = {n: wide_mat if 'big' in n else main_mat for n in keys}
@@ -290,6 +497,10 @@ def test(args):
         model.lat_delay = lat_delay - float(model.LAT_SMOOTH_SECONDS)
       model.frame_drop_ratio = 0.0  # Test handover only; not latency qualification
       before = bool(jet.remote_active(model))
+      if not first_run_logged:
+        emit('first_real_local_inference_start', frame=event[0],
+             camera_age_ms=round((time.monotonic_ns()-received_ns)/1e6, 1))
+        first_run_logged = True
       output = model.run(bufs, transforms, inputs)
       if output is None:
         raise ValueError('Real model returned None during handover test')
@@ -342,12 +553,16 @@ def test(args):
               'local_frames': local_frames, 'fallback_frames': fallback_frames,
               'socket_loss_triggered': lost_link, 'fallback': saw_fallback,
               'calibration_recoveries': calibration_recoveries,
+              'vehicle_state_refreshes': critical_recoveries,
+              'invalid_calibration_envelopes': invalid_calibration_envelopes,
+              'camera_age_skips': camera_too_old, 'camera_pair_skips': camera_skew_skips,
               'handovers': model.handovers, 'last_frame': last_frame,
               'elapsed_s': round(time.monotonic() - started, 2),
               'authority_published': False, 'model_messages_published': 0}
     emit('result', **result)
     return 0 if result['passed'] else 2
   finally:
+    camera.close()
     model.close()
     try:
       isolated_status.unlink(missing_ok=True)
