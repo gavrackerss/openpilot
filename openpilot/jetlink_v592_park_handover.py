@@ -46,22 +46,51 @@ def emit(event, **fields):
   print(json.dumps(rec, default=str, allow_nan=False), flush=True)
 
 
+class StateNotReady(RuntimeError):
+  """A subscription has not yet received current, valid vehicle-state data."""
+
+
 def require_parked(sm) -> None:
-  """Fail closed on missing/stale messages, motion, gear, or controls."""
+  """Fail closed on stale messages, motion, invalid CAN, gear or controls."""
   sm.update(0)
   names = ['deviceState', 'carState', 'carControl', 'selfdriveState',
            'roadCameraState', 'liveCalibration']
   missing = [n for n in names if not sm.seen.get(n, False) or not sm.alive.get(n, False)
              or not sm.valid.get(n, False)]
   if missing:
-    raise RuntimeError(f'Live vehicle-state prerequisite missing/stale: {missing}')
+    raise StateNotReady(f'Live vehicle-state prerequisite missing/stale: {missing}')
   ok, reason = parked(sm)
   if not ok:
     raise RuntimeError(f'Park/controls guard: {reason}')
+  if not bool(sm['carState'].canValid):
+    raise RuntimeError('Vehicle CAN is invalid; parked handover test stopped')
   if not bool(sm['deviceState'].started):
     raise RuntimeError('Comma is offroad, no live onroad cameras')
   if any((jet.ARM.exists(), jet.QUALIFIED.exists())):
     raise RuntimeError('Remote authority marker unexpectedly present; stop isolated test')
+
+
+def await_fresh_parked_state(sm, timeout_s: float, phase: str):
+  """Resubscribe patiently after blocking camera/model startup, never bypassing safety checks.
+
+  Only StateNotReady is retryable. Motion, gear, engagement, invalid CAN,
+  an offroad transition and authority-marker presence fail immediately.
+  The frame loop below still calls require_parked for *each live frame*.
+  """
+  until = time.monotonic() + timeout_s
+  last_error = None
+  while not STOP:
+    try:
+      require_parked(sm)
+      emit('vehicle_state_verified', phase=phase, gear=str(sm['carState'].gearShifter),
+           speed=float(sm['carState'].vEgo), can_valid=True)
+      return
+    except StateNotReady as exc:
+      last_error = exc
+      if time.monotonic() >= until:
+        raise RuntimeError(f'{phase}: {last_error} after {timeout_s:g}s') from exc
+      sm.update(100)  # await messages rather than treating a single poll as definitive
+  raise RuntimeError('Parked handover test interrupted')
 
 
 def identify_runner() -> str:
@@ -149,15 +178,7 @@ def test(args):
 
   sm = messaging.SubMaster(['deviceState', 'carState', 'carControl', 'selfdriveState',
                             'roadCameraState', 'liveCalibration', 'liveDelay', 'driverMonitoringState'])
-  deadline = time.monotonic() + args.state_timeout
-  while time.monotonic() < deadline and not STOP:
-    try:
-      require_parked(sm)
-      break
-    except RuntimeError:
-      time.sleep(0.2)
-  else:
-    require_parked(sm)  # show actual missing state, never bypass
+  await_fresh_parked_state(sm, args.state_timeout, phase='initial_vehicle_state')
 
   runner = identify_runner() if args.runner == 'auto' else args.runner
   active_streams = VisionIpcClient.available_streams('camerad', block=False)
@@ -175,12 +196,12 @@ def test(args):
   first = next(camera)
   b0, b1 = first[3], first[4]
   emit('cameras_ready', runner=runner, road=[b0.width, b0.height], wide=[b1.width, b1.height])
-  require_parked(sm)
+  await_fresh_parked_state(sm, args.state_timeout, phase='after_camera_connection')
 
   emit('loading_real_local_model', runner=runner)
   local = select_local_model(runner, b0.width, b0.height)
   emit('local_model_loaded')
-  require_parked(sm)
+  await_fresh_parked_state(sm, args.state_timeout, phase='after_local_model_load')
   cp_bytes = Params().get('CarParams', block=False)
   if not cp_bytes:
     raise RuntimeError('CarParams unavailable; cannot use live actuator delays')
