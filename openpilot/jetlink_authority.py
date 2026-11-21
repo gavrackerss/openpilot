@@ -419,22 +419,32 @@ def attach(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
         pipe.expire_udp(older_than_s=PENDING_EXPIRE_S)
         if pipe.error is not None:
           raise RuntimeError('Custom XNOR reply thread failed') from pipe.error
+        # Keep the EXISTING frame deadline. An N-1 reply may appear just
+        # after sending N; it must not terminate N's wait prematurely.
+        deadline = time.monotonic() + max(0.0, wait_s)
         results = pipe.drain()
-        if not results and wait_s > 0:
+        while True:
+          for item, timing, received_ns in results:
+            frame = int(item['frame_id'])
+            vector = timing.get('_output')
+            if vector is None:
+              raise ValueError('Custom Pixel reply missing raw predictions')
+            parsed = extract_prediction_heads(vector, self._manifest, self.parser)
+            if frame > self._last_frame:
+              self._last = parsed
+              self._last_frame = frame
+              self._last_received_ns = received_ns
+          if pipe.error is not None:
+            raise RuntimeError('Custom XNOR reply thread stopped') from pipe.error
+          if self._last_frame >= self._frame_id:
+            break  # A fresh prediction for this frame is available.
+          remaining = deadline - time.monotonic()
+          if remaining <= 0:
+            break  # Preserve the original 37/85 ms upper bound.
           try:
-            results = [pipe.results.get(timeout=wait_s)] + pipe.drain()
+            results = [pipe.results.get(timeout=remaining)] + pipe.drain()
           except queue.Empty:
-            results = []
-        for item, timing, received_ns in results:
-          frame = int(item['frame_id'])
-          vector = timing.get('_output')
-          if vector is None:
-            raise ValueError('Custom Pixel reply missing raw predictions')
-          parsed = extract_prediction_heads(vector, self._manifest, self.parser)
-          if frame > self._last_frame:
-            self._last = parsed
-            self._last_frame = frame
-            self._last_received_ns = received_ns
+            break
         if pipe.error is not None:
           raise RuntimeError('Custom XNOR reply thread stopped') from pipe.error
       except Exception:
