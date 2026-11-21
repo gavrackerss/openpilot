@@ -17,6 +17,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
+SHADOW_VERSION = '5.9.2-passive-LS2-observer'
 CONFIG = Path('/data/jetlink_xnor')
 ARM = CONFIG / 'ONROAD_SHADOW_ENABLED'
 STATUS_DIR = Path('/data/jetlink_shadow_onroad')
@@ -33,13 +34,18 @@ _stopping = False
 def write_status(**values):
   STATUS_DIR.mkdir(parents=True, exist_ok=True)
   data = {'time_utc': datetime.now(timezone.utc).isoformat(),
-          'shadow_only': True, 'controls_affected': False, **values}
+          'shadow_only': True, 'controls_affected': False,
+          'test_version': SHADOW_VERSION, **values}
   tmp = STATUS_DIR / f'.status-{os.getpid()}.tmp'
   tmp.write_text(json.dumps(data, indent=2) + '\n')
   os.replace(tmp, STATUS)
 
 
 def armed():
+  # A passive observation must never compete for the single Pixel endpoint
+  # when any remote-authority gate has been staged.
+  if (CONFIG / 'AUTHORITY_ENABLED').exists() or (CONFIG / 'LS2_AUTHORITY_QUALIFIED').exists():
+    return False
   try:
     age = time.time() - ARM.stat().st_mtime
     return 0 <= age <= MAX_ARM_AGE_S
