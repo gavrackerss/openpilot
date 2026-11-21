@@ -24,7 +24,7 @@ import numpy as np
 
 from openpilot.common.swaglog import cloudlog
 
-VERSION = '5.9.2-xnor-custom-pixel-dual-modeld'
+VERSION = '5.9.3-xnor-native-jetlink-ls2'
 MODEL_SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
 MODEL_NBYTES = 768749892
 MODEL_HW = (128, 256)
@@ -339,187 +339,12 @@ def _reset_small(small):
 
 
 def attach(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
-  """Connect the custom APK to upstream Zoompilot's joining/fallback model."""
+  """Native JetlinkClient/JetlinkModelState; stock remains the fallback."""
   if not enabled():
     return small_model
-  if runner not in ('stock', 'tinygrad'):
-    raise ValueError(f'Unsupported local runner: {runner}')
+  from openpilot.jetlink_native_authority import attach_native
+  return attach_native(small_model, cam_w, cam_h, runner=runner)
 
-  from jetlink.openpilot.joining import JoiningModelState
-  from jetlink.openpilot.model_state import JetlinkModelState, Trips
-  from openpilot.jetlink_shadow_bench import (JetlinkTCP, model_hw, output_reply_count,
-                                               packed_scalars)
-  from openpilot.selfdrive.modeld.parse_model_outputs import Parser
-  # LS2's action semantics are independent of the selected local bundle.
-  # Reuse the stock LS2 plan-to-action implementation for the remote output.
-  ls2_action = None
-  if runner == 'tinygrad':
-    from openpilot.selfdrive.modeld.modeld import get_action_from_model as ls2_action
-
-  warp = _CameraWarp(cam_w, cam_h)
-
-  def connect(should_stop=None):
-    if should_stop is not None and should_stop():
-      raise InterruptedError('Zoompilot join stopped')
-    if not tether_route_valid():
-      raise ConnectionError('USB tether lost while connecting to custom XNOR APK')
-    peer = JetlinkTCP(HOST, PORT, timeout=3.0)
-    try:
-      hello = peer.hello(usb_link=True)
-      # This is the Android APK's proven UDP frame channel; don't silently
-      # substitute stock Jetlink/TCP when the custom endpoint is absent.
-      peer.enable_datagrams(hello)
-      peer.udp_send_mode = 'sendmmsg'
-      spec = peer.load_existing(wait=20.0)
-      validate_spec(spec)
-      if tuple(model_hw(spec)) != MODEL_HW or output_reply_count(spec) != REPLY_FLOATS:
-        raise ValueError('Pixel model geometry or reply length mismatch')
-      return _PixelSession(peer, spec), spec
-    except Exception:
-      peer.close()
-      raise
-
-  class _Remote(JetlinkModelState):
-    """XNOR framing/output atop Zoompilot's tested hold/demotion policy.
-
-    Reuses JetlinkModelState._note_hold rather than introducing a separate
-    fallback threshold or selector. JoiningModelState owns all handovers.
-    """
-    def __init__(self, client: _PixelSession, spec: dict):
-      self.client, self._manifest = client, spec
-      # Zoompilot runtime records read spec.sha256 and checkpoint as attributes.
-      self.spec = SimpleNamespace(sha256=MODEL_SHA, checkpoint="XNOR Tensor G6 LS2")
-      self.chestnut = True
-      self.lat_delay = 0.0
-      self.PLANPLUS_CONTROL = 1.0
-      # During the swap, modeld has already assembled the current frame's
-      # buffers using the *local* bundle's keys. Keep those keys stable.
-      self.vision_input_names = list(getattr(small_model, 'vision_input_names', ('img', 'big_img')))
-      self.constants = getattr(small_model, 'constants', None)
-      self.LAT_SMOOTH_SECONDS = getattr(small_model, 'LAT_SMOOTH_SECONDS', 0.)
-      self.LONG_SMOOTH_SECONDS = getattr(small_model, 'LONG_SMOOTH_SECONDS', 0.)
-      if ls2_action is not None:
-        self.get_action_from_model = ls2_action
-      self.parser = Parser()
-      self.prev_desire = np.zeros(8, dtype=np.float32)
-      self._frame_id = 0
-      self._holds = deque()
-      self._holds_in_a_row = 0
-      self.behind = None
-      self.held = False
-      self.trips = Trips()
-      self._last = None
-      self._last_frame = 0
-      self._last_received_ns = 0
-      self.client.activate()
-
-    def _get_recent(self, wait_s: float):
-      pipe = self.client.pipeline
-      try:
-        pipe.expire_udp(older_than_s=PENDING_EXPIRE_S)
-        if pipe.error is not None:
-          raise RuntimeError('Custom XNOR reply thread failed') from pipe.error
-        # Keep the EXISTING frame deadline. An N-1 reply may appear just
-        # after sending N; it must not terminate N's wait prematurely.
-        deadline = time.monotonic() + max(0.0, wait_s)
-        results = pipe.drain()
-        while True:
-          for item, timing, received_ns in results:
-            frame = int(item['frame_id'])
-            vector = timing.get('_output')
-            if vector is None:
-              raise ValueError('Custom Pixel reply missing raw predictions')
-            parsed = extract_prediction_heads(vector, self._manifest, self.parser)
-            if frame > self._last_frame:
-              self._last = parsed
-              self._last_frame = frame
-              self._last_received_ns = received_ns
-          if pipe.error is not None:
-            raise RuntimeError('Custom XNOR reply thread stopped') from pipe.error
-          if self._last_frame >= self._frame_id:
-            break  # A fresh prediction for this frame is available.
-          remaining = deadline - time.monotonic()
-          if remaining <= 0:
-            break  # Preserve the original 37/85 ms upper bound.
-          try:
-            results = [pipe.results.get(timeout=remaining)] + pipe.drain()
-          except queue.Empty:
-            break
-        if pipe.error is not None:
-          raise RuntimeError('Custom XNOR reply thread stopped') from pipe.error
-      except Exception:
-        self.client.dead = True
-        raise
-      if self._last is None:
-        return None
-      age_ns = time.perf_counter_ns() - self._last_received_ns
-      frame_lag = self._frame_id - self._last_frame
-      if age_ns < 0 or age_ns > MAX_REPLY_AGE_NS or not 0 <= frame_lag <= MAX_REPLY_FRAME_LAG:
-        return None
-      return self._last
-
-    def run(self, bufs, transforms, inputs, after_enqueue=None):
-      started = time.perf_counter()
-      image = warp.run(bufs, transforms)
-      # Stock modeld uses desire_pulse; selected tinygrad bundles may use
-      # 'desire'. This only adapts input names, not remote output semantics.
-      desire_key = next((k for k in inputs if k.startswith('desire')), None)
-      if desire_key is None:
-        raise ValueError('Local modeld did not supply a desire input')
-      desire = np.asarray(inputs[desire_key], dtype=np.float32).reshape(-1)
-      traffic = np.asarray(inputs['traffic_convention'], dtype=np.float32).reshape(-1)
-      action_t = np.asarray(inputs['action_t'], dtype=np.float32).reshape(-1)
-      if desire.size != 8 or traffic.size != 2 or action_t.size != 2:
-        raise ValueError('Modeld scalar input dimensions differ from Pixel LS2')
-      # Keep the same zeroed 'none' desire bit as stock ModelState.run().
-      desire[0] = 0.0
-      pulse = np.where(desire - self.prev_desire > 0.99, desire, 0.0)
-      self.prev_desire[:] = desire
-      packed = np.concatenate((pulse, traffic, action_t)).astype(np.float32)
-      self._frame_id += 1
-      # Zoompilot publishes the small model from the previous frame on a
-      # transient late reply; our input still enters the Pixel's recurrent
-      # queue at 20 Hz, with at most two outstanding requests.
-      sent = self.client.pipeline.send_frame({'frame_id': self._frame_id}, image,
-                                              packed, reset=(self._frame_id == 1))
-      if after_enqueue is not None:
-        after_enqueue()
-      candidate = self._get_recent(WAIT_FIRST_S if self._last is None else WAIT_FRAME_S)
-      if candidate is None:
-        if self._last is None:
-          raise TimeoutError('Pixel did not return its first LS2 prediction in deadline')
-        # Stale data must not be published as a fresh driving plan.
-        raise TimeoutError('Pixel prediction exceeded frame-age/deadline budget')
-      self.held = self._last_frame < self._frame_id or not sent
-      self.behind = self._note_hold(self.held)  # Zoompilot's own fallback rule
-      self.trips.record(time.perf_counter() - started, 0)
-      if self.behind:
-        self.client.dead = True
-      return candidate
-
-    def close(self):
-      self.client.close()
-
-  def build(client: _PixelSession, spec: dict):
-    return _Remote(client, spec)
-
-  # The tinygrad runner uses input_queues, not stock img_queues. Capture
-  # Zoompilot's native reset JIT before entering modeld's realtime frame loop,
-  # preserving buffer identities and avoiding compilation on a failure frame.
-  # A failed reset preparation aborts the join, leaving the local model intact.
-  if runner == 'tinygrad':
-    from jetlink.openpilot.warp import prepare_reset
-    reset_small = prepare_reset(small_model)
-  else:
-    reset_small = lambda: _reset_small(small_model)
-
-  # No other server, USB gadget owner, or separate publish service is added.
-  cloudlog.warning('xnor-jetlink: %s local model with custom Pixel join staged; Zoompilot owns handover', runner)
-  return JoiningModelState(_Small(small_model, normalize_stock_views=(runner == 'stock')), connect, build,
-                           reset_small=reset_small,
-                           progress=_Progress(), log=cloudlog,
-                           in_control=_Control.in_control,
-                           name=lambda sha: 'XNOR LS2 Tensor G6')
 
 
 def prepare_only(model, bufs, transforms, inputs):
