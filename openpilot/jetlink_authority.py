@@ -167,14 +167,19 @@ class _Small:
       tensor = self._model.img_queues[name]
       if tuple(tensor.shape) != tuple(view.shape) or tensor.dtype != view.dtype:
         raise RuntimeError(f'Stock local image queue changed shape/dtype: {name}')
-      if view.op.name != 'RESHAPE' or len(view.src) != 1:
-        raise RuntimeError(f'Unexpected stock TinyJit queue view: {name} {view.op}')
+      # On this Tinygrad version RESHAPE has TWO source UOps:
+      # the underlying image queue buffer and the symbolic shape descriptor.
+      # The latter must be preserved to match update_imgs' captured TinyJit
+      # expected_input_info (RESHAPE(NOOP, VCONST)).
+      if view.op.name != 'RESHAPE' or len(view.src) != 2:
+        raise RuntimeError(f'Unexpected stock TinyJit queue view: {name} {view.op} ({len(view.src)} sources)')
       original_buffer = tensor.uop.base
       if original_buffer.buffer is None or not original_buffer.buffer.is_initialized():
         raise RuntimeError(f'Uninitialized image queue buffer: {name}')
-      # UOp.replace keeps the original RESHAPE descriptor/shape, while
-      # pointing to the real latest buffer containing the shifted history.
-      tensor.uop = view.replace(src=(original_buffer,))
+      # Keep the NEW realized GPU allocation and its contents, but restore
+      # the original RESHAPE operation and its identical shape descriptor.
+      # Do not mutate original_buffer or invoke Tensor.assign/realize here.
+      tensor.uop = view.replace(src=(original_buffer, view.src[1]))
 
   def __getattr__(self, name):
     return getattr(self._model, name)
