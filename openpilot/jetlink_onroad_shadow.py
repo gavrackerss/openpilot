@@ -17,7 +17,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
-SHADOW_VERSION = '5.9.2-passive-LS2-observer'
+SHADOW_VERSION = '5.9.2-final-lean-180s'
 CONFIG = Path('/data/jetlink_xnor')
 ARM = CONFIG / 'ONROAD_SHADOW_ENABLED'
 STATUS_DIR = Path('/data/jetlink_shadow_onroad')
@@ -25,8 +25,8 @@ STATUS = STATUS_DIR / 'status.json'
 RUNS = STATUS_DIR / 'runs'
 MAX_ARM_AGE_S = 7200
 RUN_SECONDS = 180  # Fits 5000-entry Android V0.5 timing ring; qualify 180s gate
-MAX_RUNS = 5        # A bounded 15-minute on-road observation, not indefinite
-RETRY_S = 15
+MAX_RUNS = 1        # One final, bounded 180-second on-road shadow session
+RETRY_S = 0
 _child: subprocess.Popen | None = None
 _stopping = False
 
@@ -35,7 +35,7 @@ def write_status(**values):
   STATUS_DIR.mkdir(parents=True, exist_ok=True)
   data = {'time_utc': datetime.now(timezone.utc).isoformat(),
           'shadow_only': True, 'controls_affected': False,
-          'test_version': SHADOW_VERSION, **values}
+          'test_version': SHADOW_VERSION, 'timing_only': True, **values}
   tmp = STATUS_DIR / f'.status-{os.getpid()}.tmp'
   tmp.write_text(json.dumps(data, indent=2) + '\n')
   os.replace(tmp, STATUS)
@@ -85,29 +85,42 @@ def summary_for(path):
     return None
   try:
     data = json.loads(summary.read_text())
-    return {'frames': data.get('counts', {}).get('frames'),
-            'fps': data.get('counts', {}).get('achieved_fps'),
-            'reply_cycle_p95_ms': data.get('cadence_gate', {}).get('reply_cycle_p95_ms'),
-            'capture_to_reply_p95_ms': data.get('timing_ms', {}).get('capture_to_reply_ms', {}).get('p95'),
+    counts = data.get('counts') or {}
+    gate = data.get('cadence_gate') or {}
+    timings = data.get('timing_ms') or {}
+    meta = data.get('meta') or {}
+    return {'frames': counts.get('frames'),
+            'fps': counts.get('achieved_fps'),
+            'sent_fps': counts.get('sent_fps'),
+            'elapsed_s': counts.get('elapsed_s'),
+            'cadence_gate_pass': gate.get('pass'),
+            'reply_cycle_p95_ms': gate.get('reply_cycle_p95_ms'),
+            'capture_to_reply_p95_ms': (timings.get('capture_to_reply_ms') or {}).get('p95'),
+            'camera_pair_skew_p95_ms': (timings.get('camera_pair_skew_ms') or {}).get('p95'),
+            'camera_pair_skew_over_10ms': counts.get('camera_pair_skew_over_10ms'),
+            'udp_lost_replies': counts.get('udp_lost_replies'),
+            'udp_expired_replies': counts.get('udp_expired_replies'),
+            'usb0_dropped_tx': (meta.get('usb0_counters_delta') or {}).get('tx_dropped'),
             'errors': data.get('errors'),
-            'no_control': data.get('meta', {}).get('no_control'),
-            'onroad_shadow': data.get('meta', {}).get('onroad_shadow'),
-            'comparison_matched_frames': (data.get('prediction_comparison') or {}).get('matched_frames'),
-            'full_numerical_parity_verified': False,
-            'shadow_prediction_samples': (data.get('shadow_prediction_feed') or {}).get('valid_predictions'),
-            'shadow_prediction_invalid': (data.get('shadow_prediction_feed') or {}).get('invalid_predictions')}
+            'no_control': meta.get('no_control'),
+            'onroad_shadow': meta.get('onroad_shadow'),
+            'full_numerical_parity_verified': False}
   except (ValueError, OSError, AttributeError):
     return None
 
 
 def runner_args(path, host):
+  # FINAL lightweight on-road shadow. No sampled LS2 tensor copies, no local
+  # geometry comparator, no per-prediction JSONL or live latest file, and no
+  # phone stage-trace export.  Only the benchmark's in-memory timing counters
+  # and its once-at-end frames.csv/summary.json are retained.
+  # Retain tested UDP sendmsg transport to isolate instrumentation overhead.
   return [sys.executable, '-m', 'openpilot.jetlink_shadow_bench',
           '--mode', 'camera', '--onroad-shadow', '--pacing', 'timer',
           '--seconds', str(RUN_SECONDS), '--rate', '20', '--pipeline-depth', '2',
           '--transport', 'udp', '--udp-payload-bytes', '65000',
           '--udp-send-mode', 'sendmsg', '--reply-guard-ms', '0',
-          '--dump-outputs-every', '20', '--compare-local',
-          '--shadow-predictions', '--prediction-every', '2', '--fetch-stage-report',
+          '--dump-outputs-every', '0', '--progress-seconds', '0',
           '--host', host, '--output', str(path)]
 
 
@@ -172,10 +185,12 @@ def main():
       else:
         completed += 1
         failures = 0
-        time.sleep(2)
+        if idx < MAX_RUNS:
+          time.sleep(2)
     if not _stopping and completed >= MAX_RUNS:
       write_status(state='finished', completed_runs=completed,
-                   reason='Bounded on-road test completed. Re-arm for another drive.')
+                   reason='One bounded timing-only run completed; read summary.json for cadence gate.',
+                   output=str(path), log=str(log_path), stats=stats)
   except BaseException as exc:
     write_status(state='error', error=f'{type(exc).__name__}: {exc}')
     raise
