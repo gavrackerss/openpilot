@@ -80,7 +80,7 @@ class GateTests(unittest.TestCase):
             gate = G.eligible(root)
             (root / "ctm_evidence" / "numerical_parity.json").write_text("{}")
             self.assertFalse(G.eligible(root).allowed)
-            self.assertTrue(G.lease_alive(gate, root), "Lease only hashes the approval document; evidence changes require requalification on restart")
+            self.assertFalse(G.lease_alive(gate, root), "Evidence mutation must immediately revoke the CTM lease")
 
     def test_changed_approval_kills_active_lease(self):
         with TemporaryDirectory() as temp:
