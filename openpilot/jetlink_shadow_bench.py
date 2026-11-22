@@ -49,8 +49,13 @@ from datetime import datetime, timezone
 import numpy as np
 
 VERSION = '5.8-prediction-shadow-feed'
-SHA = '909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8'
-NBYTES = 768749892
+# Runtime selection for the read-only transport/parked benchmark only.
+# Production modeld/Zoompilot authority remains LS2-only until separately validated.
+MODEL_PROFILES = {
+  'ls2': ('909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8', 768749892),
+  'ctm': ('e8d821733be15ebe9e27498bc27ad8bbbd741980ece37d77f377294010b8ff28', 765950064),
+}
+SHA, NBYTES = MODEL_PROFILES['ls2']
 HEADER = struct.Struct('<IHHIIIQ4x')
 INFER_HEADER = struct.Struct('<II')
 INFER_REPLY = struct.Struct('<IIIII')
@@ -995,10 +1000,12 @@ def stall_analysis(rows, threshold_ms=80.):
 
 
 def bench(args):
+  global SHA, NBYTES
+  SHA, NBYTES = MODEL_PROFILES[args.model]
   output=Path(args.output).expanduser()
   output.mkdir(parents=True,exist_ok=False)
   meta={'version':VERSION,'mode':args.mode,'host':args.host,'port':args.port,'rate_requested_hz':args.rate,
-        'seconds_requested':args.seconds,'model_sha256':SHA,'no_control':True,'onroad_shadow':args.onroad_shadow,'cwd':os.getcwd(),
+        'seconds_requested':args.seconds,'model_profile':args.model,'model_sha256':SHA,'no_control':True,'onroad_shadow':args.onroad_shadow,'cwd':os.getcwd(),
         'pipeline_depth':args.pipeline_depth,'transport':args.transport,
         'udp_send_mode':args.udp_send_mode,
         'tcp_quickack':args.tcp_quickack,
@@ -1415,6 +1422,31 @@ def bench(args):
                'per-stage timestamp. Capture-to-reply is computed using comma capture clocks.'),
              'stall_analysis':stall_analysis(records),
              'gate_note':'A successful connected benchmark is not approval for model authority.'}
+    if args.model == 'ctm':
+      # This is the COMPLETE comma-side preprocessing start -> Jetlink reply
+      # interval, distinct from server inference and distinct from camera age.
+      # Pipelining can satisfy 20Hz throughput while per-frame latency exceeds
+      # 50 ms; never confuse cadence with end-to-end per-frame latency.
+      complete = [float(r['preprocess_plus_wire_ms']) for r in records
+                  if r.get('preprocess_plus_wire_ms') is not None]
+      captured = [float(r['capture_to_reply_ms']) for r in records
+                  if r.get('capture_to_reply_ms') is not None]
+      summary['ctm_parked_integration'] = {
+        'source_sha256': SHA,
+        'mode': 'non_publishing_read_only_shadow',
+        'complete_path_metric': 'preprocess_plus_wire_ms',
+        'complete_path_ms': pct(complete),
+        'complete_path_over_50_ms': sum(v > 50 for v in complete),
+        'complete_path_all_below_50_ms': bool(complete) and all(v <= 50 for v in complete),
+        'capture_to_reply_ms': pct(captured),
+        'capture_to_reply_over_50_ms': sum(v > 50 for v in captured),
+        'measured_frames': len(complete),
+        'authority_qualified': False,
+        'authority_enabled': False,
+        'full_numerical_parity_verified': False,
+        'phone_only_20hz_is_not_connected_20hz': True,
+        'note': '50 ms complete path excludes upstream camerad buffering; capture-to-reply includes it. Pipelined throughput is separate from single-frame latency.',
+      }
     (output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     print(json.dumps({'output':str(output),'counts':counts,'errors':errors,'timing_ms':summary['timing_ms']},indent=2),flush=True)
     return 0 if not errors and counts['frames'] else 1
@@ -1422,6 +1454,8 @@ def bench(args):
 
 def parse_args(argv=None):
   p=argparse.ArgumentParser(description=__doc__)
+  p.add_argument('--model', choices=('ls2', 'ctm'), default='ls2',
+                 help='Pinned phone source model: LS2 (default) or Cinque Terre Original (2026-09-04)')
   p.add_argument('--mode',choices=('synthetic','camera'),default='synthetic',help='camera: real NV12 frames, 2 cameras; synthetic: full-size Jetlink LS2 tensors')
   p.add_argument('--onroad-shadow',action='store_true',
                  help='PASSIVE observation only: allow real on-road camera frames, never publish predictions or control anything')
