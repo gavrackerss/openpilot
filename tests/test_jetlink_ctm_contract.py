@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Contract and fail-closed tests. No openpilot runtime, GPU or phone needed."""
-import copy
-from pathlib import Path
 import unittest
-from unittest.mock import patch, SimpleNamespace
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from openpilot import jetlink_ctm_contract as C
 from openpilot import jetlink_ctm_adapter as A
