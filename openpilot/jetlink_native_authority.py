@@ -124,8 +124,8 @@ class ExistingCameraWarp:
 def attach_native(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
   """Stage a native Jetlink model; Zoompilot owns all swaps and demotions."""
   from openpilot.jetlink_authority import (_Small, _Control, _Progress,
-                                             _reset_small, tether_route_valid,
-                                             HOST, PORT, MODEL_SHA, MODEL_NBYTES)
+                                             _reset_small, discover_phone,
+                                             PORT, MODEL_SHA, MODEL_NBYTES)
   from openpilot.common.swaglog import cloudlog
   from jetlink.client import JetlinkClient
   from jetlink.openpilot.joining import JoiningModelState
@@ -145,9 +145,8 @@ def attach_native(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock')
   def connect(should_stop=None):
     if should_stop is not None and should_stop():
       raise InterruptedError('Zoompilot join stopped')
-    if not tether_route_valid():
-      raise ConnectionError('Pixel must be reachable via verified usb0 route')
-    transport = _pixel_transport(HOST, PORT)
+    host = discover_phone()  # current phone USB-NCM gateway, verified usb0
+    transport = _pixel_transport(host, PORT)
     client = JetlinkClient(transport, deadline=JETLINK_FRAME_FAILURE_S,
                            name='XNOR-TensorG6-native-LS2', want_hidden=False)
     try:
