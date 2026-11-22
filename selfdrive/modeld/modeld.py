@@ -284,14 +284,30 @@ def main(demo=False):
   if use_extra_client:
     cloudlog.warning(f"connected extra cam with buffer size: {vipc_client_extra.buffer_len} ({vipc_client_extra.width} x {vipc_client_extra.height})")
 
-  # Zoompilot's JoiningModelState keeps the selected small model resident,
-  # and is used only when the independent XNOR authority gate is armed.
-  # Import is deliberately deferred: no Jetlink checkout must still boot modeld.
+  # A remote model is never selected from the on-screen model name alone.
+  # Two independent Zoompilot paths coexist. A specific CTM authority request
+  # takes precedence; if its qualification fails, LOCAL STOCK stays active,
+  # rather than silently selecting LS2. No marker means unchanged LS2 logic.
+  # The local model above is loaded and kept resident for every fallback.
   from openpilot import jetlink_authority
+  ctm_modeld_selected = False
   try:
-    model = jetlink_authority.attach(model, vipc_client_main.width, vipc_client_main.height)
+    from openpilot import jetlink_ctm_adapter
+    if jetlink_ctm_adapter.requested():
+      approval = jetlink_ctm_adapter.authority_gate()
+      if not approval.allowed:
+        cloudlog.error('CTM production selection rejected (%s); retaining local modeld', approval.reason)
+      else:
+        model = jetlink_ctm_adapter.attach_authority(model, vipc_client_main.width,
+                                                    vipc_client_main.height, runner='stock')
+        ctm_modeld_selected = bool(getattr(model, '_ctm_authority_selected', False))
+        if not ctm_modeld_selected:
+          raise RuntimeError('CTM production adapter failed to install expected joiner')
+        cloudlog.warning('CTM guarded modeld selected; local stock remains resident until actual Zoompilot handover')
+    else:
+      model = jetlink_authority.attach(model, vipc_client_main.width, vipc_client_main.height)
   except Exception:
-    cloudlog.exception('jetlink-authority unavailable; retaining local modeld')
+    cloudlog.exception('Remote modeld selection failed; retaining local modeld')
 
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry"])
@@ -427,8 +443,16 @@ def main(demo=False):
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen)
-      # Zoompilot's modelV2.big identifies the actual publisher on this frame.
+      # TRUE is the *actual* remote publisher on this frame. The joiner's
+      # 'selected' state alone does NOT mean CTM published or controlled.
       modelv2_send.modelV2.big = jetlink_authority.remote_active(model)
+      if ctm_modeld_selected:
+        now_ctm_remote = bool(modelv2_send.modelV2.big)
+        if getattr(main, '_ctm_was_remote', None) is None or main._ctm_was_remote != now_ctm_remote:
+          cloudlog.warning('CTM modelV2 publisher: %s (frame %d)',
+                           'Cinque Terre Tensor G6' if now_ctm_remote else 'local stock fallback',
+                           frame_id)
+          main._ctm_was_remote = now_ctm_remote
 
       desire_state = modelv2_send.modelV2.meta.desireState
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
