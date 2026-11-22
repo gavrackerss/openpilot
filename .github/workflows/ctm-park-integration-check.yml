@@ -1,4 +1,4 @@
-name: CTM parked-only Jetlink integration syntax and guard checks
+name: CTM guarded modeld and parked Jetlink regression checks
 on:
   push:
     branches: [xnor-dev]
@@ -8,9 +8,13 @@ on:
       - 'openpilot/jetlink_authority.py'
       - 'openpilot/jetlink_ctm_contract.py'
       - 'openpilot/jetlink_ctm_adapter.py'
+      - 'openpilot/jetlink_ctm_authority_gate.py'
+      - 'selfdrive/modeld/modeld.py'
+      - 'system/manager/process_config.py'
       - 'openpilot/jetlink_ctm_park_handover.py'
       - 'tools/run_jetlink_ctm_handover_park.sh'
       - 'tests/test_jetlink_ctm_contract.py'
+      - 'tests/test_jetlink_ctm_authority_gate.py'
       - 'tools/jetlink_ctm_markers.sh'
       - 'tools/run_jetlink_ctm_park.sh'
   workflow_dispatch:
@@ -25,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile openpilot/jetlink_shadow_bench.py openpilot/jetlink_authority.py
-          python3 -m py_compile openpilot/jetlink_ctm_contract.py openpilot/jetlink_ctm_adapter.py openpilot/jetlink_ctm_park_handover.py tests/test_jetlink_ctm_contract.py
+          python3 -m py_compile openpilot/jetlink_ctm_contract.py openpilot/jetlink_ctm_adapter.py openpilot/jetlink_ctm_authority_gate.py openpilot/jetlink_ctm_park_handover.py tests/test_jetlink_ctm_contract.py tests/test_jetlink_ctm_authority_gate.py selfdrive/modeld/modeld.py system/manager/process_config.py
           bash -n tools/jetlink_ctm_markers.sh
           bash -n tools/run_jetlink_ctm_park.sh
           bash -n tools/run_jetlink_ctm_handover_park.sh
@@ -50,10 +54,11 @@ jobs:
           assert '--fetch-stage-report' in parked
           print('CTM parked-only configuration and guards verified')
           PY
-      - name: CTM model spec, USB route and no-authority regression tests
+      - name: CTM contract, approvals, revocation and USB route regression tests
         run: |
           PYTHONPATH="$PWD" python3 -m unittest discover -s tests -p test_jetlink_ctm_contract.py -v
-      - name: Isolated-only CTM adapter wiring invariant
+          PYTHONPATH="$PWD" python3 -m unittest discover -s tests -p test_jetlink_ctm_authority_gate.py -v
+      - name: Guarded production selection and isolated parked adapter invariants
         run: |
           python3 - <<'PY'
           import ast
@@ -65,13 +70,24 @@ jobs:
           for content in (adapter, harness):
               ast.parse(content)
           assert "def attach_authority(" in adapter
-          assert "CTM authority is NOT QUALIFIED" in adapter
+          assert "CTM authority NOT QUALIFIED" in adapter
+          assert "lease_alive(approval)" in adapter
+          assert "GuardedCTMJoiner" in adapter
           assert "def attach_parked(" in adapter
           assert "JETLINK_CTM_ISOLATED_PARKED_TEST" in adapter
           assert "jet.attach_parked(local" in harness
           assert "model._active.client.t.close()" in harness
           assert "CTM_AUTHORITY_NOT_QUALIFIED" in launcher
           assert "CTM_AUTHORITY_ENABLED" in launcher
-          assert "jetlink_ctm_adapter" not in modeld, "CTM is not production-wired yet"
-          print("CTM adapter is restricted to independent non-publishing parked test")
+          assert "jetlink_ctm_adapter.requested()" in modeld, "Explicit CTM selection missing"
+          assert "jetlink_ctm_adapter.attach_authority(" in modeld
+          assert "model = jetlink_authority.attach(" in modeld, "LS2 path unexpectedly removed"
+          guard=Path("openpilot/jetlink_ctm_authority_gate.py").read_text()
+          assert "CTM_AUTHORITY_NOT_QUALIFIED" in guard
+          assert "CTM_AUTHORITY_STOP" in guard
+          assert "numerical_parity" in guard and "onroad_shadow" in guard and "parked_fallback" in guard
+          assert ".touch(" not in guard and ".write_text(" not in guard, "Gate must never grant itself approval"
+          config=Path("system/manager/process_config.py").read_text()
+          assert "os.path.isfile('/data/jetlink_xnor/CTM_AUTHORITY_ENABLED')" in config
+          print("CTM guarded modeld select/fallback; no automatic qualification or arm")
           PY
