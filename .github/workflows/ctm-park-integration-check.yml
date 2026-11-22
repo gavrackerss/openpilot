@@ -1,0 +1,45 @@
+name: CTM parked-only Jetlink integration syntax and guard checks
+on:
+  push:
+    branches: [xnor-dev]
+    paths:
+      - '.github/workflows/ctm-park-integration-check.yml'
+      - 'openpilot/jetlink_shadow_bench.py'
+      - 'openpilot/jetlink_authority.py'
+      - 'tools/jetlink_ctm_markers.sh'
+      - 'tools/run_jetlink_ctm_park.sh'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python and Bash syntax
+        run: |
+          set -euo pipefail
+          python3 -m py_compile openpilot/jetlink_shadow_bench.py openpilot/jetlink_authority.py
+          bash -n tools/jetlink_ctm_markers.sh
+          bash -n tools/run_jetlink_ctm_park.sh
+      - name: Exact CTM identity, 50ms telemetry and fail-closed authority markers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast
+          source=Path("openpilot/jetlink_shadow_bench.py").read_text()
+          ast.parse(source)
+          assert "'ctm': ('e8d821733be15ebe9e27498bc27ad8bbbd741980ece37d77f377294010b8ff28', 765950064)" in source
+          assert "--model', choices=('ls2', 'ctm')" in source
+          assert 'preprocess_plus_wire_ms' in source and 'complete_path_over_50_ms' in source
+          control=Path("openpilot/jetlink_authority.py").read_text()
+          assert "if Path('/data/jetlink_xnor/CTM_PARKED_TEST_ENABLED').exists():" in control
+          marker=Path("tools/jetlink_ctm_markers.sh").read_text()
+          parked=Path("tools/run_jetlink_ctm_park.sh").read_text()
+          for path in (marker, parked):
+              assert 'AUTHORITY_ENABLED' in path and 'LS2_AUTHORITY_QUALIFIED' in path and 'CTM_AUTHORITY_QUALIFIED' in path
+          assert '--model ctm --mode camera --pacing timer' in parked
+          assert '--seconds 180 --rate 20 --pipeline-depth 2' in parked
+          assert '--fetch-stage-report' in parked
+          print('CTM parked-only configuration and guards verified')
+          PY
