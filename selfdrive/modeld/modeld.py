@@ -60,8 +60,11 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
       _accel, should_stop = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0],
                                                 plan[:, Plan.ACCELERATION][:, 0], ModelConstants.T_IDXS,
                                                 action_t=long_action_t)
+      # Apply the same 0.3 s longitudinal smoothing used by the local model.
+      # Keep the existing LS2 plan-based shouldStop contract unchanged.
+      desired_accel = smooth_value(float(remote_action[1]), prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
       return log.ModelDataV2.Action(desiredCurvature=float(remote_action[0]) / max(2.5, v_ego) ** 2,
-                                    desiredAcceleration=float(remote_action[1]),
+                                    desiredAcceleration=float(desired_accel),
                                     shouldStop=bool(should_stop))
 
     desired_accel, should_stop = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
