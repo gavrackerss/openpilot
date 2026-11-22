@@ -71,6 +71,11 @@ def tether_route_valid() -> bool:
 
 
 def enabled() -> bool:
+  # The CTM parked benchmark is a separate non-publishing process. Its marker
+  # MUST NOT start the older LS2-only JoiningModelState: wrong model contract.
+  # The local small model remains the only modeld source for this test.
+  if Path('/data/jetlink_xnor/CTM_PARKED_TEST_ENABLED').exists():
+    return False
   # Arm only the *joining mechanism*. It must keep retrying in the background
   # if the Pixel is plugged in AFTER modeld starts; the small model drives.
   # The actual transport route is checked in connect() on every attempt.
