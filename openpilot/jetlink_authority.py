@@ -61,12 +61,17 @@ OUTPUT_SLICES = {
 }
 
 
+def discover_phone() -> str:
+  """Get the current Android USB tether gateway; never use stale HOST as peer."""
+  from openpilot.jetlink_usb_peer import discover_ls2_host
+  return discover_ls2_host()
+
+
 def tether_route_valid() -> bool:
   try:
-    route = subprocess.run(['ip', 'route', 'get', HOST], check=True,
-                           capture_output=True, text=True, timeout=1.0).stdout
-    return ' dev usb0 ' in f' {route} '
-  except (OSError, subprocess.SubprocessError):
+    discover_phone()
+    return True
+  except (OSError, ConnectionError, ValueError):
     return False
 
 
