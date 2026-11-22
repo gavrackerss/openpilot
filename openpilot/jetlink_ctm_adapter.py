@@ -160,7 +160,20 @@ def attach_parked(small_model, cam_w: int, cam_h: int, *, runner: str = "stock")
                 SOURCE_SHA, SOURCE_NBYTES, frame_skip=4,
                 build_timeout=BUILD_TIMEOUT_S, should_stop=should_stop,
             )
-            validate_native_spec(spec)
+            try:
+                validate_native_spec(spec)
+            except ContractError:
+                # Exact CTM output_slices were not present in the original
+                # preparation manifest. Preserve the *actual* live ENGINE_RESP
+                # for diagnosis, instead of guessing or coercing LS2's layout.
+                try:
+                    import json
+                    out = Path("/data/jetlink_ctm_park/actual_engine_spec.json")
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_text(json.dumps(spec.to_dict(), indent=2) + "\n")
+                except (OSError, ValueError, TypeError):
+                    pass
+                raise
             return client, spec
         except Exception:
             client.close()
