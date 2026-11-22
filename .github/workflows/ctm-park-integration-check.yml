@@ -15,6 +15,8 @@ on:
       - 'tools/run_jetlink_ctm_handover_park.sh'
       - 'tests/test_jetlink_ctm_contract.py'
       - 'tests/test_jetlink_ctm_authority_gate.py'
+      - 'tools/check_jetlink_ctm_authority.py'
+      - 'tools/disarm_jetlink_ctm_authority.sh'
       - 'tools/jetlink_ctm_markers.sh'
       - 'tools/run_jetlink_ctm_park.sh'
   workflow_dispatch:
@@ -29,10 +31,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile openpilot/jetlink_shadow_bench.py openpilot/jetlink_authority.py
-          python3 -m py_compile openpilot/jetlink_ctm_contract.py openpilot/jetlink_ctm_adapter.py openpilot/jetlink_ctm_authority_gate.py openpilot/jetlink_ctm_park_handover.py tests/test_jetlink_ctm_contract.py tests/test_jetlink_ctm_authority_gate.py selfdrive/modeld/modeld.py system/manager/process_config.py
+          python3 -m py_compile openpilot/jetlink_ctm_contract.py openpilot/jetlink_ctm_adapter.py openpilot/jetlink_ctm_authority_gate.py openpilot/jetlink_ctm_park_handover.py tests/test_jetlink_ctm_contract.py tests/test_jetlink_ctm_authority_gate.py selfdrive/modeld/modeld.py system/manager/process_config.py tools/check_jetlink_ctm_authority.py
           bash -n tools/jetlink_ctm_markers.sh
           bash -n tools/run_jetlink_ctm_park.sh
           bash -n tools/run_jetlink_ctm_handover_park.sh
+          bash -n tools/disarm_jetlink_ctm_authority.sh
       - name: Exact CTM identity, 50ms telemetry and fail-closed authority markers
         run: |
           python3 - <<'PY'
