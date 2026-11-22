@@ -109,8 +109,8 @@ def require_parked(sm, calibration_snapshot=None) -> None:
     raise RuntimeError('Openpilot engaged; parked test stopped')
   if sm.seen.get('deviceState', False) and not bool(sm['deviceState'].started):
     raise RuntimeError('Comma transitioned offroad; parked test stopped')
-  if any((jet.ARM.exists(), jet.QUALIFIED.exists())):
-    raise RuntimeError('Remote authority marker unexpectedly present; stop isolated test')
+  if any((jet.ARM.exists(), jet.QUALIFIED.exists(), jet.CTM_QUALIFIED.exists(), jet.CTM_ARM.exists())):
+    raise RuntimeError('CTM/LS2 authority marker unexpectedly present; stop isolated test')
 
   names = ['deviceState', 'carState', 'carControl', 'selfdriveState',
            'roadCameraState', 'liveCalibration']
