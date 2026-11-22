@@ -36,6 +36,7 @@ class Gate:
     allowed: bool
     reason: str
     qualification_sha256: str | None = None
+    evidence_stats: tuple[tuple[str, int, int, int, int], ...] = ()
 
 
 def requested(root: Path = ROOT) -> bool:
@@ -57,7 +58,7 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _qualify(raw: bytes, root: Path) -> None:
+def _qualify(raw: bytes, root: Path) -> tuple[tuple[str, int, int, int, int], ...]:
     try:
         manifest: dict[str, Any] = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeError) as exc:
@@ -71,6 +72,7 @@ def _qualify(raw: bytes, root: Path) -> None:
     reports = manifest.get("reports")
     if not isinstance(reports, dict) or set(reports) != set(REPORTS):
         raise ValueError("CTM requires three independent evidence reports")
+    stats = []
     for name in REPORTS:
         expected = reports[name]
         if not isinstance(expected, str) or not DIGEST.fullmatch(expected):
@@ -89,6 +91,9 @@ def _qualify(raw: bytes, root: Path) -> None:
         if (not isinstance(report, dict) or report.get("source_sha256") != SOURCE_SHA
                 or report.get("passed") is not True):
             raise ValueError(f"CTM {name} evidence lacks matching verified pass")
+        stat = evidence.stat()
+        stats.append((name, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    return tuple(stats)
 
 
 def eligible(root: Path = ROOT) -> Gate:
@@ -104,8 +109,8 @@ def eligible(root: Path = ROOT) -> Gate:
         if _read(root / ARM_NAME, 128).decode("ascii").strip() != SOURCE_SHA:
             return Gate(False, "arm_source_mismatch")
         raw = _read(root / QUAL_NAME)
-        _qualify(raw, root)
-        return Gate(True, "qualified_and_armed", _sha256(raw))
+        stats = _qualify(raw, root)
+        return Gate(True, "qualified_and_armed", _sha256(raw), stats)
     except (OSError, ValueError, UnicodeError) as exc:
         return Gate(False, f"qualification_rejected:{exc}")
 
@@ -124,6 +129,15 @@ def lease_alive(original: Gate, root: Path = ROOT) -> bool:
             return False
         if _read(root / ARM_NAME, 128).decode("ascii").strip() != SOURCE_SHA:
             return False
-        return _sha256(_read(root / QUAL_NAME)) == original.qualification_sha256
+        if _sha256(_read(root / QUAL_NAME)) != original.qualification_sha256:
+            return False
+        for name, device, inode, size, modified in original.evidence_stats:
+            evidence = root / "ctm_evidence" / f"{name}.json"
+            if evidence.is_symlink():
+                return False
+            stat = evidence.stat()
+            if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (device, inode, size, modified):
+                return False
+        return True
     except (OSError, ValueError, UnicodeError):
         return False
