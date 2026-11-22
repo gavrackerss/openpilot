@@ -6,6 +6,11 @@ on:
       - '.github/workflows/ctm-park-integration-check.yml'
       - 'openpilot/jetlink_shadow_bench.py'
       - 'openpilot/jetlink_authority.py'
+      - 'openpilot/jetlink_ctm_contract.py'
+      - 'openpilot/jetlink_ctm_adapter.py'
+      - 'openpilot/jetlink_ctm_park_handover.py'
+      - 'tools/run_jetlink_ctm_handover_park.sh'
+      - 'tests/test_jetlink_ctm_contract.py'
       - 'tools/jetlink_ctm_markers.sh'
       - 'tools/run_jetlink_ctm_park.sh'
   workflow_dispatch:
@@ -20,8 +25,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile openpilot/jetlink_shadow_bench.py openpilot/jetlink_authority.py
+          python3 -m py_compile openpilot/jetlink_ctm_contract.py openpilot/jetlink_ctm_adapter.py openpilot/jetlink_ctm_park_handover.py tests/test_jetlink_ctm_contract.py
           bash -n tools/jetlink_ctm_markers.sh
           bash -n tools/run_jetlink_ctm_park.sh
+          bash -n tools/run_jetlink_ctm_handover_park.sh
       - name: Exact CTM identity, 50ms telemetry and fail-closed authority markers
         run: |
           python3 - <<'PY'
@@ -42,4 +49,29 @@ jobs:
           assert '--seconds 180 --rate 20 --pipeline-depth 2' in parked
           assert '--fetch-stage-report' in parked
           print('CTM parked-only configuration and guards verified')
+          PY
+      - name: CTM model spec, USB route and no-authority regression tests
+        run: |
+          PYTHONPATH="$PWD" python3 -m unittest discover -s tests -p test_jetlink_ctm_contract.py -v
+      - name: Isolated-only CTM adapter wiring invariant
+        run: |
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          adapter=Path("openpilot/jetlink_ctm_adapter.py").read_text()
+          harness=Path("openpilot/jetlink_ctm_park_handover.py").read_text()
+          launcher=Path("tools/run_jetlink_ctm_handover_park.sh").read_text()
+          modeld=Path("selfdrive/modeld/modeld.py").read_text()
+          for content in (adapter, harness):
+              ast.parse(content)
+          assert "def attach_authority(" in adapter
+          assert "CTM authority is NOT QUALIFIED" in adapter
+          assert "def attach_parked(" in adapter
+          assert "JETLINK_CTM_ISOLATED_PARKED_TEST" in adapter
+          assert "jet.attach_parked(local" in harness
+          assert "model._active.client.t.close()" in harness
+          assert "CTM_AUTHORITY_NOT_QUALIFIED" in launcher
+          assert "CTM_AUTHORITY_ENABLED" in launcher
+          assert "jetlink_ctm_adapter" not in modeld, "CTM is not production-wired yet"
+          print("CTM adapter is restricted to independent non-publishing parked test")
           PY
