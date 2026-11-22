@@ -84,12 +84,21 @@ echo 'Phone must have CTM selected/Prepared; connected USB tether and external X
 echo "Output: $dir"
 echo "Log: $log"
 echo 'NO authority or modeld publication; vehicle must remain in Park.'
+# Use TCP on the current v0.6 APK, where Android USB NCM is not yet offered
+# UDP. Keep the same 2-frame pipeline for a useful read-only baseline.
+TRANSPORT="${JETLINK_CTM_TRANSPORT:-udp}"
+case "$TRANSPORT" in
+  udp) SEND_MODE=sendmmsg ;;
+  tcp) SEND_MODE=sendmsg ;;
+  *) echo 'STOP: JETLINK_CTM_TRANSPORT must be tcp or udp' >&2; exit 2 ;;
+esac
+echo "Transport: $TRANSPORT (override JETLINK_CTM_TRANSPORT=tcp for v0.6)"
 set +e
 PYTHONPATH="$ROOT:${PYTHONPATH:-}" python3 -u -m openpilot.jetlink_shadow_bench \
   --model ctm --mode camera --pacing timer \
   --seconds 180 --rate 20 --pipeline-depth 2 \
-  --transport udp --udp-payload-bytes 65000 \
-  --udp-send-mode sendmmsg --reply-guard-ms 0 \
+  --transport "$TRANSPORT" --udp-payload-bytes 65000 \
+  --udp-send-mode "$SEND_MODE" --reply-guard-ms 0 \
   --fetch-stage-report --dump-outputs-every 0 \
   --host "$HOST" --port 5599 \
   --output "$dir" 2>&1 | tee "$log"
