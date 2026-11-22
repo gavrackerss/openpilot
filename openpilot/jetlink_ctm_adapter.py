@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""CTM-specific native Zoompilot model adapter, staged for ISOLATED PARKED TESTS.
+"""Original Cinque Terre native Zoompilot adapter for guarded stock modeld.
 
-This is the *real* JetlinkClient -> JetlinkModelState -> JoiningModelState path.
-The phone's PolicyQueues, not this adapter, owns CTM's img/big_img/
-desire_pulse/features_buffer history. Reuses the LS2-tested USB transport,
-frame warp, local-small reset and Zoompilot's fallback lifecycle.
+Production modeld may *select* the CTM joiner only with independently supplied
+and verified, matching qualification evidence and a separate explicit arm.
+No qualification/arm files are created here. Default is LOCAL STOCK.
 
-NOT wired into production modeld. Not a modelV2 publisher. No Params/CAN/steering
-writes. attach_parked() can only be called by the isolated parked test.
-Authority deliberately has no entry point until output parity, fallback,
-camera fidelity and on-road shadow qualification have been independently
-validated. Never substitute CTM's hash into the LS2 authority module.
+The same Jetlink model state is used for isolated parked tests and production.
+The Pixel's PolicyQueues (not comma) owns image, desire and feature history.
+Zoompilot owns joining, late-frame holding, demotion and local fallback.
+Never replace LS2 identity/output assumptions with CTM's SHA.
 """
 from __future__ import annotations
 
@@ -21,12 +19,16 @@ import subprocess
 import sys
 from typing import Any
 
+from openpilot.jetlink_ctm_authority_gate import (
+    Gate, eligible as authority_eligible, lease_alive, requested as authority_requested,
+)
 from openpilot.jetlink_ctm_contract import (
     CTM_VERSION, SOURCE_SHA, SOURCE_NBYTES, ContractError,
     validate_spec, validate_native_spec, validate_parsed,
 )
 
 VERSION = "ctm-v0.1-native-queued-parked-only"
+PRODUCTION_VERSION = "ctm-v0.2-stock-modeld-guarded"
 PORT = 5599
 PROBE_TARGET = "10.169.232.180"  # route probe ONLY, never a fixed phone endpoint
 CONFIG = Path("/data/jetlink_xnor")
@@ -87,9 +89,19 @@ def tether_route_valid() -> bool:
         return False
 
 
+def requested() -> bool:
+    """Operator specifically selected CTM. Invalid requests block LS2 fallback."""
+    return authority_requested()
+
+
+def authority_gate() -> Gate:
+    """Full startup approval/evidence check, never creates a marker."""
+    return authority_eligible()
+
+
 def enabled() -> bool:
-    """Production modeld must NEVER enable CTM through the parked adapter."""
-    return False
+    """CTM is off by default; presence of an arm marker alone is insufficient."""
+    return authority_gate().allowed
 
 
 def remote_active(model) -> bool:
@@ -113,15 +125,20 @@ def _check_parked_test_context() -> None:
         raise ConnectionError("CTM Pixel USB tether not reachable via usb0")
 
 
-def attach_parked(small_model, cam_w: int, cam_h: int, *, runner: str = "stock"):
-    """Build a REAL Zoompilot joiner in a *non-publishing* parked test process.
+def _attach_joiner(small_model, cam_w: int, cam_h: int, *,
+                   runner: str, production: bool, approval: Gate | None = None):
+    """Shared pinned CTM transport/decoder with two independent call-site gates.
 
-    The car/Panda state is checked on every frame by the calling parked test,
-    which also overrides _ask_in_control with the same freshly verified state.
+    Production is never available to isolated parked tests and vice versa.
+    No Tensor G6 firmware, steering or Android changes are made here.
     """
-    _check_parked_test_context()
+    if production:
+        if approval is None or not lease_alive(approval):
+            raise RuntimeError("CTM authority lease missing or revoked")
+    else:
+        _check_parked_test_context()
     if runner != "stock":
-        raise RuntimeError("CTM parked native adapter currently supports stock modeld only")
+        raise RuntimeError("CTM joiner currently supports stock Python modeld only")
     if not (cam_w > 0 and cam_h > 0):
         raise ValueError("Invalid CTM camera dimensions")
 
@@ -129,33 +146,69 @@ def attach_parked(small_model, cam_w: int, cam_h: int, *, runner: str = "stock")
     from openpilot.jetlink_native_authority import ExistingCameraWarp, _pixel_transport
     from openpilot.common.swaglog import cloudlog
     from jetlink.client import JetlinkClient
-    from jetlink.openpilot.joining import JoiningModelState
+    from jetlink.openpilot.joining import JoiningModelState, LOST
     from jetlink.openpilot.model_state import JetlinkModelState
     from jetlink.openpilot.stock import Stock
 
-    # The output decoder is the existing local modeld Parser, and shape checks
-    # execute BEFORE a result can be used by the test's action calculation.
     class CTMModelState(JetlinkModelState):
         def _outputs(self, model_output):
             decoded = super()._outputs(model_output)
             validate_parsed(decoded)
             return decoded
 
+    class GuardedCTMJoiner(JoiningModelState):
+        """Arm revocation on the frame thread demotes before processing CTM.
+
+        Do not wait for a background lease poll: losing arm/approval, adding
+        STOP, or arming LS2 must immediately return LOCAL outputs. Cleanup
+        of the joined client is deferred off modeld's frame thread.
+        """
+        _ctm_authority_selected = True
+        _ctm_model_sha = SOURCE_SHA
+
+        def run(self, bufs, transforms, inputs, after_enqueue=None):
+            if not lease_alive(approval):
+                if not getattr(self, "_ctm_revoked", False):
+                    self._ctm_revoked = True
+                    self._log.error("CTM authority gate revoked: reverting to local stock")
+                    if self._active is not self._small:
+                        self._demote(LOST)
+                    self._stop.set()
+                    self._rejoin.set()
+                    # A join may already hold a socket. Do not do blocking
+                    # session cleanup on modeld's realtime inference thread.
+                    import threading
+                    threading.Thread(target=self.close, daemon=True,
+                                     name="ctm-revoked-cleanup").start()
+                self._small_frames += 1
+                return self._small.run(bufs, transforms, inputs, after_enqueue)
+            return super().run(bufs, transforms, inputs, after_enqueue)
+
     face = Stock().model_face()
     warp = ExistingCameraWarp(cam_w, cam_h, face.frame_size(cam_w, cam_h))
+
+    def check_allowed():
+        if production:
+            if not lease_alive(approval):
+                raise RuntimeError("CTM authority revoked before Jetlink connection")
+        else:
+            _check_parked_test_context()
 
     def connect(should_stop=None):
         if should_stop is not None and should_stop():
             raise InterruptedError("CTM join thread stopped")
-        _check_parked_test_context()
+        check_allowed()
         host = discover_phone()
         transport = _pixel_transport(host, PORT)
-        client = JetlinkClient(transport, deadline=DEADLINE_S,
-                               name="XNOR-CTM-G6-native-parked", want_hidden=False)
+        client = JetlinkClient(
+            transport, deadline=DEADLINE_S,
+            name=("XNOR-CTM-G6-authority" if production else "XNOR-CTM-G6-native-parked"),
+            want_hidden=False,
+        )
         try:
             client.hello(timeout=3.0)
             if not client.t.datagrams:
-                raise RuntimeError("Pixel did not offer USB UDP datagrams; use Jetlink v0.7")
+                raise RuntimeError("Pixel did not offer USB UDP datagrams; install Jetlink v0.7")
             spec = client.ensure_engine(
                 SOURCE_SHA, SOURCE_NBYTES, frame_skip=4,
                 build_timeout=BUILD_TIMEOUT_S, should_stop=should_stop,
@@ -163,40 +216,64 @@ def attach_parked(small_model, cam_w: int, cam_h: int, *, runner: str = "stock")
             try:
                 validate_native_spec(spec)
             except ContractError:
-                # Exact CTM output_slices were not present in the original
-                # preparation manifest. Preserve the *actual* live ENGINE_RESP
-                # for diagnosis, instead of guessing or coercing LS2's layout.
-                try:
-                    import json
-                    out = Path("/data/jetlink_ctm_park/actual_engine_spec.json")
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_text(json.dumps(spec.to_dict(), indent=2) + "\n")
-                except (OSError, ValueError, TypeError):
-                    pass
+                # Save the phone's *actual* input/output graph when mismatch.
+                # No LS2-compatible shape is invented on a failed contract.
+                if not production:
+                    try:
+                        import json
+                        out = Path("/data/jetlink_ctm_park/actual_engine_spec.json")
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        out.write_text(json.dumps(spec.to_dict(), indent=2) + "\n")
+                    except (OSError, ValueError, TypeError):
+                        pass
                 raise
+            check_allowed()
             return client, spec
         except Exception:
             client.close()
             raise
 
     def build(client, spec):
+        check_allowed()
         validate_native_spec(spec)
         return CTMModelState(client, spec, warp, face=face,
                              log=cloudlog, event=cloudlog.event)
 
-    cloudlog.warning("CTM native queued Jetlink parked adapter staged; local stock controls remain authoritative")
-    return JoiningModelState(
+    joiner = (GuardedCTMJoiner if production else JoiningModelState)(
         _Small(small_model, normalize_stock_views=True), connect, build,
         reset_small=lambda: _reset_small(small_model),
         progress=_Progress(), log=cloudlog, in_control=_Control.in_control,
-        name=lambda sha: "Cinque Terre Original Tensor G6 [parked test only]",
+        name=lambda sha: (
+            "Cinque Terre Original Tensor G6 [guarded stock modeld]"
+            if production else "Cinque Terre Original Tensor G6 [parked test only]"
+        ),
     )
+    cloudlog.warning(
+        "CTM native queued joiner attached in %s mode; local stock is fallback",
+        "guarded_authority" if production else "isolated_parked",
+    )
+    return joiner
 
 
-def attach_authority(*_args: Any, **_kwargs: Any):
-    """Fail closed: this commit does not qualify or wire CTM steering authority."""
-    raise RuntimeError(
-        "CTM authority is NOT QUALIFIED. Adapter exists for isolated parked "
-        "Zoompilot handover and fault-injection tests only; validate CTM "
-        "output parity, trajectory semantics and fallback before modeld wiring."
-    )
+def attach_parked(small_model, cam_w: int, cam_h: int, *, runner: str = "stock"):
+    """Same actual CTM engine, but disconnected from production modeld."""
+    return _attach_joiner(small_model, cam_w, cam_h,
+                          runner=runner, production=False)
+
+
+def attach_authority(small_model=None, cam_w: int = 0, cam_h: int = 0, *,
+                     runner: str = "stock"):
+    """Production CTM modeld entry point; always fail closed without evidence.
+
+    This is NOT an authorization grant. Missing parity, shadow or fallback
+    qualification documents must leave local modeld authoritative.
+    """
+    if os.environ.get("JETLINK_CTM_ISOLATED_PARKED_TEST") == "1":
+        raise RuntimeError("CTM authority unavailable in isolated parked test")
+    approval = authority_gate()
+    if not approval.allowed:
+        raise RuntimeError(f"CTM authority NOT QUALIFIED: {approval.reason}")
+    if small_model is None:
+        raise RuntimeError("CTM authority requires a real resident local model")
+    return _attach_joiner(small_model, cam_w, cam_h,
+                          runner=runner, production=True, approval=approval)
