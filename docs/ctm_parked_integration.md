@@ -102,3 +102,76 @@ authority permission. The existing `jetlink_native_authority.py` is
 **LS2-specific** and must not be pointed at CTM by just changing the hash:
 CTM has a different six-input history-buffer interface. Those conditions
 need a separate verified modeld adapter and shadow/handover assessment.
+
+## New dedicated native CTM adapter (non-authoritative)
+
+Implemented in `openpilot/jetlink_ctm_adapter.py`, backed by the pure
+strict wire manifest `openpilot/jetlink_ctm_contract.py`, and tested by
+`openpilot/jetlink_ctm_park_handover.py`. This does **not** change
+`selfdrive/modeld/modeld.py` or the existing LS2 authority adapter.
+
+CTM Original uses the six-input **queued graph**: `img`, `big_img`,
+`desire_pulse`, `traffic_convention`, `action_t` and `features_buffer`.
+The Tensor G6 Android server's `PolicyQueues` owns its image, desire and
+feature history at `frame_skip=4`. The comma sends two warped images plus
+12 scalar floats, not the full history. Jetlink's native Zoompilot
+`JoiningModelState` handles swap/hold/demotion and the local stock
+model remains available as the fallback.
+
+The adapter validates the CTM source SHA, exact input shapes, 18452-float
+output, expected Parser output slices, 2068-float compressed reply, and
+parsed plan/lanes/leads/desire finite shapes. **This slice mapping still
+needs confirmation from a live CTM ENGINE_RESP and numerical validation
+against the model graph; no empirical parity is claimed.** Any disagreement
+fails closed instead of interpreting outputs as LS2.
+
+### Run a real isolated parked Zoompilot handover/fallback test
+
+Use Jetlink **v0.7** on the Pixel with original CTM prepared and USB-NCM
+tether enabled. The comma must be in Park with fresh valid car/CAN state,
+two live cameras and calibration. Ensure there are no simultaneous Jetlink
+benchmark, shadow or authority sessions competing for the phone.
+
+```bash
+cd /data/openpilot
+git pull --ff-only origin xnor-dev
+bash tools/jetlink_ctm_markers.sh stage
+bash tools/run_jetlink_ctm_handover_park.sh
+```
+
+The harness imports the actual stock `ModelState`, creates a separate
+Zoompilot `JoiningModelState`, consumes real road/wide camera frames, and
+checks strict live parked state before each frame. It waits for real CTM
+inferences, validates decoded predictions, invokes the same modeld action
+math **without publishing it**, closes only its own Jetlink socket and
+requires actual local-model fallback. All metrics and failures go to
+`/data/jetlink_ctm_park/handover/ctm-handover-*.log`. It never publishes
+`modelV2`, sends CAN, changes Panda or modifies the real modeld process.
+
+A passing result has an event `"result"` with `"passed": true`,
+`"remote_frames"` nonzero, `"socket_loss_triggered": true`,
+`"fallback": true`, and `"model_messages_published": 0`.
+Any exception or lack of handover is a failed test. The source
+`openpilot/jetlink_ctm_contract.py` has pure Python regression tests:
+
+```bash
+cd /data/openpilot
+python3 -m unittest discover -s tests -p test_jetlink_ctm_contract.py -v
+```
+
+To remove parked staging after testing:
+
+```bash
+bash tools/jetlink_ctm_markers.sh disarm
+```
+
+### Authority remains explicitly unavailable
+
+`openpilot.jetlink_ctm_adapter.attach_authority()` always fails closed,
+and production `selfdrive/modeld/modeld.py` does not import this module.
+A parked handover proves a real protocol / decoder / fallback sequence,
+**not** numerical output parity, plausible trajectories, reliable
+on-road operation, steering safety, or authority. Independent output
+parity, actual camera-to-reply deadline behaviour with live local modeld,
+and a non-actuating on-road shadow trial are still needed before a
+separately reviewed production integration.
