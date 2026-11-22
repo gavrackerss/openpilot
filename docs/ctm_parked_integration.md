@@ -38,6 +38,16 @@ Panda, **real carState reporting Park and approximately zero speed**, no
 engagement/active controls; fresh road+wide camera frames and calibration.
 The script refuses testing with any authority marker present.
 
+The launcher **discovers the phone from the current usb0 gateway** rather than
+assuming the previous `10.169.232.180` address. It tests TCP port 5599
+before starting the 180-second measurement. On the Pixel, open Jetlink
+**Settings → Enable Jetlink TCP** and ensure its server is running.
+A phone-only benchmark can pass even if this network listener is disabled.
+
+If this is a nonstandard tether and the gateway is not the phone, use
+`JETLINK_CTM_HOST=<phone_usb_ip> bash tools/run_jetlink_ctm_park.sh`.
+The target must still route over `usb0`; never use an unverified Wi-Fi route.
+
 It collects 180 seconds at 20 Hz, with a two-frame UDP pipeline and
 `sendmmsg` transport. Results are in
 `/data/jetlink_ctm_park/park-<UTC timestamp>-<pid>/summary.json`,
