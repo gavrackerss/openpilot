@@ -9,6 +9,7 @@ on:
       - 'openpilot/jetlink_native_authority.py'
       - 'openpilot/jetlink_usb_peer.py'
       - 'tests/test_jetlink_usb_peer.py'
+      - 'tools/check_jetlink_ls2.py'
       - 'openpilot/jetlink_ctm_contract.py'
       - 'openpilot/jetlink_ctm_adapter.py'
       - 'openpilot/jetlink_ctm_authority_gate.py'
@@ -33,7 +34,7 @@ jobs:
       - name: Python and Bash syntax
         run: |
           set -euo pipefail
-          python3 -m py_compile openpilot/jetlink_shadow_bench.py openpilot/jetlink_authority.py openpilot/jetlink_native_authority.py openpilot/jetlink_usb_peer.py tests/test_jetlink_usb_peer.py
+          python3 -m py_compile openpilot/jetlink_shadow_bench.py openpilot/jetlink_authority.py openpilot/jetlink_native_authority.py openpilot/jetlink_usb_peer.py tests/test_jetlink_usb_peer.py tools/check_jetlink_ls2.py
           python3 -m py_compile openpilot/jetlink_ctm_contract.py openpilot/jetlink_ctm_adapter.py openpilot/jetlink_ctm_authority_gate.py openpilot/jetlink_ctm_park_handover.py tests/test_jetlink_ctm_contract.py tests/test_jetlink_ctm_authority_gate.py selfdrive/modeld/modeld.py system/manager/process_config.py tools/check_jetlink_ctm_authority.py
           bash -n tools/jetlink_ctm_markers.sh
           bash -n tools/run_jetlink_ctm_park.sh
