@@ -53,6 +53,29 @@ It collects 180 seconds at 20 Hz, with a two-frame UDP pipeline and
 `/data/jetlink_ctm_park/park-<UTC timestamp>-<pid>/summary.json`,
 `frames.csv`, and adjacent `.log` files.
 
+## If TCP connects but Jetlink does not offer UDP
+
+The v0.6 Android server only recognised the older fixed USB cable address,
+not Android's dynamic USB NCM/RNDIS tether address. HELLO succeeds over TCP
+but contains no `frame_port` or `frame_token`.
+
+Until the corrected v0.7 signed APK is installed, a valid parked TCP baseline
+can run with no app changes:
+
+```bash
+JETLINK_CTM_TRANSPORT=tcp bash tools/run_jetlink_ctm_park.sh
+```
+
+This retains the real cameras, 180-second test, 20 Hz target and two-frame
+pipeline; USB frames travel over TCP instead of UDP. Do not compare the
+latency with an unmeasured UDP result or infer model safety from throughput.
+To use the original UDP pathway again once v0.7 is verified and installed,
+run `bash tools/run_jetlink_ctm_park.sh` without the environment override.
+
+The v0.7 server recognises **the actual local USB-tether interface** (NCM,
+RNDIS, USB) when offering UDP. It does not treat arbitrary 10.x IPv4
+connections or remote HELLO claims as USB.
+
 In `summary.json` inspect:
 
 - `ctm_parked_integration.complete_path_ms`: comma warp/preprocess start until
