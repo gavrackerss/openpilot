@@ -167,7 +167,7 @@ def _attach_joiner(small_model, cam_w: int, cam_h: int, *,
         _ctm_model_sha = SOURCE_SHA
 
         def run(self, bufs, transforms, inputs, after_enqueue=None):
-            if not lease_alive(approval):
+            if getattr(self, "_ctm_revoked", False) or not lease_alive(approval):
                 if not getattr(self, "_ctm_revoked", False):
                     self._ctm_revoked = True
                     self._log.error("CTM authority gate revoked: reverting to local stock")
