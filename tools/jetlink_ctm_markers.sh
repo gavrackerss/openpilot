@@ -13,7 +13,7 @@ show() {
     if test -f "$ROOT/$label"; then printf '  %-34s PRESENT\n' "$label"
     else printf '  %-34s absent\n' "$label"; fi
   done
-  for label in AUTHORITY_ENABLED LS2_AUTHORITY_QUALIFIED CTM_AUTHORITY_QUALIFIED; do
+  for label in AUTHORITY_ENABLED LS2_AUTHORITY_QUALIFIED CTM_AUTHORITY_QUALIFIED CTM_AUTHORITY_ENABLED; do
     if test -e "$ROOT/$label"; then printf '  %-34s PRESENT (must be absent for parked test)\n' "$label"; fi
   done
 }
@@ -22,7 +22,7 @@ case "$MODE" in
   stage)
     # Never silently delete an existing actuation/handover qualification.
     # Refuse to run alongside anything that can engage remote authority.
-    for marker in AUTHORITY_ENABLED LS2_AUTHORITY_QUALIFIED CTM_AUTHORITY_QUALIFIED; do
+    for marker in AUTHORITY_ENABLED LS2_AUTHORITY_QUALIFIED CTM_AUTHORITY_QUALIFIED CTM_AUTHORITY_ENABLED ONROAD_SHADOW_ENABLED; do
       if test -e "$ROOT/$marker"; then
         echo "STOP: $ROOT/$marker exists. Disarm remote authority before parked-only testing." >&2
         exit 2
