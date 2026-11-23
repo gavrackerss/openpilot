@@ -103,3 +103,34 @@ def assert_authority_disabled() -> None:
     "the action contract, frame timing, fallback and longitudinal replay "
     "are unqualified"
   )
+
+
+@dataclass(frozen=True)
+class PixelActionSequenceAudit:
+  """Offline statistics on raw network values; no action-unit interpretation."""
+  frames: int
+  raw_head_min: tuple[float, float, float, float]
+  raw_head_max: tuple[float, float, float, float]
+  largest_adjacent_raw_delta: tuple[float, float, float, float]
+  native_action_semantics_proven: bool = False
+  authority_allowed: bool = False
+
+
+def audit_pixel_reply_sequence(packets: list[bytes]) -> PixelActionSequenceAudit:
+  """Inspect bounded, ordered LS2 replies without guessing acceleration units.
+
+  Reject malformed frames and unbounded input. This cannot validate latency,
+  recurrent state, lead following or a vehicle command; it only highlights
+  raw-head instability for subsequent recorded-drive investigation.
+  """
+  if not isinstance(packets, list) or not 1 <= len(packets) <= 10000:
+    raise ValueError("Expected 1..10000 ordered raw Pixel reply packets")
+  heads = [inspect_pixel_reply(packet).raw_head for packet in packets]
+  return PixelActionSequenceAudit(
+    frames=len(heads),
+    raw_head_min=tuple(min(head[i] for head in heads) for i in range(4)),
+    raw_head_max=tuple(max(head[i] for head in heads) for i in range(4)),
+    largest_adjacent_raw_delta=tuple(
+      max((abs(heads[j][i] - heads[j-1][i]) for j in range(1, len(heads))), default=0.0)
+      for i in range(4)),
+  )
