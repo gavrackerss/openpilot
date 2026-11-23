@@ -122,6 +122,16 @@ _V229_UNOWNED_DI_GRACE_FRAMES = 50          # 0.5 s at 100 Hz (panda backstop ca
 _V229_DI_ENGAGED_STATES = ("ENABLED", "STANDSTILL", "OVERRIDE")
 
 
+def get_safety_CP():
+  """Keep XNOR 0.11.2's Tesla Model Y vehicle-model safety test ABI.
+
+  This native safety reference is distinct from the actual legacy Model S
+  controller's HW3 vehicle model and must not change vehicle steering.
+  """
+  from opendbc.car.tesla.interface import CarInterface
+  return CarInterface.get_non_essential_params("TESLA_MODEL_Y")
+
+
 def _v226_powertrain_tx_allowed(hybrid_native_ap: bool, exclusive_hybrid_selected: bool,
                                 owner_request: bool) -> bool:
   """Only a qualified Hybrid owner may author powertrain DAS_control.

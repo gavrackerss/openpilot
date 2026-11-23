@@ -59,7 +59,14 @@ jobs:
           set -euo pipefail
           # Do NOT run blanket 'op.sh setup' here: it can reset patched
           # Panda/opendbc gitlinks. Only initialize untouched dependencies.
-          git submodule update --init --recursive \
+          # Native XNOR .gitmodules uses ../../commaai paths; a local
+          # scratch clone resolves these against /home/runner/work instead of
+          # github.com. Override only the SCRATCH repo's Git config.
+          git submodule init msgq_repo rednose_repo teleoprtc_repo tinygrad_repo
+          git config submodule.msgq.url https://github.com/commaai/msgq.git
+          git config submodule.rednose_repo.url https://github.com/commaai/rednose.git
+          git config submodule.teleoprtc_repo.url https://github.com/commaai/teleoprtc.git
+          git submodule update --recursive \
             msgq_repo rednose_repo teleoprtc_repo tinygrad_repo
           test -f opendbc_repo/opendbc/safety/modes/tesla_legacy.h
           grep -q 'tesla_legacy_v229_capture_das_control' \

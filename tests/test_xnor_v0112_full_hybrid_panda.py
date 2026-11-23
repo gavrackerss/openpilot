@@ -130,6 +130,8 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     ctrl = (BASE / "opendbc/car/tesla/carcontroller.py").read_text()
     interface = (BASE / "opendbc/car/tesla/interface.py").read_text()
     self.assertIn("apply_steer_angle_limits_vm(", ctrl)
+    self.assertIn("def get_safety_CP():", ctrl)
+    self.assertIn('get_non_essential_params("TESLA_MODEL_Y")', ctrl)
     self.assertIn('VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))', ctrl)
     self.assertNotIn("apply_std_steer_angle_limits(", ctrl)
     self.assertIn("DI_cruiseSet_native_0112", state)
