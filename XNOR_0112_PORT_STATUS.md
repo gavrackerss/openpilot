@@ -88,6 +88,38 @@ not modified by these commits.
    `opendbc_repo` and `panda` remain unchanged; Tesla safety,
    controller and actuator customizations are still staged and **inactive**.
 
+## 2026-11-23 installed Tesla longitudinal baseline and isolated state machine
+
+10. **Locked installed reference:** the seven exact Git blob objects from
+    `24d304bb06b6beef6b0a0633bf966dbbc23e9d39` are preserved in
+    `migration/installed_24d304b/`: `longitudinal_planner.py`,
+    `long_mpc.py`, `controlsd.py`, `modeld.py`, `radard.py`,
+    `drive_helpers.py` and `cruise.py`. They are non-runtime sources.
+    The script `tools/xnor_v0112_longitudinal_migration_audit.py`
+    verifies their exact Git blob hashes and reports remaining gaps.
+    - **Do not treat `gavrackerss/openpilot:xnor-dev` as the last installed
+      driving baseline**: that newer branch's 430-line longitudinal planner
+      contains `XnorDynamicExperimentalControl` and release-boost logic,
+      whereas the installed `24d304b` planner contains neither.
+    - The XNOR-native 0.11.2 planner remains DEC-free. Do **not** merge the
+      newer DEC implementation into the native active planner to solve
+      LS2 lead following.
+    - The custom hybrid brake latch in installed `controlsd.py` and
+      custom following-distance helper in installed `long_mpc.py`
+      are identified as unported.
+11. **Offline Tesla long-owner reference:** the installed V207/V234 hybrid
+    brake cancellation, regen hold and manual/Experimental auto-resume
+    decision logic has been extracted into the **pure, unconnected**
+    `migration/tesla_v0112/hybrid_long_owner.py`.
+    `tests/test_xnor_v0112_tesla_hybrid_long_owner.py` covers brake
+    latch, 1,000 ms regen/brake-release wait, manual physical MAIN/RES,
+    gas/ACC fault/override gates and disengagement.
+    - This state machine returns a *hypothetical* LONG eligibility result,
+      **not** `CarControl`, Panda CAN or ECU acceptance. It is not hooked
+      into native `controlsd`. It needs source/wire validation against
+      Tesla CarState and independent replay before any future integration.
+    - Native XNOR `controlsd`, Tesla opendbc and Panda remain unchanged.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
