@@ -81,3 +81,78 @@ runtime and must not be done in this staging branch.
 - **LS2 retains no longitudinal authority until all safety gates pass.**
 
 This staging branch is intentionally not merged or installed automatically.
+
+## Incremental v0.11.2 ports (2026-11-23, staging only)
+
+The following changes have been added on top of the original lead-confidence port.
+These are **source ports**, not a complete v0.11.2 runtime:
+
+1. **Action-head stop decision**: `drive_helpers.should_stop(v_ego,a_target)`
+   now implements comma v0.11.2's low-speed (`v_ego < 0.3` m/s and
+   `a_target < 0.1` m/s²) predicate. The LS2 direct-action branch in
+   `selfdrive/modeld/modeld.py` uses it before smoothing. The stock
+   small-model branch still uses XNOR's legacy trajectory-derived stop flag.
+   This affects stopping semantics at/near standstill, **not** ordinary
+   30–40 mph lead braking.
+2. **Independent cruise candidate**:
+   `selfdrive/controls/lib/xnor_v0112_candidates.py` contains adapted
+   upstream v0.11.2 cruise-acceleration and three-candidate arbitration
+   calculations. **Deliberately disconnected from live planning**:
+   XNOR's existing longitudinal MPC includes a cruise constraint, whereas
+   v0.11.2 separates lead-only MPC from cruise acceleration. Plugging this
+   candidate into the legacy MPC without the matching solver migration
+   would not be a faithful port.
+3. **Short-action-horizon stability**:
+   `drive_helpers.get_accel_from_plan` and
+   `get_curvature_from_plan` now use 0.3-second interpolation for shorter
+   action horizons, matching the v0.11.2 helper logic. The existing
+   XNOR two-value `get_accel_from_plan` return signature is retained.
+   Unlike the LS2-only stop change, this interpolation change **also
+   affects small-model and MPC computations**, and therefore needs replay
+   regression before the branch is used for driving.
+4. **Legacy/new radar schema compatibility**:
+   `drive_helpers.radar_lead_present` understands the existing
+   `.status` field and v0.11.2 `.present` field. Staging MPC and
+   planner call sites now use it. This does **not** migrate the Cap'n Proto
+   schemas themselves.
+5. **Regression test additions**:
+   `tests/test_xnor_lead_filter.py`,
+   `tests/test_xnor_v0112_action_semantics.py`,
+   `tests/test_xnor_v0112_candidates.py`, and
+   `tests/test_xnor_v0112_drive_helpers.py`.
+
+### Staging validation commands
+
+```bash
+cd /data/openpilot
+python3 -m py_compile \
+  selfdrive/controls/radard.py \
+  selfdrive/modeld/modeld.py \
+  selfdrive/controls/lib/drive_helpers.py \
+  selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py \
+  selfdrive/controls/lib/longitudinal_planner.py \
+  selfdrive/controls/lib/xnor_v0112_candidates.py
+python3 tests/test_xnor_lead_filter.py
+python3 tests/test_xnor_v0112_action_semantics.py
+python3 tests/test_xnor_v0112_candidates.py
+python3 tests/test_xnor_v0112_drive_helpers.py
+```
+
+**NOT RUN ON VEHICLE.** These tests are checked into GitHub but do not
+constitute process replay, hardware qualification or on-road sign-off.
+Keep the user's comma on the known-good small model, not this staging branch.
+
+### Still blocking a full 0.11.2 upgrade
+
+- New package layout, dependencies, native builds and submodule pins;
+- Port custom Tesla HW1 firmware, CAN, safety, panda and car interfaces;
+- Port the actual lead-only MPC/three-candidate planner together, including
+  the regenerated native solver and Tesla-specific acceleration limits;
+- Merge new Cap'n Proto schemas while retaining all XNOR messages and services;
+- Reconcile Tinygrad/SunnyPilot model selection and Jetlink's phone inference,
+  remote recurrent state, camera warp, action timing and fallback;
+- Run matching small/big model inference and full radard/plannerd/controlsd
+  offline process replay; test lead braking and fallback against interventions.
+
+Do **not** bump the version string, merge this staging branch into `xnor-dev`,
+or enable LS2 longitudinal authority based on these commits.
