@@ -33,7 +33,7 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     self.assertFalse(report["suitable_for_vehicle_control"])
 
   def test_aeb_forwarding_checks_precede_mutable_hooks(self):
-    safety = (BASE / "opendbc/opendbc/safety/safety.h").read_text()
+    safety = (BASE / "opendbc/safety/safety.h").read_text()
     start = safety.index("int safety_fwd_hook_pkt(int bus_num, CANPacket_t *to_fwd)")
     aeb = safety.index("if (real_aeb)", start)
     mutable = safety.index("current_hooks->fwd_msg(bus_num, to_fwd)", start)
@@ -53,7 +53,7 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     self.assertIn("current_safety_mode != SAFETY_TESLA_LEGACY", fdcan)
 
   def test_v229_disengaged_priming_and_revoked_authority_never_modify_ap(self):
-    safety = (BASE / "opendbc/opendbc/safety/modes/tesla_legacy.h").read_text()
+    safety = (BASE / "opendbc/safety/modes/tesla_legacy.h").read_text()
     capture = safety[safety.index("static void tesla_legacy_v229_capture_das_control("):
                      safety.index("static void tesla_legacy_v229_observe_di_state(")]
     substitute = safety[safety.index("static bool tesla_legacy_v229_apply_das_control("):
@@ -68,7 +68,7 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     self.assertIn("test_captured_template_revoked_before_stock_frame_is_not_applied", smoke)
 
   def test_v229_controller_does_not_take_longitudinal_without_driver_permission(self):
-    controller = (BASE / "opendbc/opendbc/car/tesla/carcontroller.py").read_text()
+    controller = (BASE / "opendbc/car/tesla/carcontroller.py").read_text()
     gate = controller[controller.index("def _v229_compute_owner(self, CC, CS)"):
                       controller.index("def _v229_stopgo_long(", controller.index("def _v229_compute_owner(self, CC, CS)"))]
     for token in (
@@ -88,21 +88,21 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
       self.assertIn("safety_rx_hook(&to_push)", rx, driver)
 
   def test_0x659_never_directly_written_to_vehicle(self):
-    source = (BASE / "opendbc/opendbc/safety/modes/tesla_legacy.h").read_text()
+    source = (BASE / "opendbc/safety/modes/tesla_legacy.h").read_text()
     self.assertIn("if (addr == 0x659)", source)
     self.assertIn("return false;\n  }\n\n  // V229", source)
     self.assertIn(".fwd_msg = tesla_legacy_fwd_msg_hook", source)
 
   def test_dual_panda_interface_can_set_hybrid_safety_flags(self):
-    interface = (BASE / "opendbc/opendbc/car/tesla/interface.py").read_text()
-    values = (BASE / "opendbc/opendbc/car/tesla/values.py").read_text()
+    interface = (BASE / "opendbc/car/tesla/interface.py").read_text()
+    values = (BASE / "opendbc/car/tesla/values.py").read_text()
     self.assertIn("for cfg in ret.safetyConfigs:", interface)
     self.assertIn("ret.pcmCruise = hybrid_native_ap", interface)
     self.assertIn("OP_STALK_ENABLE = 64", values)
     self.assertIn("IGNORE_STOCK_AEB = 128", values)
 
   def test_native_car_schema_adds_no_colliding_tesla_tags(self):
-    capnp = (BASE / "opendbc/opendbc/car/car.capnp").read_text()
+    capnp = (BASE / "opendbc/car/car.capnp").read_text()
     native = (SOURCES["opendbc"] / "opendbc/car/car.capnp").read_text()
     self.assertIn("carNotReady @61 :Bool;", capnp)
     self.assertIn("followDistanceS @66 :UInt8;", capnp)
@@ -120,14 +120,14 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
         ("carstate_native_0112.py", "carstate.py"),
         ("carcontroller_native_0112.py", "carcontroller.py")):
       with self.subTest(path=path):
-        staged = (BASE / "opendbc/opendbc/car/tesla" / path).read_bytes()
+        staged = (BASE / "opendbc/car/tesla" / path).read_bytes()
         pinned = (SOURCES["opendbc"] / "opendbc/car/tesla" / native).read_bytes()
         self.assertEqual(staged, pinned)
 
   def test_tesla_legacy_native_vm_and_no_unsupported_cruise_scaling(self):
-    state = (BASE / "opendbc/opendbc/car/tesla/carstate.py").read_text()
-    ctrl = (BASE / "opendbc/opendbc/car/tesla/carcontroller.py").read_text()
-    interface = (BASE / "opendbc/opendbc/car/tesla/interface.py").read_text()
+    state = (BASE / "opendbc/car/tesla/carstate.py").read_text()
+    ctrl = (BASE / "opendbc/car/tesla/carcontroller.py").read_text()
+    interface = (BASE / "opendbc/car/tesla/interface.py").read_text()
     self.assertIn("apply_steer_angle_limits_vm(", ctrl)
     self.assertIn('VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))', ctrl)
     self.assertNotIn("apply_std_steer_angle_limits(", ctrl)

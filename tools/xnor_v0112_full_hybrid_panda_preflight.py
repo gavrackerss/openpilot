@@ -57,8 +57,25 @@ def git_blob(path: Path) -> str:
   return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
 
 
+def candidate_path(component: str, relative: str) -> Path:
+  """Translate a pinned submodule-relative path to the staged candidate layout.
+
+  Pinned native opendbc files live at opendbc_repo/opendbc/... whereas our
+  candidate's opendbc root is migration/.../opendbc/ (one package layer).
+  Panda paths (board/...) are already relative to the staged Panda root.
+  """
+  if component not in SOURCES:
+    raise ValueError(f"Unexpected component: {component}")
+  prefix = "opendbc/" if component == "opendbc" else ""
+  if prefix:
+    if not relative.startswith(prefix):
+      raise ValueError(f"Unrecognised pinned opendbc path: {relative}")
+    relative = relative[len(prefix):]
+  return BASE / component / relative
+
+
 def text(relative: str, component: str) -> str:
-  return (BASE / component / relative).read_text(encoding="utf-8")
+  return candidate_path(component, relative).read_text(encoding="utf-8")
 
 
 def require(yes: bool, why: str) -> None:
@@ -74,7 +91,7 @@ def audit() -> dict:
       require(native.is_file(), f"Missing pinned {component} source {native}")
       require(git_blob(native) == sha,
               f"Pinned {component} has drifted: {rel}; do not export/apply candidate")
-      staged = BASE / component / rel
+      staged = candidate_path(component, rel)
       require(staged.is_file(), f"Missing candidate source {staged}")
       count += 1
 
@@ -200,7 +217,7 @@ def audit() -> dict:
           "Unverified HUD/stock AEB warning suppression was enabled")
 
   for rel in (*NEW_TESTS, *NEW_VEHICLE_FILES):
-    require((BASE / "opendbc" / rel).is_file(),
+    require(candidate_path("opendbc", rel).is_file(),
             f"Missing test or Tesla vehicle module: {rel}")
 
   for rel in (
@@ -215,7 +232,7 @@ def audit() -> dict:
       *NEW_TESTS,
       *NEW_VEHICLE_FILES,
   ):
-    file = BASE / "opendbc" / rel
+    file = candidate_path("opendbc", rel)
     compile(file.read_text(encoding="utf-8"), str(file), "exec")
 
   return {
