@@ -87,6 +87,8 @@ class XnorNativeBaseContract(unittest.TestCase):
   def test_staged_custom_safety_code_not_activated(self):
     self.assertTrue((ROOT / "migration/tesla_opendbc_legacy/opendbc/safety/modes/tesla_legacy.h").is_file())
     self.assertTrue((ROOT / "migration/sunnypilot_legacy/sunnypilot/models/manager.py").is_file())
+    self.assertTrue((ROOT / "migration/jetlink_legacy/openpilot/joining.py").is_file())
+    self.assertTrue((ROOT / "migration/jetlink_adapters_legacy/jetlink_native_authority.py").is_file())
     runtime_modeld = source("openpilot/selfdrive/modeld/modeld.py")
     manager = source("openpilot/system/manager/process_config.py")
     self.assertNotIn("migration/", runtime_modeld + manager)
