@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import ast
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER = ROOT / "openpilot/jetlink_v0112_native.py"
@@ -75,6 +76,56 @@ class NativeContractTest(unittest.TestCase):
     del small.state_pairs
     with self.assertRaisesRegex(ValueError, "state_pairs"):
       module.validate_native_small_model(small)
+
+  def test_incompatible_legacy_native_attachment_fails_closed(self):
+    legacy_path = ROOT / "openpilot/jetlink_native_authority.py"
+    legacy_spec = importlib.util.spec_from_file_location("jetlink_v0111_legacy_guard", legacy_path)
+    legacy = importlib.util.module_from_spec(legacy_spec)
+    legacy_spec.loader.exec_module(legacy)
+    with self.assertRaisesRegex(RuntimeError, "incompatible with comma 0.11.2"):
+      legacy.attach_native(fake_native_model(), 1920, 1080)
+
+  def test_offroad_probe_checks_lifecycle_not_just_swap_guard(self):
+    src = ADAPTER.read_text()
+    self.assertGreaterEqual(src.count("require_offroad_probe()"), 3)
+    self.assertIn('in_control=lambda: True', src)
+    self.assertNotIn('in_control=stock.in_control', src)
+
+  def test_offroad_gate_refuses_unset_or_onroad_params(self):
+    original_import = __import__
+    for offroad in (False,):
+      with self.subTest(offroad=offroad):
+        def patched_import(name, globals=None, locals=None, fromlist=(), level=0):
+          if name == "openpilot.common.params":
+            return SimpleNamespace(
+              Params=lambda: SimpleNamespace(get_bool=lambda key: offroad if key == "IsOffroad" else False))
+          return original_import(name, globals, locals, fromlist, level)
+        with patch("builtins.__import__", side_effect=patched_import):
+          with self.assertRaisesRegex(RuntimeError, "confirmed offroad"):
+            module.require_offroad_probe()
+
+  def test_offroad_gate_accepts_confirmed_offroad_only(self):
+    original_import = __import__
+    def patched_import(name, globals=None, locals=None, fromlist=(), level=0):
+      if name == "openpilot.common.params":
+        return SimpleNamespace(Params=lambda: SimpleNamespace(get_bool=lambda key: key == "IsOffroad"))
+      return original_import(name, globals, locals, fromlist, level)
+    with patch("builtins.__import__", side_effect=patched_import):
+      self.assertIsNone(module.require_offroad_probe())
+
+  def test_native_run_callback_default_must_be_none(self):
+    small = fake_native_model()
+    small.run = lambda bufs, transforms, inputs, after_enqueue=False: {}
+    with self.assertRaisesRegex(ValueError, "must default to None"):
+      module.validate_native_small_model(small)
+
+  def test_native_model_direct_action_head_remains_unqualified(self):
+    # The 0.11.2 parser can publish raw action[1] acceleration, unlike
+    # the older plan-derived adapter. No LS2 action equivalence is proven.
+    native = MODELD.read_text()
+    self.assertIn("model_output['action'][0,1]", native)
+    self.assertNotIn("openpilot.jetlink_native_authority", native)
+    self.assertNotIn("openpilot.jetlink_v0112_native", native)
 
   def test_legacy_tesla_models_preserved(self):
     values = (SNAPSHOT/"car/tesla/values.py").read_text()
