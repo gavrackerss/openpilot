@@ -50,6 +50,57 @@ the active submodules or original `xnor-dev`.
    genuine emergency braking. It also preserves the original unmodified
    RX packet for safety evaluation.
 
+## 2026-11-23 safety hardening and reproducible build gates
+
+The original V229 controller requested single-owner longitudinal authority
+even while openpilot was disengaged, using a non-neutral "priming" packet.
+The original Panda source also allowed a disengaged 0 km/h prime envelope to
+be cached and overlaid onto stock AP traffic. **Both exceptions have been
+removed in the native 0.11.2 candidate.** The Panda now requires genuine
+longitudinal permission when *capturing* AND when *applying* an OP DAS_control
+template; in the absence of permission, the genuine AP frame is unchanged.
+
+The Tesla controller now emits the V229 0x659 ownership bit only when:
+OP is enabled and longitudinally active; CANCEL is false; CAN is valid and
+not timed out; gear is Drive; there is no physical brake, gas, AEB or ACC
+fault; and native Tesla Autosteer does not own lateral control. The
+controller no longer generates non-Drive or disengaged prime templates.
+**Do not assume the old zero-speed DI priming/auto-arming feature survives
+this change.** Restoring it would need independent hardware safety
+review, replay and validation of a safe, non-actuating mechanism.
+
+The Panda RX drivers now zero-initialise the received CAN packet before
+taking a full-size private copy for packet-aware forwarding. This avoids
+copying uninitialised trailing bytes from a classic 8-byte frame into
+the forwarded packet.
+
+Old source modules that depend on `openpilot.common.Params`,
+`openpilot.cereal.messaging` or the legacy LONG/ALC/CFG modules now
+import those only when constructing an HW1/HW2/HW3 controller/state.
+A standalone opendbc install can import `CarInterface` and compile
+the stock Tesla C safety regressions **without** loading the openpilot
+runtime. Attempting to construct actual Hybrid state/control without
+that runtime intentionally raises an error.
+
+New CI gates:
+
+- `.github/workflows/xnor-v0112-hybrid-panda-compiled.yml`:
+  source preflight, patch export and application in scratch clones;
+  host C safety compile and AEB/0x659 tests; native Cap'n Proto
+  schema load, standalone Tesla import check, and native
+  `test_tesla.py`, `test_tesla_hw1.py`, `test_tesla_hw23.py`
+  plus packet-aware Hybrid CFFI tests.
+- `.github/workflows/xnor-v0112-hybrid-panda-arm-compile.yml`:
+  cross-compiles scratch STM32F4 and STM32H7 Panda firmware using
+  the paired patched opendbc safety headers and the original
+  debug certificate. **Never flashes, connects to a Panda or
+  uploads a usable firmware binary.**
+
+The tests are present as GitHub Actions jobs but **no workflow execution
+or successful C/ARM compile is confirmed**. Even green scratch builds
+would leave full all-car regression, replay, vehicle-specific bus
+mapping, independent code review and LS2 lead/curve braking unresolved.
+
 ## Tesla vehicle-side source port (2026-11-23 continuation)
 
 The staged opendbc candidate now also includes:
@@ -173,9 +224,9 @@ has been observed as of this staging commit.**
 
 ## Safety/replay gates before any firmware flash or onroad authority
 
-- Build on the exact hardware-target Panda toolchain and independently
-  validate the resulting STM32F4/STM32H7 firmware. Host C success
-  alone does not prove hardware integration.
+- Confirm the new scratch STM32F4/STM32H7 build workflow succeeds
+  and independently inspect the resulting compiler diagnostics. It is
+  not a substitute for hardware-in-the-loop testing or independent review.
 - Run the existing full opendbc Tesla safety test suite on the
   candidate: `test_tesla_hw1.py`, `test_tesla_hw23.py`, `test_tesla.py`.
   Run the new packet suite against a compiled patched C safety library.
