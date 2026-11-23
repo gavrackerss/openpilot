@@ -68,6 +68,27 @@ small-model Tesla branch remains unchanged.
    `tests/test_xnor_v0112_params_contract.py`, plus
    `.github/workflows/xnor-v0112-native-contract.yaml`.
 
+## Additional native ABI isolation (2026-11-23)
+
+- `openpilot/jetlink_native_authority.py:attach_native` is now an explicit
+  fail-closed legacy entry point. It cannot wrap the v0.11.2 `ModelState`
+  using the obsolete `_Small` and `_reset_small` APIs.
+- `openpilot/jetlink_v0112_native.py` now requires `IsOffroad=True`
+  before creating any diagnostic joiner and again before each connection
+  attempt. Existing `in_control=lambda: True` continues to forbid swaps.
+- The native ABI contract now checks that `after_enqueue` defaults to
+  `None`; tests exercise legacy rejection, offroad gating and callback ABI.
+- GitHub Actions workflow now watches and compiles both Jetlink adapter
+  sources. These changes are source-level only, not a successful device
+  build or verified test run.
+- **Important remaining action output question:** upstream v0.11.2
+  `get_action_from_model` can consume the raw `action` head, while
+  the legacy Pixel response and older plan-derived fallback do not
+  establish equivalent direct-action semantics. This must be compared
+  from actual synchronized camera/model output traces before LS2 is
+  considered for longitudinal authority. Never treat a red displayed
+  path as proof of an immediate braking request.
+
 A separate static check of the current GitHub source validated: native
 version 0.11.2, unique custom struct IDs, four preserved Event slot
 numbers, unique service and Params names, Tesla/XNOR submodule URLs,
