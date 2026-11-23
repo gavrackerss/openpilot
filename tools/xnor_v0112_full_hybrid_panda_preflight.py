@@ -186,7 +186,8 @@ def audit() -> dict:
           "teslaAlcHandoverReady @63 :Bool;" in capnp and
           "teslaEacStatus @64 :UInt8;" in capnp and
           "teslaEacError @65 :UInt8;" in capnp and
-          "brake @5 :Float32;" in capnp,
+          capnp.count("brake @5 :Float32;") == 1 and
+          "deprecated :group {" in capnp,
           "Tesla car.capnp reuses native IDs or dropped diagnostic fields")
   require("DI_cruiseSet_native_0112" in carstate and
           "_cruise_set_scale" not in carstate and

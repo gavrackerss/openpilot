@@ -110,7 +110,8 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     self.assertIn("teslaAlcHandoverReady @63 :Bool;", capnp)
     self.assertIn("teslaEacStatus @64 :UInt8;", capnp)
     self.assertIn("teslaEacError @65 :UInt8;", capnp)
-    self.assertIn("brake @5 :Float32;", capnp)
+    self.assertEqual(capnp.count("brake @5 :Float32;"), 1)
+    self.assertIn("deprecated :group {", capnp)
     # Native schema text must survive without deleting or renumbering
     # any existing CarState entry.
     self.assertTrue(all(line in capnp.splitlines() for line in native.splitlines()))

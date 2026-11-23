@@ -176,8 +176,8 @@ struct CarState {
 
   gasPressed @4 :Bool;    # this is user pedal only
 
-  # Backward-compatible Tesla analog brake signal; HW2 currently publishes 0.0.
-  brake @5 :Float32;
+  # Native deprecated group already defines brake @5. Do not duplicate
+  # the field at the CarState root: Cap'n Proto ordinals share a namespace.
   brakePressed @6 :Bool;  # this is user pedal only
   regenBraking @45 :Bool; # this is user pedal only
   parkingBrake @39 :Bool;

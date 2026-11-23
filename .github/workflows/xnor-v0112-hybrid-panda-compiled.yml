@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/tesla-v0112-safety-venv"
-          "$RUNNER_TEMP/tesla-v0112-safety-venv/bin/pip" install --disable-pip-version-check pycapnp
+          "$RUNNER_TEMP/tesla-v0112-safety-venv/bin/pip" install --disable-pip-version-check pycapnp==2.1.0
           export TESLA_OPENDDBC_ROOT="$RUNNER_TEMP/opendbc-hybrid"
           "$RUNNER_TEMP/tesla-v0112-safety-venv/bin/python" - <<'PY'
           import os
