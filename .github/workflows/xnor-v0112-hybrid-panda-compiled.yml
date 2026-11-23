@@ -59,8 +59,19 @@ jobs:
              -o "$RUNNER_TEMP/xnor-v0112-safety.o"
           cc -shared "$RUNNER_TEMP/xnor-v0112-safety.o" -o "$RUNNER_TEMP/xnor-v0112-safety.so"
 
+      - name: Run compiled host-only Panda safety ownership and AEB smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -Wall -Wextra -Werror -std=gnu11 -DALLOW_DEBUG \
+             -I "$RUNNER_TEMP/opendbc-hybrid" \
+             "$GITHUB_WORKSPACE/migration/tesla_v0112/hybrid_panda_candidate/host_tests/test_hybrid_panda.c" \
+             -o "$RUNNER_TEMP/xnor-v0112-hybrid-host-smoke" -lm
+          "$RUNNER_TEMP/xnor-v0112-hybrid-host-smoke"
+
       - name: Show explicit unverified gates
         run: |
           echo 'C safety build complete. No ARM Panda firmware or firmware flash performed.'
-          echo 'Synthetic packet negative/positive tests still require compiled libsafety bindings and replay execution.'
+          echo 'Compiled host smoke covers the selected synthetic AEB/0x659/owner paths only.'
+          echo 'Full Panda safety suites, per-vehicle CAN replay and firmware flashing remain unverified.'
           echo 'NO VEHICLE AUTHORITY IS APPROVED.'
