@@ -16,16 +16,16 @@ from pathlib import Path
 
 import numpy as np
 
-from cereal import custom
+from openpilot.cereal import custom
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.models.constants import Meta, MetaSimPose, MetaTombRaider
-from openpilot.system.hardware.hw import Paths
+from openpilot.sunnypilot.models.paths import model_root
 
 REQUIRED_JSON_VERSION = 20
 SUPPORTED_JSON_VERSIONS = frozenset((15, 20))
 
-CUSTOM_MODEL_PATH = Paths.model_root()
+CUSTOM_MODEL_PATH = model_root()
 METADATA_PATH = Path(__file__).parent / '../models/supercombo_metadata.pkl'
 ModelManager = custom.ModelManagerSP
 
@@ -109,7 +109,7 @@ def _bundle_integrity_issues(bundle: custom.ModelManagerSP.ModelBundle | None) -
   if bundle is None or not getattr(bundle, 'models', None):
     return ['Saved bundle could not be parsed or contains no models']
 
-  root = Paths.model_root()
+  root = model_root()
   issues = []
   expected_files = _bundle_artifacts(bundle)
   if not expected_files:
