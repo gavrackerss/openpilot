@@ -117,7 +117,12 @@ def audit() -> dict:
   add = "BO_ 937 DAS_telemetry: 8 XXX"
   if add not in stage_dbc or add in native_dbc:
     raise RuntimeError("Additive lane telemetry DBC 0x3A9 absent/duplicated")
-  if stage_dbc.split(add, 1)[0].rstrip() != native_dbc.rstrip():
+  # The additive BO_937 belongs among BO_ declarations, before the VAL_
+  # tables. Removing *only* that block must reproduce the pinned DBC byte for
+  # byte, not just preserve its set of signal names.
+  insertion_start = stage_dbc.index(add)
+  insertion_end = stage_dbc.find("\n\n", insertion_start)
+  if insertion_end < 0 or stage_dbc[:insertion_start] + stage_dbc[insertion_end + 2:] != native_dbc:
     raise RuntimeError("Staged DBC modified existing XNOR messages/signals")
   names = message_names(stage_dbc)
   if names.get(937) != "DAS_telemetry":
