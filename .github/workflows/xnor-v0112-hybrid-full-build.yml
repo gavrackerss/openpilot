@@ -1,0 +1,84 @@
+name: XNOR 0.11.2 full Hybrid staging build (no installation)
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+    paths:
+      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'tools/xnor_v0112_assemble_hybrid_candidate.py'
+      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
+      - '.github/workflows/xnor-v0112-hybrid-full-build.yml'
+  pull_request:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+    paths:
+      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'tools/xnor_v0112_assemble_hybrid_candidate.py'
+      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
+      - '.github/workflows/xnor-v0112-hybrid-full-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CI: "1"
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "lfs.fetchexclude"
+  GIT_CONFIG_VALUE_0: "openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx"
+
+jobs:
+  scratch-openpilot-and-car:
+    name: Build native XNOR 0.11.2 openpilot against patched Hybrid opendbc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+          lfs: false
+      - name: Init exact Tesla Panda and opendbc dependency pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule update --init opendbc_repo panda
+          test "$(git -C opendbc_repo rev-parse HEAD)" = "3f86206a13c3181f0224e8f1424b836592e2b2d2"
+          test "$(git -C panda rev-parse HEAD)" = "fa83a40ad799c827ab9cbda4560cf3426531ceff"
+
+      - name: Assemble complete Hybrid source from the pinned reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_assemble_hybrid_candidate.py \
+            --output-dir "$RUNNER_TEMP/xnor-v0112-full-hybrid"
+          test -f "$RUNNER_TEMP/xnor-v0112-full-hybrid/XNOR_HYBRID_ASSEMBLY_MANIFEST.json"
+          grep -q '"vehicle_authority_qualified": false' \
+            "$RUNNER_TEMP/xnor-v0112-full-hybrid/XNOR_HYBRID_ASSEMBLY_MANIFEST.json"
+          git -C "$RUNNER_TEMP/xnor-v0112-full-hybrid/opendbc_repo" diff --check
+          git -C "$RUNNER_TEMP/xnor-v0112-full-hybrid/panda" diff --check
+
+      - name: Set up openpilot's pinned 0.11.2 desktop development dependencies
+        shell: bash
+        working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
+        run: |
+          set -euo pipefail
+          ./tools/op.sh setup
+
+      - name: Build complete native XNOR 0.11.2 with Tesla CarState, CAN and controller
+        shell: bash
+        working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          # The setup tool creates the project environment. The native
+          # management build also generates all native capnp/DBC modules.
+          ./tools/op.sh scons --minimal
+
+      - name: Validate no original source dependency was modified
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- panda opendbc_repo
+          git -C opendbc_repo status --porcelain
+          git -C panda status --porcelain
+          echo 'No source flash, no sendcan, no Panda USB, no vehicle authority.'
