@@ -72,7 +72,7 @@ jobs:
         run: git submodule update --init opendbc_repo
       - name: Check Tesla HW2 Panda AEB safety, native DBC and additive opendbc review patch
         run: |
-          python3 -m py_compile tools/xnor_v0112_tesla_panda_preflight.py tools/xnor_v0112_export_tesla_opendbc_patch.py migration/tesla_v0112/di_state_layout.py
+          python3 -m py_compile tools/xnor_v0112_tesla_panda_preflight.py tools/xnor_v0112_export_tesla_opendbc_patch.py migration/tesla_v0112/di_state_layout.py migration/tesla_v0112/opendbc_overlay/safety/tests/test_xnor_tesla_hw23_negative.py
           python3 tools/xnor_v0112_tesla_panda_preflight.py
           python3 tests/test_xnor_v0112_tesla_panda_overlay.py -v
           python3 tests/test_xnor_v0112_tesla_passive_patch.py -v
