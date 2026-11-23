@@ -11,6 +11,7 @@ on:
       - 'selfdrive/controls/lib/longitudinal_planner.py'
       - 'selfdrive/controls/plannerd.py'
       - 'tests/test_xnor_v0112_port_contract.py'
+      - 'tools/xnor_v0112_compare_planners.py'
       - '.github/workflows/xnor-v0112-port-contract.yaml'
   workflow_dispatch:
 
@@ -35,4 +36,5 @@ jobs:
             selfdrive/controls/lib/xnor_v0112_candidates.py \
             tests/test_xnor_v0112_port_contract.py \
             tests/test_xnor_v0112_lead_only_mpc.py \
-            tests/test_xnor_v0112_staged_planner.py
+            tests/test_xnor_v0112_staged_planner.py \
+            tools/xnor_v0112_compare_planners.py
