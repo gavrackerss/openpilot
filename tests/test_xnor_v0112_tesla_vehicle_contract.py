@@ -182,6 +182,42 @@ class TeslaHybridVehicleFunctionContracts(unittest.TestCase):
     CS.out.gearShifter = "drive"
     self.assertTrue(self.compute_owner(sender, CC, CS))
 
+  def test_v229_never_emits_priming_or_non_drive_templates(self):
+    source = (TESLA / "carcontroller.py").read_text()
+    fn = source[source.index("  def _v229_stopgo_long("):
+                source.index("  def update(", source.index("  def _v229_stopgo_long("))]
+    self.assertNotIn('mode = "priming"', fn)
+    self.assertNotIn("_V229_PRIME_ACCEL", fn)
+    self.assertNotIn("_V229_PRIME_JERK", fn)
+    self.assertIn('self._v229_mode = "native_not_drive"', fn)
+    self.assertIn('self._v229_mode = "native_not_engaged"', fn)
+
+    # Exercise the *actual* staged method: no CAN templates must escape
+    # when gear is not Drive, even if a stale owner latch is injected.
+    method = detached_function(
+      "carcontroller.py", "CarController", "_v229_stopgo_long", {
+        "CV": SimpleNamespace(MS_TO_KPH=3.6),
+        "structs": SimpleNamespace(
+          CarState=SimpleNamespace(GearShifter=SimpleNamespace(drive="drive"))
+        ),
+        "_V229_DI_ENGAGED_STATES": ("ENABLED", "STANDSTILL", "OVERRIDE"),
+        "_V229_UNOWNED_DI_GRACE_FRAMES": 50,
+      }
+    )
+    stub = SimpleNamespace(
+      frame=0, _v229_owner_now=True, _v229_mode="unknown",
+      _v229_di_engaged_since_frame=-1, _v229_op_enabled_during_di=False
+    )
+    CS = SimpleNamespace(
+      stock_cruise_state="STANDBY",
+      out=SimpleNamespace(vEgo=0.0, gearShifter="park")
+    )
+    CC = SimpleNamespace(enabled=True, longActive=True)
+    frames = []
+    method(stub, CC, CS, frames)
+    self.assertEqual(frames, [])
+    self.assertEqual(stub._v229_mode, "native_not_drive")
+
   def test_v229_absent_CC_or_state_fails_closed(self):
     sender, CC, CS = self.eligible_v229_states()
     self.assertFalse(self.compute_owner(sender, None, CS))
