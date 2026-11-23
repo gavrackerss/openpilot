@@ -27,7 +27,9 @@ class CarInterface(CarInterfaceBase):
       return False, False, False
     disabled = bool(p.get_bool("TinklaAutopilotDisabled"))
     hybrid = bool(p.get_bool("TinklaHybridNativeAP")) and not disabled
-    ignore_hud_aeb = bool(p.get_bool("TinklaIgnoreStockAeb"))
+    # Do not suppress stock AEB warnings in this unqualified native port.
+    # The historical HUD override and native DAS_lssState layouts conflict.
+    ignore_hud_aeb = False
     return disabled, hybrid, ignore_hud_aeb
 
   @staticmethod

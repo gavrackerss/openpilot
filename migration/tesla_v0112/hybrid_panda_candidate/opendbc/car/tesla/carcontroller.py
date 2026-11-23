@@ -76,6 +76,9 @@ _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
 # and overlays it onto the genuine AP 0x2B9 as that frame crosses bus2->bus0, preserving stock
 # cadence/counter. This is intentionally different from _ARM_ENABLE_CHASSIS (unsolicited direct TX).
 _UNITY_2B9_OVERLAY_TEMPLATE = False
+# Legacy 0x399/0x389 warning suppression is disabled until native
+# DAS_lssState 0x389 and genuine AEB/PMM HUD behaviour are replay-qualified.
+_ALLOW_LEGACY_HUD_WARNING_OVERLAY = False
 
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
 # Transmit a full GTW_carConfig (0x398) frame with GTW_autopilot=2 NATIVELY on the AP module's
@@ -842,6 +845,8 @@ class CarController(CarControllerBase):
     payload is merged onto the stock AP frames in the panda forward path, keeping
     stock timing/counters while clearing the false PMM/AEB HUD state.
     """
+    if not _ALLOW_LEGACY_HUD_WARNING_OVERLAY:
+      return
     if self.CP.carFingerprint not in LEGACY_CARS:
       return
     if not (hasattr(self.tesla_can, "create_das_status") and hasattr(self.tesla_can, "create_das_status2")):

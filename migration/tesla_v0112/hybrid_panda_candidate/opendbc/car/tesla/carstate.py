@@ -506,65 +506,32 @@ class CarState(CarStateBase):
 
     self._prev_pull_button = int(btn)
 
-  def _pick_stock_cruise_set_u(self, di_state: dict, v_ego_ms: float, cruise_enabled: bool, speed_units: str) -> tuple[float, str]:
-    """Pick Tesla cruise setpoint in MPH/KPH without changing the DBC.
+  def _pick_stock_cruise_set_u(self, di_state: dict, v_ego_ms: float,
+                               cruise_enabled: bool, speed_units: str) -> tuple[float, str]:
+    """Interpret exactly the PINNED XNOR 0.11.2 DI_state DBC (CAN 0x368).
 
-    - If stock cruise is disabled (XNOR lateral-only), DI_cruiseSet may look like ~0.5*vEgo.
-      Prefer DI_digitalSpeed to keep the Comma UI sane.
-    - If stock cruise is enabled, choose between DI_cruiseSet, DI_digitalSpeed, and DI_cruiseSet*2
-      using plausibility + stability.
+    Native DI_cruiseSet is 32|9@1+ with factor 0.5 and DI_digitalSpeed
+    is 48|8@1+. CANParser applies that factor: the earlier heuristic
+    scaling by 2 could double a correct set speed.
+
+    Do not infer vehicle DBC layout from plausible values. Real 0x368
+    captures are a deployment prerequisite.
     """
     try:
-      a = float(di_state.get("DI_cruiseSet", 0.0) or 0.0)
-    except Exception:
-      a = 0.0
-    try:
-      b = float(di_state.get("DI_digitalSpeed", 0.0) or 0.0)
-    except Exception:
-      b = 0.0
-
-    uom = "KPH" if speed_units == "KPH" else "MPH"
-    ms_to_u = CV.MS_TO_KPH if uom == "KPH" else CV.MS_TO_MPH
-    v_u = float(v_ego_ms) * ms_to_u
-    thr = max(2.5, 0.10 * max(v_u, 1.0))
-
-    prev_enabled = bool(getattr(self, "_stock_cruise_enabled_prev", False))
-    if bool(cruise_enabled) and (not prev_enabled) and a > 0.0:
-      # On enable edge, setpoint typically equals current speed; detect half-scale once.
-      if (b > 0.0) and (abs((2.0 * a) - b) <= thr) and (abs(a - b) > thr):
-        self._cruise_set_scale = 2.0
-      elif (abs((2.0 * a) - v_u) <= thr) and (abs(a - v_u) > thr):
-        self._cruise_set_scale = 2.0
-      elif (b > 0.0) and (abs(a - b) <= thr):
-        self._cruise_set_scale = 1.0
-      elif abs(a - v_u) <= thr:
-        self._cruise_set_scale = 1.0
-
-    scale = float(getattr(self, "_cruise_set_scale", 1.0) or 1.0)
-    self._stock_cruise_enabled_prev = bool(cruise_enabled)
-
-    if bool(cruise_enabled):
-      if a > 0.0:
-        val = a * scale
-        src = "DI_cruiseSet" if scale < 1.5 else "DI_cruiseSet_x2"
-        return float(val), src
-      if b > 0.0:
-        return float(b), "DI_digitalSpeed"
-      return 0.0, "none"
-
-    # Stock cruise disabled: keep UI stable by using digital speed (and correct half-scale if present).
-    if b > 0.0:
-      if (abs((2.0 * b) - v_u) <= thr) and (abs(b - v_u) > thr):
-        return float(2.0 * b), "DI_digitalSpeed_x2"
-      return float(b), "DI_digitalSpeed"
-
-    if a > 0.0:
-      # Fallback (rare): if DI_cruiseSet is the only non-zero, apply learned scale.
-      val = a * scale
-      src = "DI_cruiseSet" if scale < 1.5 else "DI_cruiseSet_x2"
-      return float(val), src
-
-    return 0.0, "none"
+      set_u = float(di_state.get("DI_cruiseSet", 0.0) or 0.0)
+      speed_u = float(di_state.get("DI_digitalSpeed", 0.0) or 0.0)
+    except (ValueError, TypeError, OverflowError):
+      return 0.0, "invalid"
+    if not math.isfinite(set_u) or not math.isfinite(speed_u):
+      return 0.0, "nonfinite"
+    if cruise_enabled:
+      if 0.0 < set_u <= 255.5:
+        return set_u, "DI_cruiseSet_native_0112"
+      # Do not confuse dash speed with stock cruise set speed.
+      return 0.0, "DI_cruiseSet_unavailable"
+    if 0.0 < speed_u <= 250.0:
+      return speed_u, "DI_digitalSpeed_native_0112"
+    return 0.0, "DI_digitalSpeed_unavailable"
 
   def _update_cruise_set_speed(
     self,
