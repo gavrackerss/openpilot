@@ -120,6 +120,61 @@ not modified by these commits.
       Tesla CarState and independent replay before any future integration.
     - Native XNOR `controlsd`, Tesla opendbc and Panda remain unchanged.
 
+## 2026-11-23 Tesla Panda/opendbc native overlay
+
+12. **Native XNOR Tesla overlay is staged**, **not** applied to the live
+    `opendbc_repo` gitlink (commit `3f86206a`) or `panda`
+    (commit `fa83a40a`). See
+    [overlay README](migration/tesla_v0112/opendbc_overlay/README.md).
+    The active `opendbc` implementation still runs XNOR's original source.
+    - `car/tesla/values.py`: copied from pinned native source, with
+      legacy `CruiseButtons` and curve-assist configuration added as
+      passive declarations. Native `AngleSteeringLimitsVM` and
+      `TeslaSafetyFlags` are preserved (no stock-AEB override).
+    - `dbc/tesla_can.dbc`: contains all pinned native messages and a
+      single new legacy `DAS_telemetry` message `937/0x3A9`, inserted
+      before the value-table declarations. No native signal layout
+      is changed.
+    - `car/tesla/radar_interface.py`: restores `aRel`, `yvRel`
+      and `measured` while preserving XNOR's cached last Bosch radar
+      result when no new 8 Hz sample arrives. This is a **behavioural**
+      port needing radar-log replay and is not included in the passive
+      patch.
+    - `safety/modes/tesla_legacy.h`: exact, byte-identical copy of
+      pinned XNOR Panda safety (283 lines). The old 2,223-line
+      custom safety header with 0x659 owner carrier, templates and
+      AEB overrides remains archived but **unmerged**.
+13. **Source contract and passive patch:** 
+    `tools/xnor_v0112_tesla_panda_preflight.py` locks exact native blob
+    IDs and fails if AEB TX rejection, native DBC signals, native
+    radar timing/cache, VM safety flags or the baseline header change.
+    `tools/xnor_v0112_export_tesla_opendbc_patch.py` generates a
+    **review-only** git-apply patch of *only* native Tesla values additions
+    and `0x3A9` DBC telemetry. Safety is excluded.
+    The branch CI workflow now checks syntax, performs the preflight
+    and asserts `git apply --check` with the exact pinned submodule.
+    **No CI run is confirmed yet.**
+14. **Panda HW2 negative tests staged:**
+    `migration/tesla_v0112/opendbc_overlay/safety/tests/test_xnor_tesla_hw23_negative.py`
+    tests 0x659/0x2B9 TX rejection on external Panda, OP-injected AEB
+    rejection, native AEB forwarding and suppression of 0x2BF OP TX,
+    and the unsupported AEB-ignore flag. These require compiled
+    `opendbc.safety.tests.libsafety` and have **not been executed**.
+15. **Unresolved compatibility gates:**
+    - `DI_state` `0x368` native and installed `DI_cruiseSet` /
+      `DI_digitalSpeed` move between bits 32 and 48 and differ in
+      scaling. Read-only dual decoder
+      `migration/tesla_v0112/di_state_layout.py` exposes both
+      interpretations, with *no automatic layout choice*.
+    - `DAS_status2` `0x389` native `DAS_lssState` bits 31–33
+      overlap installed `DAS_relaxCruiseLimits` and `DAS_csaState`.
+    - Native Tesla HW2 dual-Panda LONG_CONTROL flag placement and
+      archived 0x659/0x2B9/0x2BF template ownership must be
+      reconciled in an independently buildable opendbc fork before
+      attempting custom longitudinal control.
+    - No active Tesla CarState/CarController, opendbc safety, Panda
+      firmware or SCons/native build has been changed/validated.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
