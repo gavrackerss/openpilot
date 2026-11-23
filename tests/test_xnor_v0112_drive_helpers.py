@@ -4,10 +4,11 @@
 The XNOR helper retains its two-value (acceleration, should_stop) API.
 """
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 from openpilot.selfdrive.controls.lib.drive_helpers import (
-  MIN_STABLE_DELAY, get_accel_from_plan, get_curvature_from_plan, should_stop,
+  MIN_STABLE_DELAY, get_accel_from_plan, get_curvature_from_plan, should_stop, radar_lead_present,
 )
 
 
@@ -47,6 +48,20 @@ class V0112StableDelayTest(unittest.TestCase):
     self.assertTrue(should_stop(0.2, -0.1))
     self.assertFalse(should_stop(5.0, -2.0))
     self.assertFalse(should_stop(0.2, 0.3))
+
+
+  def test_legacy_radar_lead_status(self):
+    self.assertTrue(radar_lead_present(SimpleNamespace(status=True)))
+    self.assertFalse(radar_lead_present(SimpleNamespace(status=False)))
+
+  def test_v0112_radar_lead_present(self):
+    self.assertTrue(radar_lead_present(SimpleNamespace(present=True)))
+    self.assertFalse(radar_lead_present(SimpleNamespace(present=False)))
+
+  def test_missing_and_dict_radar_leads(self):
+    self.assertFalse(radar_lead_present(None))
+    self.assertTrue(radar_lead_present({"present": True}))
+    self.assertTrue(radar_lead_present({"status": True}))
 
 
 if __name__ == "__main__":
