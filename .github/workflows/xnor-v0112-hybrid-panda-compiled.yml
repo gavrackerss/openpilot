@@ -24,6 +24,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Initialise exact XNOR 0.11.2 Panda/opendbc pins
         run: git submodule update --init opendbc_repo panda
@@ -71,10 +74,48 @@ jobs:
              -o "$RUNNER_TEMP/xnor-v0112-hybrid-host-smoke" -lm
           "$RUNNER_TEMP/xnor-v0112-hybrid-host-smoke"
 
+      - name: Validate full native Cap'n Proto schema and Tesla extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/tesla-v0112-safety-venv"
+          "$RUNNER_TEMP/tesla-v0112-safety-venv/bin/pip" install --disable-pip-version-check pycapnp
+          export TESLA_OPENDDBC_ROOT="$RUNNER_TEMP/opendbc-hybrid"
+          "$RUNNER_TEMP/tesla-v0112-safety-venv/bin/python" - <<'PY'
+          import os
+          from pathlib import Path
+          import capnp
+          root = Path(os.environ["TESLA_OPENDDBC_ROOT"])
+          file = root / "opendbc/car/car.capnp"
+          schema = capnp.load(str(file), imports=[str(file.parent)])
+          state = schema.CarState.new_message()
+          state.carNotReady = True
+          state.followDistanceS = 4
+          state.adaptiveCruiseEnabled = True
+          state.teslaEacStatus = 2
+          assert state.carNotReady and state.followDistanceS == 4
+          assert state.adaptiveCruiseEnabled and state.teslaEacStatus == 2
+          print("Pinned 0.11.2 CarState Cap'n Proto loads and Tesla tags do not collide.")
+          PY
+
+      - name: Execute compiled Tesla HW1/HW2/HW3/Model3 safety regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/tesla-v0112-safety-venv"
+          "$VENV/bin/pip" install --disable-pip-version-check -e "$RUNNER_TEMP/opendbc-hybrid" 'cffi>=1.16' 'pytest>=8'
+          cd "$RUNNER_TEMP/opendbc-hybrid"
+          "$VENV/bin/python" -m pytest -q \
+            opendbc/safety/tests/test_tesla.py \
+            opendbc/safety/tests/test_tesla_hw1.py \
+            opendbc/safety/tests/test_tesla_hw23.py \
+            opendbc/safety/tests/test_tesla_hybrid_packet.py
+
       - name: Show explicit unverified gates
         run: |
           echo 'C safety build complete. No ARM Panda firmware or firmware flash performed.'
           echo 'Compiled host smoke covers the selected synthetic AEB/0x659/owner paths only.'
-          echo 'Full Panda safety suites, per-vehicle CAN replay and firmware flashing remain unverified.'
+          echo 'Tesla Python CFFI regressions have run if this job is green; all-car full suites remain unverified.'
+          echo 'CAN replay and firmware flashing remain unverified.'
           echo 'Tesla car.capnp generator and HW2 CarState/Controller runtime integration remain unverified.'
           echo 'NO VEHICLE AUTHORITY IS APPROVED.'
