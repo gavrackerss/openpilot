@@ -156,3 +156,69 @@ Keep the user's comma on the known-good small model, not this staging branch.
 
 Do **not** bump the version string, merge this staging branch into `xnor-dev`,
 or enable LS2 longitudinal authority based on these commits.
+
+## Full parallel v0.11.2 MPC and planner port (staged, not active)
+
+A complete **source-level** v0.11.2 longitudinal MPC and planner have now been
+copied into the quarantined `selfdrive/controls/lib/v0112_migration/` package:
+
+- `long_mpc.py` — full upstream v0.11.2 **lead-only** MPC; excludes the
+  legacy cruise obstacle, maintains .status/.present lead compatibility,
+  preserves the Tesla `followDistanceS` override, and uses the existing
+  Acados solver Python ABI. The symbolic OCP problem-generator methods in
+  legacy and v0.11.2 sources differ only by a comment, **not** by their
+  equations. This does not establish native binary parity.
+- `longitudinal_planner.py` — full upstream v0.11.2 independent
+  MPC/cruise/E2E arbitration, including AccelBoost, adapted for legacy
+  `liveParameters`, `get_accel_from_plan` tuple return and stop semantics.
+  The legacy Cereal `longitudinalPlan` has no `accelBoost` field, so that
+  optional diagnostic field is not published. The policy behaviour remains
+  isolated from the active manager and actual driver.
+- `accel_boost.py` — staged upstream v0.11.2 override-dependent
+  acceleration boost (not connected to the car).
+- `__init__.py` — marks this as a separate migration package.
+- `tests/test_xnor_v0112_lead_only_mpc.py` — checks lead-only obstacle
+  selection, status/present schemas and Tesla gap settings using a fake solver.
+- `tests/test_xnor_v0112_staged_planner.py` — checks actual staged
+  Experimental and non-Experimental arbitration using an injected fake MPC.
+- `tests/test_xnor_v0112_port_contract.py` — zero-dependency AST comparison
+  of the symbolic MPC generators, plus a safety assertion that active
+  `selfdrive/controls/plannerd.py` still imports the old planner.
+- `.github/workflows/xnor-v0112-port-contract.yaml` — contains an
+  independent source-contract and syntax CI workflow. As of this update,
+  **no workflow run has been confirmed**.
+- `tools/xnor_v0112_compare_planners.py` — read-only, open-loop comparison
+  of legacy vs staged planners using saved LS2 rlogs. This script has not
+  yet been run against the user's actual rlogs or on a comma device.
+
+### Replay when a parked/offroad or workstation environment is available
+
+```bash
+cd /data/openpilot
+
+# Run zero-dependency structural checks first:
+python3 tests/test_xnor_v0112_port_contract.py -v
+
+# Run contract and policy tests with the XNOR venv/native dependencies:
+python3 tests/test_xnor_v0112_lead_only_mpc.py -v
+python3 tests/test_xnor_v0112_staged_planner.py -v
+
+# Compare old and new MPC + planner over recorded messages. PARKED/OFFROAD ONLY:
+python3 tools/xnor_v0112_compare_planners.py /data/ls2_replay/rlogls2.zip \
+  --out /data/xnor_v0112_planner_replay
+```
+
+Outputs: `old_vs_0112_planner.csv`, `planner_summary.json`, and
+`replay_error.json` if a process fails. The replay runs **two Acados
+solver instances** in Python, but is read-only: no CAN publication, no
+Pixel inference, no camera or manager processes. If run on comma hardware,
+the vehicle must be parked and openpilot offroad.
+
+### Safety/readiness reminder
+
+**Ported source does not equal deployable v0.11.2 software.** The main
+`selfdrive/controls/lib/longitudinal_planner.py`, active
+`long_mpc.py`, native solver, camera pipeline, Tesla/panda binaries,
+system manager, dependency tree, and `COMMA_VERSION` have not been
+switched to v0.11.2. LS2 braking failures remain unresolved and its
+longitudinal authority must remain disabled.
