@@ -1291,8 +1291,15 @@ class CarController(CarControllerBase):
       self._automated_cruise_action_time_ms = int(self._now_ms())
 
   # --- V229: Unity-style stop-and-go owner -------------------------------------------------------
-  def _v229_compute_owner(self, CS) -> bool:
-    """True while OP should be the single DAS_control author (panda enforces the same rules)."""
+  def _v229_compute_owner(self, CC, CS) -> bool:
+    """Request V229 longitudinal ownership only during genuine OP acceleration control.
+
+    A drive-latched Hybrid selection is NOT authorization. The original port
+    requested ownership during disengaged/priming states, potentially causing
+    a synthetic ACC_ON to replace native AP frames. Keep native authority
+    until engaged, CAN-valid, drive gear, and physically free of brake/gas.
+    Panda independently validates all critical sources and template content.
+    """
     if not self._v229_stopgo_selected:
       return False
     autopilot_disabled = bool(self._cached_autopilot_disabled)
@@ -1302,8 +1309,20 @@ class CarController(CarControllerBase):
     if not (hybrid or ap_disabled_acc):
       return False
     cs_out = getattr(CS, "out", None)
-    # Unity parity: genuine native Autosteer owns TACC. Hand DAS_control back to the AP.
-    if hybrid and bool(getattr(cs_out, "stockLkas", False)):
+    cc_cruise = getattr(CC, "cruiseControl", None)
+    if cs_out is None or not bool(getattr(CC, "enabled", False)) or not bool(getattr(CC, "longActive", False)):
+      return False
+    if bool(getattr(cc_cruise, "cancel", True)):
+      return False
+    if not bool(getattr(cs_out, "canValid", False)) or bool(getattr(cs_out, "canTimeout", True)):
+      return False
+    if getattr(cs_out, "gearShifter", None) != structs.CarState.GearShifter.drive:
+      return False
+    if (bool(getattr(cs_out, "brakePressed", True)) or bool(getattr(cs_out, "gasPressed", True)) or
+        bool(getattr(cs_out, "stockAeb", True)) or bool(getattr(cs_out, "accFaulted", True))):
+      return False
+    # Genuine native Autosteer owns TACC. Do not author a competing frame.
+    if hybrid and bool(getattr(cs_out, "stockLkas", True)):
       return False
     return True
 
@@ -1400,7 +1419,7 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
-    self._v229_owner_now = self._v229_compute_owner(CS)
+    self._v229_owner_now = self._v229_compute_owner(CC, CS)
     native_alc_turn = self._native_alc_virtual_hold(CC, CS)
     # V223: direct longitudinal owner request follows OP's independent stalk latch,
     # not native TACC. Both pandas independently require fresh real pedal/brake/AP
