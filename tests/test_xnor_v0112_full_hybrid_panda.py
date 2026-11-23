@@ -52,6 +52,41 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     fdcan = (BASE / "panda/board/drivers/fdcan.h").read_text()
     self.assertIn("current_safety_mode != SAFETY_TESLA_LEGACY", fdcan)
 
+  def test_v229_disengaged_priming_and_revoked_authority_never_modify_ap(self):
+    safety = (BASE / "opendbc/opendbc/safety/modes/tesla_legacy.h").read_text()
+    capture = safety[safety.index("static void tesla_legacy_v229_capture_das_control("):
+                     safety.index("static void tesla_legacy_v229_observe_di_state(")]
+    substitute = safety[safety.index("static bool tesla_legacy_v229_apply_das_control("):
+                        safety.index("// --- TX hook ---")]
+    self.assertIn("if (!long_allowed) {", capture)
+    self.assertIn("tesla_legacy_v229_tmpl_valid = false;", capture)
+    self.assertNotIn("!long_allowed && !neutral && !priming", capture)
+    self.assertIn("if (!controls_allowed || !get_longitudinal_allowed()) {", substitute)
+    self.assertIn("return false;", substitute)
+    smoke = (BASE / "host_tests/test_hybrid_panda.c").read_text()
+    self.assertIn("test_disengaged_priming_never_rewrites_a_genuine_ap_frame", smoke)
+    self.assertIn("test_captured_template_revoked_before_stock_frame_is_not_applied", smoke)
+
+  def test_v229_controller_does_not_take_longitudinal_without_driver_permission(self):
+    controller = (BASE / "opendbc/opendbc/car/tesla/carcontroller.py").read_text()
+    gate = controller[controller.index("def _v229_compute_owner(self, CC, CS)"):
+                      controller.index("def _v229_stopgo_long(", controller.index("def _v229_compute_owner(self, CC, CS)"))]
+    for token in (
+      '"longActive", False', '"enabled", False', '"cancel", True',
+      '"canValid", False', '"canTimeout", True', '"brakePressed", True',
+      '"gasPressed", True', '"stockAeb", True', '"accFaulted", True',
+      "structs.CarState.GearShifter.drive",
+    ):
+      self.assertIn(token, gate)
+
+  def test_both_hardware_drivers_zero_initialise_complete_forward_copy(self):
+    for driver in ("bxcan.h", "fdcan.h"):
+      source = (BASE / "panda/board/drivers" / driver).read_text()
+      rx = source[source.index("void can_rx("):]
+      self.assertIn("CANPacket_t to_push = {0};", rx, driver)
+      self.assertIn("CANPacket_t to_send = to_push;", rx, driver)
+      self.assertIn("safety_rx_hook(&to_push)", rx, driver)
+
   def test_0x659_never_directly_written_to_vehicle(self):
     source = (BASE / "opendbc/opendbc/safety/modes/tesla_legacy.h").read_text()
     self.assertIn("if (addr == 0x659)", source)
