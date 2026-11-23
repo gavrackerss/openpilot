@@ -119,6 +119,13 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     self.assertIn("OP_STALK_ENABLE = 64", values)
     self.assertIn("IGNORE_STOCK_AEB = 128", values)
 
+  def test_legacy_carstate_does_not_write_removed_root_brake_field(self):
+    state = (BASE / "opendbc/car/tesla/carstate.py").read_text()
+    self.assertNotIn("ret.brake = ", state)
+    self.assertIn("ret.brakePressed =", state)
+    capnp = (BASE / "opendbc/car/car.capnp").read_text()
+    self.assertEqual(capnp.count("brake @5 :Float32;"), 1)
+
   def test_native_car_schema_adds_no_colliding_tesla_tags(self):
     capnp = (BASE / "opendbc/car/car.capnp").read_text()
     native = (SOURCES["opendbc"] / "opendbc/car/car.capnp").read_text()

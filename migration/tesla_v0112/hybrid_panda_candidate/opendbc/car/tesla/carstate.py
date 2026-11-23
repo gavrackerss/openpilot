@@ -1094,7 +1094,8 @@ class CarState(CarStateBase):
     ret.gasPressed = cp_party.vl["DI_systemStatus"]["DI_accelPedalPos"] > 0
 
     # Brake pedal
-    ret.brake = 0
+    # Numeric brake is a deprecated nested Cap'n Proto field in 0.11.2.
+    # Only physical brakePressed is exposed to the control stack.
     ret.brakePressed = cp_party.vl["ESP_status"]["ESP_driverBrakeApply"] == 2
 
     # Steering wheel
@@ -1479,7 +1480,8 @@ class CarState(CarStateBase):
     ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > 0
 
     # Brake pedal
-    ret.brake = 0
+    # Numeric brake is a deprecated nested Cap'n Proto field in 0.11.2.
+    # Only physical brakePressed is exposed to the control stack.
     ret.brakePressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
 
     # Steering wheel
