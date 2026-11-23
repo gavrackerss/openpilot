@@ -27,6 +27,11 @@ NATIVE_BLOBS = {
     "opendbc/car/tesla/radar_interface.py": "c379f2163b0d3d59a28b5073c75590017d0c3736",
     "opendbc/dbc/tesla_can.dbc": "447231d5655961e0ee69e89d2cdf43e77c262819",
     "opendbc/safety/tests/libsafety/libsafety_py.py": "23c9dccc26032d9147f54666dd54d5094e7f49e2",
+    "opendbc/car/car.capnp": "464743e33f4bc275fbed4744231e0f991c829543",
+    "opendbc/car/tesla/carcontroller.py": "6d5e40a1e74b0f10c43ecdffd626ae82337cb745",
+    "opendbc/car/tesla/carstate.py": "eb44677e0a85a5b47dfdc60f3d4faff657476152",
+    "opendbc/car/tesla/teslacan.py": "9760f926615ef90b2c0897ef217c59330dd1bbc8",
+    "opendbc/car/tesla/teslacan_legacy.py": "3d905b7754d0021b427d079c42166c29b95db2",
   },
   "panda": {
     "board/drivers/bxcan.h": "52872e3c2ae9fab162ed9a3074622167bd08c592",
@@ -34,6 +39,17 @@ NATIVE_BLOBS = {
   },
 }
 NEW_TESTS = ["opendbc/safety/tests/test_tesla_hybrid_packet.py"]
+NEW_VEHICLE_FILES = (
+  "opendbc/car/tesla/carcontroller_native_0112.py",
+  "opendbc/car/tesla/carstate_native_0112.py",
+  "opendbc/car/tesla/legacy_modules/__init__.py",
+  "opendbc/car/tesla/legacy_modules/ALC_module.py",
+  "opendbc/car/tesla/legacy_modules/ACC_module.py",
+  "opendbc/car/tesla/legacy_modules/BLNK_module.py",
+  "opendbc/car/tesla/legacy_modules/CFG_module.py",
+  "opendbc/car/tesla/legacy_modules/HSO_module.py",
+  "opendbc/car/tesla/legacy_modules/LONG_module.py",
+)
 
 
 def git_blob(path: Path) -> str:
