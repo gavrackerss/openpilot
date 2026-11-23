@@ -66,7 +66,9 @@ def assemble(destination: Path, *, run_host_tests: bool = False) -> dict:
   ci_base = os.getenv("GITHUB_BASE_REF", "")
   ci_ref = os.getenv("GITHUB_REF_NAME", "")
   ci_verification = (os.getenv("GITHUB_ACTIONS") == "true" and
-                     (ci_base == required or ci_ref == required))
+                     os.getenv("GITHUB_REPOSITORY") == "gavrackerss/openpilot" and
+                     (ci_base == required or ci_ref in (
+                       required, "upgrade/xnor-v0112-hybrid-build-verification")))
   if native_branch != required and not ci_verification:
     raise RuntimeError("Assemble only the XNOR 0.11.2 staging branch or its CI verification PR")
 

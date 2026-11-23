@@ -117,9 +117,10 @@ class CarInterface(CarInterfaceBase):
 
     # Independent safety checks still gate actual longitudinal control.
     ret.minEnableSpeed = -1.
-    ret.vEgoStopping = 0.1
-    ret.vEgoStarting = 0.1
-    ret.stoppingDecelRate = 0.3
+    # vEgoStopping/vEgoStarting/stoppingDecelRate are deprecated group
+    # members in pinned 0.11.2 capnp; setting them as root fields causes
+    # CarInterface.get_non_essential_params() to raise AttributeError.
+    # Use the native 0.11.2 longitudinal defaults until replay-qualified.
 
     # ret.dashcamOnly = candidate in (CAR.TESLA_MODEL_X) # dashcam only, pending find invalidLkasSetting signal
 

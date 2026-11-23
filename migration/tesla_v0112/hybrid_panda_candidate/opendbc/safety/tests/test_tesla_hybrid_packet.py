@@ -26,7 +26,7 @@ def pkt(addr: int, bus: int, data: bytes):
 
 
 def payload(packet) -> bytes:
-  return bytes(packet[0].data[:8])
+  return bytes(packet[0].data[0:8])
 
 
 class TestXnorHybridPandaPacket(unittest.TestCase):
