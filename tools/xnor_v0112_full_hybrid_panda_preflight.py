@@ -114,6 +114,11 @@ def audit() -> dict:
   require("static bool tesla_legacy_fwd_msg_hook(" in mode and
           ".fwd_msg = tesla_legacy_fwd_msg_hook" in mode,
           "Full Tesla Hybrid fwd_msg receiver not registered")
+  require("if (!long_allowed) {" in mode and
+          "tesla_legacy_v229_tmpl_valid = false;" in mode and
+          "if (!controls_allowed || !get_longitudinal_allowed()) {" in mode,
+          "Disengaged V229 templates must be rejected at capture AND forward")
+
   for token in ("0x659", "tesla_legacy_v229_capture_das_control",
                 "tesla_legacy_v229_apply_das_control", "tesla_legacy_stock_aeb",
                 "tesla_legacy_v229_observe_di_state", "TESLA_LEGACY_TX_MSGS_LONG",
@@ -176,6 +181,14 @@ def audit() -> dict:
           "_UNITY_2B9_OVERLAY_TEMPLATE = False" in controller and
           "_ALLOW_LEGACY_HUD_WARNING_OVERLAY = False" in controller,
           "VM steering limit, native fallback, or experimental safety gate broken")
+  require("def _v229_compute_owner(self, CC, CS)" in controller and
+          'getattr(CC, "longActive", False)' in controller and
+          'getattr(cs_out, "canValid", False)' in controller and
+          'getattr(cs_out, "stockAeb", True)' in controller and
+          'getattr(cs_out, "brakePressed", True)' in controller and
+          'getattr(cs_out, "gasPressed", True)' in controller,
+          "0x659/V229 owner may be requested when CC or physical safety is missing")
+
   require("def create_fake_das_msg(" in teslacan and
           "def create_stalk_request(" in teslacan and
           "def create_telemetry_road_info(" in teslacan,
@@ -216,6 +229,8 @@ def audit() -> dict:
     "carNotReady_tag_61_preserved": True,
     "tesla_follow_distance_tag": 66,
     "legacy_HUD_warning_override_default": "OFF",
+    "disengaged_v229_priming_allowed": False,
+    "v229_owner_requires_active_longitudinal_and_valid_can": True,
     "native_DI_cruiseSet_doubled": False,
     "packet_aware_fwd_present": True,
     "both_panda_drivers_ported": True,
