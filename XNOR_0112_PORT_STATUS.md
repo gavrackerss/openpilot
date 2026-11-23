@@ -220,6 +220,46 @@ not modified by these commits.
     on-vehicle independent sign-off are outstanding.
     The primary `xnor-dev` branch and installed Panda remain untouched.
 
+## 2026-11-23 Tesla HW2 CarState/CarController and 0x659 sender staged
+
+19. Full installed Tesla HW1/HW2/HW3 `carstate.py`,
+    `carcontroller.py`, `teslacan.py`,
+    `teslacan_legacy.py`, and six installed CFG/BLNK/ALC/HSO/
+    ACC/LONG support modules were staged under
+    `migration/tesla_v0112/hybrid_panda_candidate/opendbc/car/tesla/`.
+    They were imported from the exact installed `24d304b` code,
+    then adapted to native `openpilot.cereal` and staged opendbc
+    Python package paths.
+20. Tesla legacy `CarController` now uses XNOR native vehicle-model-
+    based steering rate/acceleration/jerk limiting:
+    `apply_steer_angle_limits_vm(..., CarControllerParams, VM)` with
+    the native Model S HW3 vehicle model. The old speed-only steering
+    wind-up/unwind table (11.5/11.0/4.6° wind-up and 11.5/11.5/6.2°
+    unwind at 0/5/15 m/s) has **not** replaced the modern limiter.
+    The user-specific lane-positioning bias remains separate and must
+    be assessed by steering replay.
+21. Tesla `car.capnp` now stages the additional old diagnostic fields
+    without overwriting native `carNotReady @61`:
+    follow distance moves to `@66`, other Tesla-only fields use
+    `@62`–`@65`, and compatibility brake is reintroduced at `@5`.
+    Raw CAN `DI_state` 0x368 native layout stays intact. Removed old
+    heuristic which could multiply native `DI_cruiseSet` by two.
+22. Non-legacy Tesla Model 3/Y `CarState` and
+    `CarController` delegate to exact pinned 0.11.2 source copies,
+    not the old Hybrid control path. Candidate defaults disable
+    experimental GTW config injection, unsupported extra 0x2B9
+    overlay, and warning/HUD/AEB suppression pending separate tests.
+23. The **full** opendbc review patch now includes
+    all Tesla car sources, six support modules, additive DBC,
+    non-colliding `car.capnp` and Panda safety integration.
+    `tests/test_xnor_v0112_tesla_vehicle_contract.py` adds
+    dependency-free source-function tests for deterministic cruise
+    decoding, 0x659 physical stalk edges and native LKAS handback.
+    The compiled workflow includes those checks.
+    **No compiled Panda/opendbc source test or live car acceptance
+    test is confirmed at this stage.** Both active gitlinks,
+    device firmware and XNOR native modeld remain unchanged.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
