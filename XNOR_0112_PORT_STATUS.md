@@ -1,8 +1,9 @@
 # XNOR-native 0.11.2: user fork migration
 
 > **Development-only branch. Do not install for on-road use.**
-> Tesla safety/CAN, SunnyPilot, Jetlink/LS2 and speed-limit customisations
-> are **not integrated or qualified** on this branch.
+> Tesla HW2 Panda/opendbc source is staged, compiled and host safety-tested.
+> Runtime CarInterface construction passed in scratch CI. Real CAN/replay,
+> complete SunnyPilot/Jetlink/LS2 authority, and on-road safety are NOT qualified.
 
 ## Why this branch exists
 
@@ -338,6 +339,50 @@ braking authority, SunnyPilot runtime activation and actual CAN
 replay still require independent validation. The main `xnor-dev`
 branch and the comma installation are unchanged.
 
+## 2026-11-23 verified full-stack migration checkpoints
+
+33. **F4/H7 Panda firmware build PASS** — source patched into
+    exact XNOR 0.11.2 Panda/opendbc in disposable clones:
+    [successful ARM build](https://github.com/gavrackerss/openpilot/actions/runs/45258321608).
+    Images were built in CI, not distributed, flashed or connected to a car.
+34. **Tesla compiled safety regression PASS** — native XNOR Tesla
+    HW1/HW2/HW3/Model3 regression and negative Hybrid packet suite:
+    **308 passed, 133 skipped, zero failed**;
+    [successful compiled safety run](https://github.com/gavrackerss/openpilot/actions/runs/45258321463).
+    To preserve the native safety envelope, ordinary Tesla safety
+    uses a mechanically namespaced copy of upstream safety;
+    custom Hybrid only activates with explicit 0x40 OP_STALK_ENABLE.
+    0x659 carrier forwarding is suppressed only in Hybrid mode.
+    No disengaged V229 priming and no stock AEB suppression enabled.
+35. **Full native XNOR SCons build PASS** in a disposable desktop
+    checkout with the complete reviewed Panda/opendbc patches:
+    [full build](https://github.com/gavrackerss/openpilot/actions/runs/45258532125).
+    Corrected the scratch venv PATH for Cython and added hosted-runner
+    libusb development headers; original gitlinks were unchanged.
+36. **HW2 and Model Y host runtime object construction PASS**:
+    [full build + runtime probe](https://github.com/gavrackerss/openpilot/actions/runs/45259610612)
+    instantiated real CarInterface, CarState, CarController and
+    six HW2 CAN parsers / two Model Y CAN parsers, with temporary
+    Params and no CAN transmission. Both reported authority=false.
+37. **Native Cap'n Proto compatibility PASS**: removed accidental
+    duplicate brake @5, retained native carNotReady @61 and
+    introduced non-colliding Tesla diagnostics @62–@66.
+    Removed deprecated CarParams root setters and the removed
+    CarState root brake write.
+38. All the verified updates are merged into the dedicated
+    `upgrade/xnor-v0112-xnor-base` staging branch; the
+    actual `xnor-dev`, installed comma and both live submodules
+    are NOT changed.
+
+**Scope of validated result:** source assembly, F4/H7 compilation,
+full desktop SCons, synthetic Tesla safety regressions, and
+non-actuating CarInterface construction. **This is not full
+feature parity or a vehicle-qualified release.** Physical Tesla
+CAN replay, timing, dual-Panda bus topology, genuine AEB,
+brake/regen override, native EPAS/ALC handover, LS2 lead/curve
+braking, SunnyPilot runtime model selection and all original
+custom features require separate validation.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
@@ -354,11 +399,10 @@ of successful integration. Do not copy or enable the legacy wrapper.
 
 ## Still outstanding before any vehicle test
 
-- Reconcile the user's substantial Tesla `carstate.py`,
-  `carcontroller.py`, interface, radar, UI/HUD and historical Panda
-  safety differences into a writable, **separately tested** opendbc/Panda
-  stack. The XNOR reference dependency already defines HW1/HW2/HW3,
-  but not the user's additional safety ownership and steering behaviour.
+- Validate the **staged and successfully host-built** Tesla HW2
+  CarState/CarController/Panda source using the real vehicle's
+  dual-Panda CAN replay and safety constraints before enabling it.
+  Legacy UI/HUD variants and physical handover are not yet qualified.
 - Validate the staged SunnyPilot model catalogue and Params JSON
   lifecycle, then port actual model selection, checksum validation,
   UI and speed-limit overlays to the XNOR-native modeld contract.
@@ -369,9 +413,10 @@ of successful integration. Do not copy or enable the legacy wrapper.
 - Replay lead, braking, curves and disengagement cases from actual
   recordings. A red path or recognised radar lead alone is not proof
   of the commanded acceleration.
-- Compile Cereal and Params, run SCons, Panda safety tests,
-  full native test suite, then separate parked-only integration and
-  independently reviewed shadow tests.
+- Host Cereal/Params, SCons, Panda ARM and Tesla synthetic
+  safety gates now PASS. Still run the broader all-car native suite,
+  real Tesla process/CAN replay, parked hardware-in-the-loop tests
+  and independently reviewed shadow trials.
 
 This document is an engineering inventory, **not** confirmation of
 a working Tesla installation or safety qualification.

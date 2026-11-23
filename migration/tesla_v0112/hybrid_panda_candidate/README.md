@@ -1,7 +1,7 @@
 # XNOR 0.11.2 — Full Tesla Hybrid Panda candidate
 
-**Status: full Panda safety and Tesla HW2 vehicle-source candidate staged,
-NOT compiled/qualified/installed.**
+**Status: full Panda safety and Tesla HW2 vehicle-source candidate
+STAGED AND HOST-COMPILED, but NOT road-qualified or installed.**
 This is a coordinated **opendbc + Panda safety + Tesla CarState/
 CarController + 0x659 sender** source port from installed `24d304b`,
 adapted to XNOR 0.11.2 APIs. The independent OP longitudinal planner,
@@ -46,6 +46,22 @@ and opendbc source, without resetting the patched modules.
 does **not** complete the LS2 model output/action-head reconciliation,
 prove lead-following or curve braking, validate the Tesla CAN bus
 topology or make a safe release available for the car.
+
+## Verified source/build result
+
+The current staging branch is a reproducible 0.11.2 **development**
+port with both native Tesla unselected safety and opt-in Hybrid
+safety preserved. All native stock Tesla + added packet tests passed
+(308 passed, 133 skipped); F4 and H7 compiled; complete XNOR desktop
+SCons compiled; the isolated HW2 and Model Y CarInterface constructors
+both passed. No firmware was flashed and no CAN bus was actuated.
+
+The old user fork's Pixel LS2 output/action contract is **not
+reconciled** with XNOR native modeld; the previously observed
+insufficient lead-following and curve deceleration remains an
+independent release blocker. Do not give LS2 longitudinal authority
+until offline action-head interpretation, lead and deceleration replays,
+and fallback are independently demonstrated.
 
 ## Exact base dependencies (unchanged in openpilot)
 
@@ -257,8 +273,13 @@ cc -Wall -Wextra -Werror -std=gnu11 -DALLOW_DEBUG \
 The dedicated GitHub workflow
 `.github/workflows/xnor-v0112-hybrid-panda-compiled.yml`
 performs that source verification, disposable-patch application and
-compiled C host smoke. **No passing workflow or native compiled result
-has been observed as of this staging commit.**
+compiled C host smoke. **CI is now green for XNOR 0.11.2 F4/H7
+cross-compilation, 308 compiled Tesla safety tests, native full
+desktop SCons build and scratch HW2/Model Y CarInterface construction.**
+See [safety](https://github.com/gavrackerss/openpilot/actions/runs/45258321463),
+[ARM](https://github.com/gavrackerss/openpilot/actions/runs/45258321608),
+and [full runtime](https://github.com/gavrackerss/openpilot/actions/runs/45259610612).
+These do not establish physical Tesla vehicle readiness.
 
 ## Safety/replay gates before any firmware flash or onroad authority
 
