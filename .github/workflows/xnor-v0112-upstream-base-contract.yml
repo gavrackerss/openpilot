@@ -1,0 +1,40 @@
+name: XNOR 0.11.2 base port - static contracts
+
+on:
+  push:
+    branches:
+      - 'upgrade/xnor-v0112-xnor-base'
+    paths:
+      - 'openpilot/cereal/**'
+      - 'openpilot/common/params_keys.h'
+      - 'openpilot/selfdrive/modeld/**'
+      - 'openpilot/system/manager/process_config.py'
+      - 'migration/**'
+      - 'tests/test_xnor_v0112_base_contract.py'
+      - '.github/workflows/xnor-v0112-upstream-base-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staging-only:
+    name: XNOR native 0.11.2 preservation checks (not vehicle tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Check Python syntax
+        run: python3 -m py_compile tests/test_xnor_v0112_base_contract.py
+      - name: Verify native ABI, Cereal wire IDs and parameter contracts
+        run: python3 tests/test_xnor_v0112_base_contract.py -v
+      - name: Confirm pinned XNOR Panda and opendbc commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git ls-tree HEAD opendbc_repo | awk '{print $3}')" = "3f86206a13c3181f0224e8f1424b836592e2b2d2"
+          test "$(git ls-tree HEAD panda | awk '{print $3}')" = "fa83a40ad799c827ab9cbda4560cf3426531ceff"
+
+# These are source-only checks. They do not compile capnp, build Panda safety,
+# replay recordings or qualify Tesla longitudinal control.
