@@ -13,9 +13,9 @@ import aiohttp
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.hardware.hw import Paths
+from openpilot.sunnypilot.models.paths import model_root
 
-from cereal import messaging, custom
+from openpilot.cereal import messaging, custom
 from openpilot.sunnypilot.models.fetcher import ModelFetcher
 from openpilot.sunnypilot.models.helpers import get_active_bundle, validate_active_bundle, verify_file
 
@@ -281,7 +281,7 @@ class ModelManagerSP:
         if (index_to_download := self.params.get("ModelManager_DownloadIndex")) is not None:
           if model_to_download := next((model for model in self.available_models if model.index == index_to_download), None):
             try:
-              self.download(model_to_download, Paths.model_root())
+              self.download(model_to_download, model_root())
             except Exception as e:
               cloudlog.exception(e)
             finally:
@@ -314,7 +314,7 @@ class ModelManagerSP:
           active_files.append(model.metadata.fileName)
 
     # Remove all files except active ones (including their chunk files)
-    model_dir = Paths.model_root()
+    model_dir = model_root()
     try:
       for filename in os.listdir(model_dir):
         base = filename.split('.chunk')[0] if '.chunk' in filename else filename
