@@ -94,7 +94,15 @@ _services: dict[str, tuple] = {
   "livestreamWideRoadEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "livestreamNarrowRoadEncodeData": (False, 20., None, QueueSize.MEDIUM),
   "livestreamCabinEncodeData": (False, 20., None, QueueSize.MEDIUM),
+  # XNOR legacy fork extensions, preserving the original recorded service contracts.
+  "modelManagerSP": (False, 1., 1, QueueSize.BIG),
+  "mapdOut": (True, 20., 20, QueueSize.MEDIUM),
+  "mapdExtendedOut": (False, 1.),
+  "mapdIn": (False, 0.),
+  "mapdCli": (False, 0.),
   "customReservedRawData0": (True, 0.),
+  "customReservedRawData1": (True, 0.),
+  "customReservedRawData2": (True, 0.),
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}
