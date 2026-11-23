@@ -7,6 +7,7 @@ on:
     paths:
       - 'openpilot/jetlink_v0112_native.py'
       - 'openpilot/jetlink_native_authority.py'
+      - 'tools/xnor_v0112_action_contract.py'
       - 'openpilot/cereal/**'
       - 'openpilot/common/params_keys.h'
       - '.gitmodules'
@@ -32,11 +33,14 @@ jobs:
         run: python3 tests/test_xnor_v0112_schema_contract.py -v
       - name: Verify native Params key migration
         run: python3 tests/test_xnor_v0112_params_contract.py -v
+      - name: Audit native versus Pixel action-head interfaces
+        run: python3 tools/xnor_v0112_action_contract.py
       - name: Check Python syntax
         run: |
           python3 -m py_compile \
             openpilot/jetlink_v0112_native.py \
             openpilot/jetlink_native_authority.py \
+            tools/xnor_v0112_action_contract.py \
             tests/test_xnor_v0112_native_contract.py \
             tests/test_xnor_v0112_schema_contract.py \
             tests/test_xnor_v0112_params_contract.py
