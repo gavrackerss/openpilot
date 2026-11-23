@@ -38,6 +38,7 @@ NATIVE_BLOBS = {
     "board/drivers/fdcan.h": "867029dffbbaa3f52c75d03be247b07c5826e982",
   },
 }
+NEW_SAFETY_FILES = ("opendbc/safety/modes/tesla_legacy_native_0112.h",)
 NEW_TESTS = ["opendbc/safety/tests/test_tesla_hybrid_packet.py"]
 NEW_VEHICLE_FILES = (
   "opendbc/car/tesla/carcontroller_native_0112.py",
@@ -131,8 +132,31 @@ def audit() -> dict:
           "controls_allowed && !tesla_legacy_stock_aeb" in safety,
           "Brake-only lateral exception has lost its stock-AEB guard")
   require("static bool tesla_legacy_fwd_msg_hook(" in mode and
-          ".fwd_msg = tesla_legacy_fwd_msg_hook" in mode,
+          ".fwd_msg = tesla_hybrid_dispatch_fwd_msg" in mode,
           "Full Tesla Hybrid fwd_msg receiver not registered")
+  native_header = text("opendbc/safety/modes/tesla_legacy_native_0112.h", "opendbc")
+  expected_native = (SOURCES["opendbc"] / "opendbc/safety/modes/tesla_legacy.h").read_text(encoding="utf-8")
+  for original, renamed in (
+      ("tesla_legacy_", "tesla_native_legacy_"),
+      ("tesla_external_panda", "tesla_native_external_panda"),
+      ("tesla_hw1", "tesla_native_hw1"),
+      ("chassis_bus", "tesla_native_chassis_bus"),
+      ("das_control_msg", "tesla_native_das_control_msg"),
+      ("di_torque1_msg", "tesla_native_di_torque1_msg"),
+  ):
+    expected_native = expected_native.replace(original, renamed)
+  require(native_header == expected_native,
+          "Native Tesla safety baseline was changed beyond symbol namespacing")
+  require("#include \"opendbc/safety/modes/tesla_legacy_native_0112.h\"" in safety and
+          "tesla_hybrid_extension_active && tesla_legacy_op_hybrid_native_ap" in safety,
+          "Native Tesla fallback or generic brake/regen default safety guard missing")
+  require("tesla_hybrid_extension_active = GET_FLAG(param, 64U);" in mode and
+          "tesla_native_legacy_hooks.init(param)" in mode and
+          "tesla_native_legacy_hooks.rx(msg)" in mode and
+          "tesla_native_legacy_hooks.tx(msg)" in mode and
+          "tesla_native_legacy_hooks.fwd(bus_num, addr)" in mode,
+          "Unselected Tesla cars do not preserve native XNOR 0.11.2 safety dispatch")
+
   require("if (!long_allowed) {" in mode and
           "tesla_legacy_v229_tmpl_valid = false;" in mode and
           "if (!controls_allowed || !get_longitudinal_allowed()) {" in mode,
@@ -219,7 +243,7 @@ def audit() -> dict:
   require("ignore_hud_aeb = False" in interface,
           "Unverified HUD/stock AEB warning suppression was enabled")
 
-  for rel in (*NEW_TESTS, *NEW_VEHICLE_FILES):
+  for rel in (*NEW_TESTS, *NEW_VEHICLE_FILES, *NEW_SAFETY_FILES):
     require(candidate_path("opendbc", rel).is_file(),
             f"Missing test or Tesla vehicle module: {rel}")
 

@@ -2210,10 +2210,56 @@ static safety_config tesla_legacy_init(uint16_t param) {
   return ret;
 }
 
+// Native XNOR baseline safety must remain identical for ordinary Tesla
+// parameter configurations. Custom V229/HW2 bridging may run ONLY when the
+// host explicitly requests the legacy OP_STALK_ENABLE (0x40) extension.
+// Both modes still use the common safety dispatcher, physical RX checks,
+// independent relay and generic brake/regen safety enforcement.
+static bool tesla_hybrid_extension_active = false;
+
+static safety_config tesla_hybrid_dispatch_init(uint16_t param) {
+  tesla_hybrid_extension_active = GET_FLAG(param, 64U);
+  if (!tesla_hybrid_extension_active) {
+    // Reset old extension state on hand-back to ordinary native Tesla safety.
+    tesla_legacy_op_hybrid_native_ap = false;
+    tesla_legacy_op_stalk_enable = false;
+    tesla_legacy_v229_tmpl_valid = false;
+    tesla_legacy_has_ap_hw = false;
+    return tesla_native_legacy_hooks.init(param);
+  }
+  return tesla_legacy_init(param);
+}
+
+static void tesla_hybrid_dispatch_rx(const CANPacket_t *msg) {
+  if (tesla_hybrid_extension_active) {
+    tesla_legacy_rx_hook(msg);
+  } else {
+    tesla_native_legacy_hooks.rx(msg);
+  }
+}
+
+static bool tesla_hybrid_dispatch_tx(const CANPacket_t *msg) {
+  return tesla_hybrid_extension_active
+    ? tesla_legacy_tx_hook(msg)
+    : tesla_native_legacy_hooks.tx(msg);
+}
+
+static bool tesla_hybrid_dispatch_fwd(int bus_num, int addr) {
+  return tesla_hybrid_extension_active
+    ? tesla_legacy_fwd_hook(bus_num, addr)
+    : tesla_native_legacy_hooks.fwd(bus_num, addr);
+}
+
+static bool tesla_hybrid_dispatch_fwd_msg(int bus_num, CANPacket_t *to_fwd) {
+  return tesla_hybrid_extension_active
+    ? tesla_legacy_fwd_msg_hook(bus_num, to_fwd)
+    : false;
+}
+
 const safety_hooks tesla_legacy_hooks = {
-  .init = tesla_legacy_init,
-  .rx = tesla_legacy_rx_hook,
-  .tx = tesla_legacy_tx_hook,
-  .fwd = tesla_legacy_fwd_hook,
-  .fwd_msg = tesla_legacy_fwd_msg_hook,
+  .init = tesla_hybrid_dispatch_init,
+  .rx = tesla_hybrid_dispatch_rx,
+  .tx = tesla_hybrid_dispatch_tx,
+  .fwd = tesla_hybrid_dispatch_fwd,
+  .fwd_msg = tesla_hybrid_dispatch_fwd_msg,
 };

@@ -88,11 +88,28 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
       self.assertIn("CANPacket_t to_send = to_push;", rx, driver)
       self.assertIn("safety_rx_hook(&to_push)", rx, driver)
 
+  def test_native_tesla_safety_preserved_without_hybrid_selection(self):
+    staged = (BASE / "opendbc/safety/modes/tesla_legacy_native_0112.h").read_text()
+    original = (SOURCES["opendbc"] / "opendbc/safety/modes/tesla_legacy.h").read_text()
+    for src, target in (
+        ("tesla_legacy_", "tesla_native_legacy_"),
+        ("tesla_external_panda", "tesla_native_external_panda"),
+        ("tesla_hw1", "tesla_native_hw1"),
+        ("chassis_bus", "tesla_native_chassis_bus"),
+        ("das_control_msg", "tesla_native_das_control_msg"),
+        ("di_torque1_msg", "tesla_native_di_torque1_msg"),
+    ):
+      original = original.replace(src, target)
+    self.assertEqual(staged, original)
+    hybrid = (BASE / "opendbc/safety/modes/tesla_legacy.h").read_text()
+    self.assertIn("tesla_hybrid_extension_active = GET_FLAG(param, 64U);", hybrid)
+    self.assertIn("return tesla_native_legacy_hooks.init(param);", hybrid)
+
   def test_0x659_never_directly_written_to_vehicle(self):
     source = (BASE / "opendbc/safety/modes/tesla_legacy.h").read_text()
     self.assertIn("if (addr == 0x659)", source)
     self.assertIn("return false;\n  }\n\n  // V229", source)
-    self.assertIn(".fwd_msg = tesla_legacy_fwd_msg_hook", source)
+    self.assertIn(".fwd_msg = tesla_hybrid_dispatch_fwd_msg", source)
 
   def test_dual_panda_interface_can_set_hybrid_safety_flags(self):
     interface = (BASE / "opendbc/car/tesla/interface.py").read_text()
@@ -159,7 +176,7 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
       self.assertIn("board/drivers/fdcan.h", exported["panda"].read_text())
       self.assertIn("safety/tests/test_tesla_hybrid_packet.py", exported["opendbc"].read_text())
       self.assertGreater(exported["opendbc"].stat().st_size, 100_000)
-      self.assertEqual(len(PATCH_FILES["opendbc"]), 23)
+      self.assertEqual(len(PATCH_FILES["opendbc"]), 24)
       self.assertEqual(len(PATCH_FILES["panda"]), 2)
     after = subprocess.run(
       ["git", "ls-tree", "HEAD", "opendbc_repo", "panda"],

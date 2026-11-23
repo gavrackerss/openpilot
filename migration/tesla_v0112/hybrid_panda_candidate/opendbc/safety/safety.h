@@ -11,6 +11,7 @@
 #include "opendbc/safety/modes/honda.h"
 #include "opendbc/safety/modes/toyota.h"
 #include "opendbc/safety/modes/tesla.h"
+#include "opendbc/safety/modes/tesla_legacy_native_0112.h"
 #include "opendbc/safety/modes/tesla_legacy.h"
 #include "opendbc/safety/modes/gm.h"
 #include "opendbc/safety/modes/ford.h"
@@ -402,7 +403,7 @@ static void generic_rx_checks(void) {
   const uint32_t now = microsecond_timer_get();
   const bool hybrid_lateral_eligible =
     current_safety_mode == SAFETY_TESLA_LEGACY &&
-    tesla_legacy_op_hybrid_native_ap && tesla_legacy_op_stalk_enable &&
+    tesla_hybrid_extension_active && tesla_legacy_op_hybrid_native_ap && tesla_legacy_op_stalk_enable &&
     tesla_legacy_has_ap_hw && !tesla_legacy_op_stalk_cancel_edge &&
     tesla_legacy_v221_owner_request_us != 0U &&
     safety_get_ts_elapsed(now, tesla_legacy_v221_owner_request_us) <= 150000U &&
@@ -413,7 +414,7 @@ static void generic_rx_checks(void) {
   // A stale/untrusted owner or actual stock AEB always restores the native
   // disengagement rule. Check every RX cycle, not just a rising edge.
   if (brake_pressed && (!brake_pressed_prev || vehicle_moving ||
-      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_legacy_op_hybrid_native_ap))) {
+      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && tesla_legacy_op_hybrid_native_ap))) {
     if (!tesla_hybrid_brake_lateral_only) {
       controls_allowed = false;
     }
@@ -421,7 +422,7 @@ static void generic_rx_checks(void) {
   brake_pressed_prev = brake_pressed;
 
   if (regen_braking && (!regen_braking_prev || vehicle_moving ||
-      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_legacy_op_hybrid_native_ap))) {
+      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && tesla_legacy_op_hybrid_native_ap))) {
     if (!tesla_hybrid_brake_lateral_only) {
       controls_allowed = false;
     }
