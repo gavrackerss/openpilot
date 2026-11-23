@@ -1,0 +1,38 @@
+name: XNOR v0.11.2 staging port contracts
+
+on:
+  push:
+    branches:
+      - 'upgrade/xnor-0.11.2-compat-staging'
+    paths:
+      - 'selfdrive/controls/lib/v0112_migration/**'
+      - 'selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py'
+      - 'selfdrive/controls/lib/xnor_v0112_candidates.py'
+      - 'selfdrive/controls/lib/longitudinal_planner.py'
+      - 'selfdrive/controls/plannerd.py'
+      - 'tests/test_xnor_v0112_port_contract.py'
+      - '.github/workflows/xnor-v0112-port-contract.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  structural-contract:
+    name: Python AST source contract (not road qualification)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate staged source contracts
+        run: python3 tests/test_xnor_v0112_port_contract.py -v
+      - name: Syntax check staged pure Python files
+        run: |
+          python3 -m py_compile \
+            selfdrive/controls/lib/v0112_migration/__init__.py \
+            selfdrive/controls/lib/v0112_migration/long_mpc.py \
+            selfdrive/controls/lib/v0112_migration/longitudinal_planner.py \
+            selfdrive/controls/lib/v0112_migration/accel_boost.py \
+            selfdrive/controls/lib/xnor_v0112_candidates.py \
+            tests/test_xnor_v0112_port_contract.py \
+            tests/test_xnor_v0112_lead_only_mpc.py \
+            tests/test_xnor_v0112_staged_planner.py
