@@ -25,6 +25,11 @@ not modified by these commits.
 1. `migration/` is grafted verbatim from the previous staging branch,
    preserving custom Tesla HW1/2/3, Panda safety, SunnyPilot and other
    historical reference sources. It is NOT a runtime import.
+1a. All legacy Jetlink runtime sources and 14 adapter Python modules are now
+    archived under `migration/jetlink_legacy/` and
+    `migration/jetlink_adapters_legacy/`. They are **not** imported by the
+    XNOR-native modeld or manager, and the old official-0.11.2 bridge remains
+    an incompatible reference, not an active adapter.
 2. `openpilot/cereal/custom.capnp`: restored the four user-fork reserved
    struct definitions (ModelManagerSP, MapdExtendedOut, MapdIn, MapdOut),
    reusing their original struct IDs.
