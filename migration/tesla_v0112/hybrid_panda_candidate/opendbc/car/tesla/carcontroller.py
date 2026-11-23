@@ -109,8 +109,8 @@ _V229_STOPGO_CARS = (CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_X_HW2)
 _V229_ACCEL_TO_SPEED_S = 3.0                # Unity ACCEL_TO_SPEED_MULTIPLIER: setSpeed = vEgo + 3 * accel
 _V229_SET_SPEED_MAX_KPH = 200.0             # Unity clip
 _V229_ACTIVE_JERK = (-8.0, 8.0)             # Unity JERK_LIMIT_MIN/MAX
-_V229_PRIME_ACCEL = (-1.4, 1.8)             # Unity: "send this values so we can enable at 0 km/h"
-_V229_PRIME_JERK = (-0.46, 0.476)
+# V229 disengaged priming deliberately disabled in this native 0.11.2 port.
+# V229 disengaged priming deliberately disabled in this native 0.11.2 port.
 _V229_ACC_STATE_CANCEL_GENERIC = 0
 _V229_ACC_STATE_ON = 4
 _V229_ACC_STATE_CANCEL_SILENT = 13
@@ -1341,12 +1341,11 @@ class CarController(CarControllerBase):
   def _v229_stopgo_long(self, CC, CS, can_sends) -> None:
     """Emit Unity-parity DAS_control TEMPLATES at 50 Hz for both pandas.
 
-    Modes (first match wins):
-      not_drive : ACC_CANCEL_GENERIC(0), 0 kph, priming envelope          (Unity parity)
-      cancel    : ACC_CANCEL_SILENT(13), neutral 0/0 -> DI cruise engaged but OP is not
-      active    : ACC_ON(4), setSpeed = vEgo + 3*a, split accel limits     (Unity parity)
-      neutral   : ACC_ON(4), setSpeed = vEgo, 0/0 (OP engaged, long overridden: gas/brake latch)
-      priming   : ACC_ON(4), 0 kph, accel -1.4..+1.8, jerk -0.46..+0.476   (Unity parity)
+    Modes: eligible longitudinal acceleration/braking only. Off-gear,
+    disengaged, and priming attempts produce no template, preserving native
+    AP traffic. Physical brake/regen, genuine AEB, disabled longitudinal
+    and CAN faults revoke the V229 owner in _v229_compute_owner().
+    No unqualified set-speed priming or synthetic ACC_ON is permitted here.
     """
     cs_out = CS.out
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "").upper()
@@ -1377,11 +1376,9 @@ class CarController(CarControllerBase):
 
     accel = 0.0
     if not in_drive:
-      mode = "not_drive"
-      acc_state, set_kph = _V229_ACC_STATE_CANCEL_GENERIC, 0.0
-      accel_min, accel_max = _V229_PRIME_ACCEL
-      jerk_min, jerk_max = _V229_PRIME_JERK
-    elif unowned_di:
+      self._v229_mode = "native_not_drive"
+      return
+    if unowned_di:
       mode = "cancel"
       acc_state, set_kph = _V229_ACC_STATE_CANCEL_SILENT, v_ego_kph
       accel_min, accel_max = 0.0, 0.0
@@ -1399,10 +1396,8 @@ class CarController(CarControllerBase):
       accel_min, accel_max = 0.0, 0.0
       jerk_min, jerk_max = _V229_ACTIVE_JERK
     else:
-      mode = "priming"
-      acc_state, set_kph = _V229_ACC_STATE_ON, 0.0
-      accel_min, accel_max = _V229_PRIME_ACCEL
-      jerk_min, jerk_max = _V229_PRIME_JERK
+      self._v229_mode = "native_not_engaged"
+      return
 
     counter = (int(self.frame) // 2) % 8
     for powertrain in (False, True):
