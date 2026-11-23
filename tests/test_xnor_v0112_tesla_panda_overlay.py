@@ -51,7 +51,9 @@ class TeslaNativePandaContract(unittest.TestCase):
   def test_native_DBC_only_adds_lane_telemetry(self):
     overlay = audit.read(audit.OVERLAY / "dbc/tesla_can.dbc")
     pinned = audit.read(audit.PINNED / "dbc/tesla_can.dbc")
-    self.assertEqual(overlay.split("BO_ 937 DAS_telemetry:", 1)[0].rstrip(), pinned.rstrip())
+    insertion_start = overlay.index("BO_ 937 DAS_telemetry:")
+    insertion_end = overlay.index("\n\n", insertion_start)
+    self.assertEqual(overlay[:insertion_start] + overlay[insertion_end + 2:], pinned)
     self.assertEqual(audit.message_names(overlay)[937], "DAS_telemetry")
     self.assertEqual(len(audit.message_names(overlay)), len(audit.message_names(pinned)) + 1)
 
