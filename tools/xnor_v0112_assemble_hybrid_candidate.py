@@ -62,8 +62,13 @@ def assemble(destination: Path, *, run_host_tests: bool = False) -> dict:
   report = audit()
   native_head = run("git", "rev-parse", "HEAD", cwd=ROOT)
   native_branch = run("git", "branch", "--show-current", cwd=ROOT)
-  if native_branch != "upgrade/xnor-v0112-xnor-base":
-    raise RuntimeError("Assemble only the dedicated XNOR 0.11.2 staging branch")
+  required = "upgrade/xnor-v0112-xnor-base"
+  ci_base = os.getenv("GITHUB_BASE_REF", "")
+  ci_ref = os.getenv("GITHUB_REF_NAME", "")
+  ci_verification = (os.getenv("GITHUB_ACTIONS") == "true" and
+                     (ci_base == required or ci_ref == required))
+  if native_branch != required and not ci_verification:
+    raise RuntimeError("Assemble only the XNOR 0.11.2 staging branch or its CI verification PR")
 
   # Source must really be a checkout of the exact XNOR dependency commit,
   # not an accidental checkout with an uncommitted or unrelated Panda port.
@@ -81,7 +86,11 @@ def assemble(destination: Path, *, run_host_tests: bool = False) -> dict:
     prefix="xnor-v0112-hybrid-build-", dir=destination.parent))
   try:
     out = scratch / "openpilot"
-    run("git", "clone", "--no-hardlinks", "--quiet", str(ROOT), str(out))
+    run("git", "clone", "--no-hardlinks", "--quiet", "--no-checkout",
+        str(ROOT), str(out))
+    # The source CI checkout may be a detached PR merge commit. Never rely on
+    # the local clone's default-branch heuristic to select the correct tree.
+    run("git", "checkout", "--detach", native_head, cwd=out)
     if run("git", "rev-parse", "HEAD", cwd=out) != native_head:
       raise RuntimeError("Scratch openpilot clone does not match original commit")
 
