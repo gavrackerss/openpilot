@@ -3,13 +3,18 @@ import math
 import time
 from dataclasses import dataclass
 
-from openpilot.common.swaglog import cloudlog
-from openpilot.common.params import Params
-from opendbc.car.tesla.legacy_modules.CFG_module import load_bool_param, load_float_param
-from opendbc.car.tesla.legacy_modules.BLNK_module import BLNKController
-from opendbc.car.tesla.legacy_modules.ALC_module import ALCController
-from opendbc.car.tesla.legacy_modules.HSO_module import HSOController
-from openpilot.cereal import messaging
+# A standalone opendbc test import must not initialize openpilot Params,
+# legacy CFG stores, or cereal sockets. These are required at HW1/2/3
+# construction, but not for native Model 3/Y or static safety testing.
+try:
+  from openpilot.common.swaglog import cloudlog
+  from openpilot.common.params import Params
+  from openpilot.cereal import messaging
+except ImportError:
+  Params = None
+  messaging = None
+  import logging
+  cloudlog = logging.getLogger("tesla_hybrid_standalone")
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -72,6 +77,13 @@ class CarState(CarStateBase):
     return super().update_button_enable(button_events)
 
   def __init__(self, CP):
+    if Params is None or messaging is None:
+      raise RuntimeError("Tesla Hybrid CarState requires openpilot Params and cereal runtime")
+    # Legacy helper modules are only loaded for the older Tesla platform,
+    # not as transitive imports of the XNOR Model3/Y safety interface.
+    from opendbc.car.tesla.legacy_modules.BLNK_module import BLNKController
+    from opendbc.car.tesla.legacy_modules.ALC_module import ALCController
+    from opendbc.car.tesla.legacy_modules.HSO_module import HSOController
     super().__init__(CP)
     self.msg_stw_actn_req = None
     self.stw_actn_bus = int(CANBUS.party)
@@ -282,6 +294,7 @@ class CarState(CarStateBase):
 
 
   def _reload_tinkla_params(self) -> None:
+    from opendbc.car.tesla.legacy_modules.CFG_module import load_bool_param, load_float_param
     self._tinkla.autopilot_disabled = load_bool_param("TinklaAutopilotDisabled", False)
     self._tinkla.hybrid_native_ap = load_bool_param("TinklaHybridNativeAP", False)
     self._tinkla.hands_on_level = load_float_param("TinklaHandsOnLevel", 2.0)
