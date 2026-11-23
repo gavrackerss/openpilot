@@ -308,6 +308,36 @@ Cap'n Proto or ARM firmware result has been observed.**
 Do not enable this Hybrid port on a car or use it as evidence
 that LS2 lead/curve braking is resolved.
 
+## 2026-11-23 scratch full-stack source integration
+
+29. Added `tools/xnor_v0112_assemble_hybrid_candidate.py`.
+    On a **workstation staging checkout only**, it verifies the
+    native XNOR Panda/opendbc pins and source preflight, creates a
+    separate openpilot Git clone, clones the exact two pinned
+    dependencies into that separate checkout, applies the full
+    Hybrid review patches, and emits a manifest. Its hard guards
+    refuse AGNOS, /data, the active repo, changed original
+    submodules and a pre-existing destination. It never flashes.
+30. Added a non-actuating assembly test suite
+    `tests/test_xnor_v0112_hybrid_scratch_assemble.py`
+    and connected it to the compiled safety workflow.
+31. Added a scratch full-stack SCons job
+    `.github/workflows/xnor-v0112-hybrid-full-build.yml`;
+    it applies both real source patches, bootstraps remaining
+    native submodules and dependencies, and attempts to compile
+    XNOR 0.11.2 against the staged HW2 Tesla integration. No
+    on-road install or Panda flash action is included.
+32. Opened [draft staging-only PR #6](https://github.com/gavrackerss/openpilot/pull/6)
+    in an attempt to run the review builds without merging into
+    the user's production `xnor-dev`.
+
+**Not a finished deployable upgrade:** the physical comma build,
+Panda ARM/CFFI regression outcomes, whole fork's original
+customisations, LS2 big-model action mapping, native road/lead
+braking authority, SunnyPilot runtime activation and actual CAN
+replay still require independent validation. The main `xnor-dev`
+branch and the comma installation are unchanged.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
