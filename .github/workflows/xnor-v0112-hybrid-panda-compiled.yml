@@ -1,0 +1,66 @@
+name: XNOR 0.11.2 Tesla Hybrid Panda candidate - compiled safety gate
+
+on:
+  push:
+    branches:
+      - 'upgrade/xnor-v0112-xnor-base'
+    paths:
+      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
+      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
+      - 'tests/test_xnor_v0112_full_hybrid_panda.py'
+      - '.github/workflows/xnor-v0112-hybrid-panda-compiled.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-c-safety-only:
+    name: Source checks and compiled host safety library; no Panda firmware/vehicle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialise exact XNOR 0.11.2 Panda/opendbc pins
+        run: git submodule update --init opendbc_repo panda
+
+      - name: Validate all source identities and generate isolated review patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_full_hybrid_panda_preflight.py
+          python3 tests/test_xnor_v0112_full_hybrid_panda.py -v
+          python3 tools/xnor_v0112_export_full_hybrid_panda_patch.py \
+            --output-dir "$RUNNER_TEMP/xnor-hybrid-patches"
+
+      - name: Apply patches to disposable local dependency clones only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --no-hardlinks "$GITHUB_WORKSPACE/opendbc_repo" "$RUNNER_TEMP/opendbc-hybrid"
+          git clone -q --no-hardlinks "$GITHUB_WORKSPACE/panda" "$RUNNER_TEMP/panda-hybrid"
+          git -C "$RUNNER_TEMP/opendbc-hybrid" apply "$RUNNER_TEMP/xnor-hybrid-patches/xnor-v0112-tesla-hybrid-opendbc.patch"
+          git -C "$RUNNER_TEMP/panda-hybrid" apply "$RUNNER_TEMP/xnor-hybrid-patches/xnor-v0112-tesla-hybrid-panda.patch"
+          grep -q 'fwd_msg = tesla_legacy_fwd_msg_hook' "$RUNNER_TEMP/opendbc-hybrid/opendbc/safety/modes/tesla_legacy.h"
+          grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/bxcan.h"
+          grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/fdcan.h"
+
+      - name: Compile full Panda-opendbc safety dispatcher with warnings as errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -fPIC -Wall -Wextra -Werror -nostdlib -fno-builtin \
+             -std=gnu11 -Wfatal-errors -Wno-pointer-to-int-cast -DALLOW_DEBUG \
+             -I "$RUNNER_TEMP/opendbc-hybrid" \
+             -c "$RUNNER_TEMP/opendbc-hybrid/opendbc/safety/tests/libsafety/safety.c" \
+             -o "$RUNNER_TEMP/xnor-v0112-safety.o"
+          cc -shared "$RUNNER_TEMP/xnor-v0112-safety.o" -o "$RUNNER_TEMP/xnor-v0112-safety.so"
+
+      - name: Show explicit unverified gates
+        run: |
+          echo 'C safety build complete. No ARM Panda firmware or firmware flash performed.'
+          echo 'Synthetic packet negative/positive tests still require compiled libsafety bindings and replay execution.'
+          echo 'NO VEHICLE AUTHORITY IS APPROVED.'
