@@ -51,7 +51,12 @@ jobs:
           assert 'ready_for_runtime: bool = False' in catalog
           print('Source and fail-closed staging gates PASS')
           PY
-      - name: Run existing dependency-free migration contracts
+      - name: Initialise exact pinned Panda and opendbc sources for source-dependent contracts
+        run: |
+          git submodule update --init opendbc_repo panda
+          test -f opendbc_repo/opendbc/car/tesla/values.py
+          test -f panda/board/drivers/bxcan.h
+      - name: Run existing migration contracts (including pinned-source checks)
         run: |
           python3 - <<'PY'
           import pathlib
