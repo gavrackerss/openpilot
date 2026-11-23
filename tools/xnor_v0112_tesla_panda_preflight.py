@@ -24,6 +24,7 @@ OVERLAY = ROOT / "migration/tesla_v0112/opendbc_overlay"
 NATIVE_BLOBS = {
   "car/tesla/values.py": "c9b2025e9d35f04fbee2dee470f9bce80f28264c",
   "car/tesla/interface.py": "30a9c2c9f79682e11a765447065df207b21e6946",
+  "car/tesla/radar_interface.py": "c379f2163b0d3d59a28b5073c75590017d0c3736",
   "dbc/tesla_can.dbc": "447231d5655961e0ee69e89d2cdf43e77c262819",
   "safety/modes/tesla_legacy.h": "ba23ea1459999923e6b7d715eb7938224d5a3bba",
 }
@@ -148,6 +149,22 @@ def audit() -> dict:
   if "32|2@1+" not in signal("DAS_csaState", legacy_status2):
     raise RuntimeError("Legacy CSA state location unexpectedly changed")
 
+  # Native Bosch radar repeats its most recent valid 8 Hz sample to the
+  # faster 20 Hz consumer. The installed fork discards that on missing
+  # updates. Retain native caching and port only three point-data fields.
+  native_radar = read(PINNED / "car/tesla/radar_interface.py")
+  overlay_radar = read(OVERLAY / "car/tesla/radar_interface.py")
+  radar_fields = (
+    "      self.pts[i].aRel = msg_a['LongAccel']\\n"
+    "      self.pts[i].yvRel = msg_b['LatSpeed']\\n"
+    "      self.pts[i].measured = bool(msg_a['Meas'])\\n"
+  )
+  if overlay_radar.replace(radar_fields, "", 1) != native_radar:
+    raise RuntimeError("Radar overlay changed native behavior beyond 3 point fields")
+  if not ("return self.last_radar_data" in overlay_radar and
+          "self.last_radar_data = rr" in overlay_radar):
+    raise RuntimeError("Native Bosch radar update caching was lost")
+
   native_interface = read(PINNED / "car/tesla/interface.py")
   old_interface = read(LEGACY / "car/tesla/interface.py")
   if "ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value" not in native_interface:
@@ -162,6 +179,7 @@ def audit() -> dict:
     "tesla_platform_flags": sf,
     "legacy_unsupported_safety_flags": OLD_EXTRA_FLAGS,
     "additive_telemetry_dbc_address": "0x3A9 / 937",
+    "radar_overlay": "3 additional read-only point fields; native Bosch 8 Hz update cache retained",
     "native_DI_cruiseSet": native_cruise,
     "legacy_DI_cruiseSet": original_cruise,
     "native_DI_digitalSpeed": native_speed,
