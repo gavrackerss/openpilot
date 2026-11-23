@@ -9,6 +9,7 @@ on:
       - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
       - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
       - 'tests/test_xnor_v0112_full_hybrid_panda.py'
+      - 'tests/test_xnor_v0112_tesla_vehicle_contract.py'
       - '.github/workflows/xnor-v0112-hybrid-panda-compiled.yml'
   workflow_dispatch:
 
@@ -33,6 +34,7 @@ jobs:
           set -euo pipefail
           python3 tools/xnor_v0112_full_hybrid_panda_preflight.py
           python3 tests/test_xnor_v0112_full_hybrid_panda.py -v
+          python3 tests/test_xnor_v0112_tesla_vehicle_contract.py -v
           python3 tools/xnor_v0112_export_full_hybrid_panda_patch.py \
             --output-dir "$RUNNER_TEMP/xnor-hybrid-patches"
 
@@ -74,4 +76,5 @@ jobs:
           echo 'C safety build complete. No ARM Panda firmware or firmware flash performed.'
           echo 'Compiled host smoke covers the selected synthetic AEB/0x659/owner paths only.'
           echo 'Full Panda safety suites, per-vehicle CAN replay and firmware flashing remain unverified.'
+          echo 'Tesla car.capnp generator and HW2 CarState/Controller runtime integration remain unverified.'
           echo 'NO VEHICLE AUTHORITY IS APPROVED.'
