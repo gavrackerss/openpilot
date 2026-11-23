@@ -23,10 +23,10 @@ import difflib
 from pathlib import Path
 import subprocess
 
-from xnor_v0112_full_hybrid_panda_preflight import BASE, ROOT, SOURCES, NATIVE_BLOBS, NEW_TESTS, audit
+from xnor_v0112_full_hybrid_panda_preflight import BASE, ROOT, SOURCES, NATIVE_BLOBS, NEW_TESTS, NEW_VEHICLE_FILES, audit
 
 PATCH_FILES = {
-  "opendbc": tuple(NATIVE_BLOBS["opendbc"]) + tuple(NEW_TESTS),
+  "opendbc": tuple(NATIVE_BLOBS["opendbc"]) + tuple(NEW_TESTS) + tuple(NEW_VEHICLE_FILES),
   "panda": tuple(NATIVE_BLOBS["panda"]),
 }
 PATCH_NAMES = {
@@ -42,7 +42,7 @@ def patch_for(component: str) -> str:
   for rel in PATCH_FILES[component]:
     a = SOURCES[component] / rel
     b = BASE / component / rel
-    is_new = rel in NEW_TESTS
+    is_new = rel in (*NEW_TESTS, *NEW_VEHICLE_FILES)
     old = [] if is_new else a.read_text(encoding="utf-8").splitlines(keepends=True)
     new = b.read_text(encoding="utf-8").splitlines(keepends=True)
     diff = list(difflib.unified_diff(
