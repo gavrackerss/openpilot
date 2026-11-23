@@ -260,6 +260,54 @@ not modified by these commits.
     test is confirmed at this stage.** Both active gitlinks,
     device firmware and XNOR native modeld remain unchanged.
 
+## 2026-11-23 additional C safety and test-build hardening
+
+24. **Removed unqualified V229 priming** in C safety capture and
+    substitution and in userspace `_v229_stopgo_long`. Old
+    `ACC_ON, 0 km/h, -1.4/+1.8 m/s²` priming is no longer
+    eligible while OP longitudinal authority is absent. On
+    unauthorised capture, C safety rejects the template; when
+    authorisation is revoked before a genuine AP frame arrives,
+    C safety forwards the native frame unchanged. Obsolete
+    priming helpers/constants were removed.
+25. **0x659 owner bit is now conditional** on active engaged OP long,
+    CANCEL clear, valid/non-timed-out CAN, Drive gear, no brake,
+    accelerator, stock AEB or ACC fault, and no genuine native
+    Autosteer ownership. Previous owner selection was too broad:
+    it requested substitution with openpilot disengaged. This
+    change means low-speed prime/DI-arming parity is not proven
+    or automatically preserved; do not restore without full safety
+    tests and replay.
+26. **Panda RX copy initialization** fixed in both candidate F4
+    `bxcan.h` and H7 `fdcan.h` so the new full
+    `CANPacket_t to_send = to_push` path cannot inherit
+    uninitialised classic-CAN trailing payload bytes.
+27. **Standalone opendbc safety test imports** moved old CFG/BLNK/
+    ALC/HSO and LONG module dependencies to the legacy
+    `CarState`/`CarController` construction path. The
+    Model 3/Y native fallback and Tesla interface can now be
+    imported for standalone tests without loading openpilot
+    messaging/Params. Actually creating the HW2 controller
+    still requires the full installed openpilot runtime.
+28. **New scratch-only CI gates**:
+    - `xnor-v0112-hybrid-panda-compiled.yml` attempts
+      Cap'n Proto schema validation, standalone Tesla import,
+      host safety C compile and synthetic ownership/AEB smoke,
+      then native HW1/HW2/HW3/Model3 safety regressions with
+      the new packet-aware tests.
+    - `xnor-v0112-hybrid-panda-arm-compile.yml` uses pinned
+      source clones, exact review patches, `arm-none-eabi-gcc`
+      and SCons to build scratch Panda F4/H7 images without
+      flashing or distributing them.
+    - Additional source/AST negative tests cover unauthorised
+      V229 owner requests, revoked templates, off-Drive
+      no-template handling, and RX copy initialisation.
+
+**No GitHub Actions run was confirmed for this branch; no CFFI,
+Cap'n Proto or ARM firmware result has been observed.**
+Do not enable this Hybrid port on a car or use it as evidence
+that LS2 lead/curve braking is resolved.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
