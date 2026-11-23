@@ -34,7 +34,7 @@ def pixel_action_span() -> tuple[int, int]:
   # Validated Pixel/LS2 engine spec, not the filtered legacy OUTPUT_SLICES
   # (the latter deliberately omitted action when deriving accel from plan).
   m = re.search(
-    r"tuple\\(slices\\.get\\('action', \\(\\)\\)\\)\\s*!=\\s*\\((\\d+),\\s*(\\d+)\\)",
+    r"tuple\(slices\.get\('action', \(\)\)\)\s*!=\s*\((\d+),\s*(\d+)\)",
     PIXEL.read_text(),
   )
   if not m:
