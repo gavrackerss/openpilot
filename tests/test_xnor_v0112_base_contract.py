@@ -53,9 +53,9 @@ class XnorNativeBaseContract(unittest.TestCase):
     for typename, field, slot, wire_id in fields:
       with self.subTest(typename=typename):
         self.assertIn(f"struct {typename} @{wire_id}", c)
-        pattern = rf"\\b{field}\s+@{slot}\s*:\s*Custom\\.{typename}\s*;"
+        pattern = rf"\b{field}\s+@{slot}\s*:\s*Custom\.{typename}\s*;"
         self.assertRegex(log, pattern)
-        self.assertEqual(len(re.findall(rf"\\b{field}\s+@{slot}\s*:", log)), 1)
+        self.assertEqual(len(re.findall(rf"\b{field}\s+@{slot}\s*:", log)), 1)
     self.assertNotIn("customReserved1 @108", log)
     self.assertNotIn("customReserved17 @143", log)
     self.assertNotIn("customReserved18 @144", log)
