@@ -14,6 +14,7 @@ on:
       - '.gitmodules'
       - 'migration/tesla_opendbc_legacy/**'
       - 'migration/tesla_v0112/**'
+      - 'migration/sunnypilot_v0112/**'
       - 'openpilot/selfdrive/car/card.py'
       - 'tests/test_xnor_v0112_*'
       - '.github/workflows/xnor-v0112-native-contract.yaml'
@@ -42,6 +43,8 @@ jobs:
         run: |
           python3 tools/xnor_v0112_tesla_preflight.py
           python3 tests/test_xnor_v0112_tesla_preflight.py -v
+      - name: Verify SunnyPilot catalog selection remains stock-only
+        run: python3 tests/test_xnor_v0112_sunnypilot_catalog.py -v
       - name: Verify staged Tesla IC state port
         run: python3 tests/test_xnor_v0112_tesla_ic_contract.py -v
       - name: Audit native versus Pixel action-head interfaces
@@ -55,6 +58,8 @@ jobs:
             tools/xnor_v0112_tesla_preflight.py \
             tests/test_xnor_v0112_tesla_preflight.py \
             migration/tesla_v0112/ic_model_snapshot.py \
+            migration/sunnypilot_v0112/catalog_guard.py \
+            tests/test_xnor_v0112_sunnypilot_catalog.py \
             tests/test_xnor_v0112_native_contract.py \
             tests/test_xnor_v0112_tesla_ic_contract.py \
             tests/test_xnor_v0112_schema_contract.py \
