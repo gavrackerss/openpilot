@@ -16,6 +16,7 @@ on:
       - 'tests/test_xnor_v0112_sunnypilot_port.py'
       - 'tests/test_xnor_v0112_model_selection_status.py'
       - 'tests/test_xnor_v0112_longitudinal_migration.py'
+      - 'tests/test_xnor_v0112_tesla_hybrid_long_owner.py'
       - 'tools/xnor_v0112_longitudinal_migration_audit.py'
       - 'tools/xnor_v0112_model_selection_status.py'
       - '.github/workflows/xnor-v0112-upstream-base-contract.yml'
@@ -52,6 +53,10 @@ jobs:
         run: |
           python3 tools/xnor_v0112_longitudinal_migration_audit.py
           python3 tests/test_xnor_v0112_longitudinal_migration.py -v
+      - name: Replay isolated Tesla longitudinal brake ownership latch (no vehicle I/O)
+        run: |
+          python3 -m py_compile migration/tesla_v0112/hybrid_long_owner.py
+          python3 tests/test_xnor_v0112_tesla_hybrid_long_owner.py -v
       - name: Confirm pinned XNOR Panda and opendbc commits
         shell: bash
         run: |
