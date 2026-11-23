@@ -119,7 +119,7 @@ static const char tesla_v224_aeb_state_marker[] __attribute__((used)) = "XNOR_V2
 #define TESLA_LEGACY_MITM_BLOCK_STOCK_GTW 0
 
 // --- Unity timing ---
-static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US = 4000000U;
+static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US __attribute__((unused)) = 4000000U;
 static const uint32_t TESLA_LEGACY_TIME_FOR_HANDS_ON_US   = 1000000U;
 static const uint32_t TESLA_LEGACY_AEB_HUD_SCRUB_US       = 3500000U;
 
@@ -1072,28 +1072,12 @@ static bool tesla_legacy_hybrid_steering_overlay_violation(const CANPacket_t *ms
 static const int TESLA_LEGACY_V229_ACCEL_RAW_MIN = 288;       // -3.48 m/s^2 (existing envelope)
 static const int TESLA_LEGACY_V229_ACCEL_RAW_MAX = 425;       // +2.00 m/s^2 (existing envelope)
 static const int TESLA_LEGACY_V229_ACCEL_RAW_ZERO = 375;      //  0.00 m/s^2
-static const int TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MIN = 340; // -1.40 m/s^2 (Unity priming)
-static const int TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MAX = 420; // +1.80 m/s^2 (Unity priming)
-static const int TESLA_LEGACY_V229_PRIME_JERK_MIN_RAW = 492;  // >= -0.46 m/s^3
-static const int TESLA_LEGACY_V229_PRIME_JERK_MAX_RAW = 9;    // <= +0.53 m/s^3
 static const uint8_t TESLA_LEGACY_V229_ACC_STATE_CANCEL_GENERIC = 0U;
 static const uint8_t TESLA_LEGACY_V229_ACC_STATE_ON = 4U;
 static const uint8_t TESLA_LEGACY_V229_ACC_STATE_CANCEL_SILENT = 13U;
 
-static int tesla_legacy_das_raw_set_speed(const uint8_t *data) {
-  return ((int)data[0]) | (((int)(data[1] & 0x0FU)) << 8);
-}
-
 static int tesla_legacy_das_acc_state(const uint8_t *data) {
   return (int)((data[1] >> 4) & 0x0FU);
-}
-
-static int tesla_legacy_das_raw_jerk_min(const uint8_t *data) {
-  return (((int)(data[3] & 0x07U)) << 6) | ((int)(data[2] >> 2));
-}
-
-static int tesla_legacy_das_raw_jerk_max(const uint8_t *data) {
-  return (((int)(data[4] & 0x07U)) << 5) | ((int)(data[3] >> 3));
 }
 
 static int tesla_legacy_das_raw_accel_min(const uint8_t *data) {
