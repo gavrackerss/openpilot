@@ -11,6 +11,13 @@ on:
       - 'tests/test_xnor_v0112_full_hybrid_panda.py'
       - 'tests/test_xnor_v0112_tesla_vehicle_contract.py'
       - '.github/workflows/xnor-v0112-hybrid-panda-compiled.yml'
+  pull_request:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+    paths:
+      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
+      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
+      - '.github/workflows/xnor-v0112-hybrid-panda-compiled.yml'
   workflow_dispatch:
 
 permissions:
