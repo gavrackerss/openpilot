@@ -2,19 +2,15 @@ name: XNOR 0.11.2 Tesla Hybrid Panda - isolated ARM compilation
 
 on:
   push:
-    branches: ['upgrade/xnor-v0112-xnor-base']
+    branches: ['upgrade/xnor-v0112-xnor-base', 'upgrade/xnor-v0112-hybrid-build-verification']
     paths:
       - 'migration/tesla_v0112/hybrid_panda_candidate/**'
       - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
       - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
       - '.github/workflows/xnor-v0112-hybrid-panda-arm-compile.yml'
+      - 'migration/tesla_v0112/hybrid_panda_candidate/CI_VERIFICATION.md'
   pull_request:
     branches: ['upgrade/xnor-v0112-xnor-base']
-    paths:
-      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
-      - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
-      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
-      - '.github/workflows/xnor-v0112-hybrid-panda-arm-compile.yml'
   workflow_dispatch:
 
 permissions:

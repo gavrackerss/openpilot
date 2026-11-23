@@ -14,3 +14,5 @@ Required gates:
 
 A passing result authorizes **only further offline replay and bench validation**.
 It does not authorize flashing, vehicle CAN transmission, driving, or LS2 authority.
+
+Verification branch synchronized with latest staging code. Scratch CI only; no on-device modification.

@@ -4,20 +4,18 @@ on:
   push:
     branches:
       - 'upgrade/xnor-v0112-xnor-base'
+      - 'upgrade/xnor-v0112-hybrid-build-verification'
     paths:
       - 'migration/tesla_v0112/hybrid_panda_candidate/**'
       - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
       - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
       - 'tests/test_xnor_v0112_full_hybrid_panda.py'
       - 'tests/test_xnor_v0112_tesla_vehicle_contract.py'
+      - 'tests/test_xnor_v0112_hybrid_scratch_assemble.py'
       - '.github/workflows/xnor-v0112-hybrid-panda-compiled.yml'
+      - 'migration/tesla_v0112/hybrid_panda_candidate/CI_VERIFICATION.md'
   pull_request:
     branches: ['upgrade/xnor-v0112-xnor-base']
-    paths:
-      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
-      - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
-      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
-      - '.github/workflows/xnor-v0112-hybrid-panda-compiled.yml'
   workflow_dispatch:
 
 permissions:
@@ -45,6 +43,7 @@ jobs:
           python3 tools/xnor_v0112_full_hybrid_panda_preflight.py
           python3 tests/test_xnor_v0112_full_hybrid_panda.py -v
           python3 tests/test_xnor_v0112_tesla_vehicle_contract.py -v
+          python3 tests/test_xnor_v0112_hybrid_scratch_assemble.py -v
           python3 tools/xnor_v0112_export_full_hybrid_panda_patch.py \
             --output-dir "$RUNNER_TEMP/xnor-hybrid-patches"
 
