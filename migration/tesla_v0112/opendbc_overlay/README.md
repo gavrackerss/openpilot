@@ -85,6 +85,29 @@ message, never the staged radar behavioural change or Panda safety.
 `git apply --check` checks applicability but does **not** apply it.
 Do not run `git apply` in the active submodule.
 
+## Additional hardware-independent Panda negative tests
+
+`safety/tests/test_xnor_tesla_hw23_negative.py` is a proposed,
+**not-yet-executed** Python test suite against the *compiled native*
+`opendbc.safety.tests.libsafety` library. It tests HW2 external-Panda
+0x659 TX rejection, main 0x2B9 rejection, stock AEB passthrough versus
+OP 0x2BF inhibition, injected AEB rejection, and the fact that
+unrecognised `IGNORE_STOCK_AEB` (128) cannot bypass stock AEB.
+
+After building the pinned opendbc C safety library in a suitable
+workstation environment, run the tests without writing to a car:
+
+```bash
+PYTHONPATH="$PWD/opendbc_repo:$PYTHONPATH" \
+  python3 migration/tesla_v0112/opendbc_overlay/safety/tests/test_xnor_tesla_hw23_negative.py -v
+```
+
+These tests belong to an independent **compiled-safety** gate. The
+source-only CI job checks their syntax but does not claim they ran.
+When custom Panda hybrid logic is ported, expand this suite for stale
+0x659 timestamps, wrong buses, source ownership conflicts, authentic
+AEB interventions, neutral fallback and rolling-counter/checksum errors.
+
 ## Gates before a future vehicle-capable integration
 
 - Maintain a writable, versioned opendbc revision, an actual Panda
