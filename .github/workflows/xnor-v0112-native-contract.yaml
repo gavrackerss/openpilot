@@ -6,6 +6,7 @@ on:
       - 'upgrade/xnor-v0112-native-integration'
     paths:
       - 'openpilot/jetlink_v0112_native.py'
+      - 'openpilot/jetlink_native_authority.py'
       - 'openpilot/cereal/**'
       - 'openpilot/common/params_keys.h'
       - '.gitmodules'
@@ -35,6 +36,7 @@ jobs:
         run: |
           python3 -m py_compile \
             openpilot/jetlink_v0112_native.py \
+            openpilot/jetlink_native_authority.py \
             tests/test_xnor_v0112_native_contract.py \
             tests/test_xnor_v0112_schema_contract.py \
             tests/test_xnor_v0112_params_contract.py
