@@ -12,6 +12,8 @@ on:
       - 'openpilot/common/params_keys.h'
       - '.gitmodules'
       - 'migration/tesla_opendbc_legacy/**'
+      - 'migration/tesla_v0112/**'
+      - 'openpilot/selfdrive/car/card.py'
       - 'tests/test_xnor_v0112_*'
       - '.github/workflows/xnor-v0112-native-contract.yaml'
   workflow_dispatch:
@@ -33,6 +35,8 @@ jobs:
         run: python3 tests/test_xnor_v0112_schema_contract.py -v
       - name: Verify native Params key migration
         run: python3 tests/test_xnor_v0112_params_contract.py -v
+      - name: Verify staged Tesla IC state port
+        run: python3 tests/test_xnor_v0112_tesla_ic_contract.py -v
       - name: Audit native versus Pixel action-head interfaces
         run: python3 tools/xnor_v0112_action_contract.py
       - name: Check Python syntax
@@ -41,7 +45,9 @@ jobs:
             openpilot/jetlink_v0112_native.py \
             openpilot/jetlink_native_authority.py \
             tools/xnor_v0112_action_contract.py \
+            migration/tesla_v0112/ic_model_snapshot.py \
             tests/test_xnor_v0112_native_contract.py \
+            tests/test_xnor_v0112_tesla_ic_contract.py \
             tests/test_xnor_v0112_schema_contract.py \
             tests/test_xnor_v0112_params_contract.py
 
