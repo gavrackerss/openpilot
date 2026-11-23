@@ -49,13 +49,13 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from cereal import messaging
-from cereal.services import SERVICE_LIST
+from openpilot.cereal import messaging
+from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.swaglog import cloudlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.tesla.values import CruiseButtons
 
-from openpilot.selfdrive.car.modules.ACC_module import ACCController, AccDecision, LeadInfo
+from opendbc.car.tesla.legacy_modules.ACC_module import ACCController, AccDecision, LeadInfo
 
 
 def _mono_ms() -> int:

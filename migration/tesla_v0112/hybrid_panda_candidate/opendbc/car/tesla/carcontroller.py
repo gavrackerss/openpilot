@@ -30,13 +30,14 @@ import time
 
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.car.modules.LONG_module import LongController
+from opendbc.car.tesla.legacy_modules.LONG_module import LongController
 
 from opendbc.can import CANPacker
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarControllerBase
-from opendbc.car.lateral import apply_std_steer_angle_limits
+from opendbc.car.lateral import apply_steer_angle_limits_vm
+from opendbc.car.vehicle_model import VehicleModel
 
 from opendbc.car.tesla.teslacan import TeslaCAN
 try:
@@ -74,7 +75,7 @@ _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
 # Unity-style stop/go: author a chassis 0x2B9 TEMPLATE only. Panda captures it, blocks direct TX,
 # and overlays it onto the genuine AP 0x2B9 as that frame crosses bus2->bus0, preserving stock
 # cadence/counter. This is intentionally different from _ARM_ENABLE_CHASSIS (unsolicited direct TX).
-_UNITY_2B9_OVERLAY_TEMPLATE = True
+_UNITY_2B9_OVERLAY_TEMPLATE = False
 
 # --- GTW_carConfig autopilot=2 native TX on bus 2 (config-unlock experiment, bench only) --------
 # Transmit a full GTW_carConfig (0x398) frame with GTW_autopilot=2 NATIVELY on the AP module's
@@ -84,7 +85,7 @@ _UNITY_2B9_OVERLAY_TEMPLATE = True
 # all other config bytes identical, no checksum/counter on 0x398). Set False to disable.
 # WATCH: does AutopilotStatus(0x399) climb UNAVAILABLE(1) -> AVAILABLE(2)? If yes, config is read
 # live and AP/sub-18 is reachable. If it stays UNAVAILABLE with ap=2 native on bus2 => NVRAM-gated.
-_GTW_TX_AUTOPILOT2_BUS2 = True
+_GTW_TX_AUTOPILOT2_BUS2 = False
 _GTW_CARCONFIG_AP2_PAYLOAD = bytes.fromhex("6987474215320020")
 
 ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
@@ -122,6 +123,13 @@ def _v226_powertrain_tx_allowed(hybrid_native_ap: bool, exclusive_hybrid_selecte
 
 
 class CarController(CarControllerBase):
+  def __new__(cls, dbc_names, CP, VM=None):
+    # Preserve native XNOR 0.11.2 non-legacy vehicle actuation without regressions.
+    if cls is CarController and CP.carFingerprint not in LEGACY_CARS:
+      from opendbc.car.tesla.carcontroller_native_0112 import CarController as NativeCarController
+      return NativeCarController(dbc_names, CP)
+    return super().__new__(cls)
+
   def __init__(self, dbc_names, CP, VM=None):
     try:
       super().__init__(dbc_names, CP, VM)
@@ -130,6 +138,9 @@ class CarController(CarControllerBase):
 
     self.CP = CP
     self.frame = 0
+    # Native XNOR steering safety uses VM jerk and lateral acceleration bounds.
+    from opendbc.car.tesla.interface import CarInterface
+    self.VM = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))
 
     self.params = Params()
     self._long_module = LongController()
@@ -290,7 +301,7 @@ class CarController(CarControllerBase):
       self.tesla_can = TeslaCANLegacy(self.packers)
 
       # STW_ACTN_RQ needs CRC/counter; legacy helper doesn't implement it.
-      self._action_can_by_bus = {int(bus): TeslaCAN(pkr) for bus, pkr in self.packers.items()}
+      self._action_can_by_bus = {int(bus): TeslaCAN(CP, pkr) for bus, pkr in self.packers.items()}
       self._body_controls_can = self._action_can_by_bus[int(CANBUS.party)]
     else:
       self.packer = CANPacker(dbc_names[Bus.party])
@@ -1819,13 +1830,14 @@ class CarController(CarControllerBase):
           float(CS.out.steeringAngleDeg),
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
         )
-        apply_angle = float(apply_std_steer_angle_limits(
+        apply_angle = float(apply_steer_angle_limits_vm(
           float(desired_angle),
           float(self.apply_angle_last),
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
           float(CS.out.steeringAngleDeg),
           lat_active,
-          CarControllerParams.ANGLE_LIMITS,
+          CarControllerParams,
+          self.VM,
         ))
         steer_guard_deg = float(np.interp(
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
@@ -1913,6 +1925,7 @@ class CarController(CarControllerBase):
       if send_op_powertrain:
         long_frame = self.tesla_can.create_longitudinal_command(
           state, accel, counter, float(CS.out.vEgo), long_active,
+          bool(CS.out.gasPressed),
         )
         can_sends.append(long_frame)
         if bool(getattr(CS, '_xnor_experimental_direct_active', False)) and (self.frame % 100 == 0):

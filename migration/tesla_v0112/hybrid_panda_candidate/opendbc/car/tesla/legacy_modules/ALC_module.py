@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Tuple
 
-from cereal import log
+from openpilot.cereal import log
 
 
 def _lane_change_enums() -> Tuple[Any, Any]:

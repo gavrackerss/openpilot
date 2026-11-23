@@ -5,11 +5,11 @@ from dataclasses import dataclass
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.params import Params
-from openpilot.selfdrive.car.modules.CFG_module import load_bool_param, load_float_param
-from openpilot.selfdrive.car.modules.BLNK_module import BLNKController
-from openpilot.selfdrive.car.modules.ALC_module import ALCController
-from openpilot.selfdrive.car.modules.HSO_module import HSOController
-import cereal.messaging as messaging
+from opendbc.car.tesla.legacy_modules.CFG_module import load_bool_param, load_float_param
+from opendbc.car.tesla.legacy_modules.BLNK_module import BLNKController
+from opendbc.car.tesla.legacy_modules.ALC_module import ALCController
+from opendbc.car.tesla.legacy_modules.HSO_module import HSOController
+from openpilot.cereal import messaging
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -37,6 +37,12 @@ class _TinklaConfig:
 
 
 class CarState(CarStateBase):
+  def __new__(cls, CP):
+    if cls is CarState and CP.carFingerprint not in LEGACY_CARS:
+      from opendbc.car.tesla.carstate_native_0112 import CarState as NativeCarState
+      return NativeCarState(CP)
+    return super().__new__(cls)
+
   DOUBLE_PULL_WINDOW_MS = 750
   XNOR_CRUISE_SET_HOLD_MS = 8_000
 

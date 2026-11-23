@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from cereal import messaging
+from openpilot.cereal import messaging
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.tesla.values import CruiseButtons
 

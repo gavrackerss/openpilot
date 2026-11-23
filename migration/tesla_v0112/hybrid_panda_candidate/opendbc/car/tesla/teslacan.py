@@ -3,9 +3,11 @@ from opendbc.car.tesla.values import CANBUS, CarControllerParams, TeslaFlags
 
 
 def get_steer_ctrl_type(flags: int, ctrl_type: int) -> int:
+  # Returns the flipped signal value for DAS_steeringControlType on FSD 14
   if flags & TeslaFlags.FSD_14:
     return {1: 2, 2: 1}.get(ctrl_type, ctrl_type)
-  return ctrl_type
+  else:
+    return ctrl_type
 
 
 def _crc8_j1850(data: bytes) -> int:
@@ -64,47 +66,41 @@ def create_fake_das_message(pedal_enabled: bool, autopilot_disabled: bool, *,
 
 
 class TeslaCAN:
-  def __init__(self, *args):
-    if len(args) == 2:
-      self.CP, self.packer = args
-    elif len(args) == 1:
-      self.CP, self.packer = None, args[0]
-    else:
-      raise TypeError("TeslaCAN expects (packer) or (CP, packer)")
+  def __init__(self, CP, packer):
+    self.CP = CP
     self.CCP = CarControllerParams
+    self.packer = packer
     self.jerk_upper = self.CCP.JERK_LIMIT_MAX
     self.jerk_lower = self.CCP.JERK_LIMIT_MIN
 
-  def _create_fake_das(self, pedal_enabled: bool, autopilot_disabled: bool, bus: int,
-                       stalk_main: bool = False, stalk_cancel: bool = False):
-    return create_fake_das_msg(pedal_enabled, autopilot_disabled, bus,
-                               stalk_main=stalk_main, stalk_cancel=stalk_cancel)
-
   def create_steering_control(self, angle, enabled):
+    # On FSD 14+, ANGLE_CONTROL behavior changed to allow user winddown while actuating.
+    # with openpilot, after overriding w/ ANGLE_CONTROL the wheel snaps back to the original angle abruptly
+    # so we now use LANE_KEEP_ASSIST to match stock FSD.
+    # see carstate.py for more details
     values = {
       "DAS_steeringAngleRequest": -angle,
       "DAS_steeringHapticRequest": 0,
-      "DAS_steeringControlType": get_steer_ctrl_type(getattr(self.CP, "flags", 0), 1 if enabled else 0),
+      "DAS_steeringControlType": get_steer_ctrl_type(self.CP.flags, 1 if enabled else 0),
     }
+
     return self.packer.make_can_msg("DAS_steeringControl", CANBUS.party, values)
 
-  def create_longitudinal_command(self, acc_state, accel, counter, v_ego, active,
-                                  gas_pressed=False, set_speed_kph: float | None = None):
-    from opendbc.car.interfaces import V_CRUISE_MAX
+  def create_longitudinal_command(self, acc_state, accel, counter, v_ego, active, gas_pressed):
+    set_speed = min(max(v_ego + accel, 0) * CV.MS_TO_KPH, 400)
 
-    if set_speed_kph is not None:
-      set_speed = float(max(0.0, min(float(set_speed_kph), V_CRUISE_MAX)))
+    if gas_pressed:
+      self.jerk_upper = self.jerk_lower = 0.0
     else:
-      set_speed = max(v_ego * CV.MS_TO_KPH, 0.0)
-      if active:
-        set_speed = 0.0 if accel < 0 else V_CRUISE_MAX
+      self.jerk_lower = max(self.jerk_lower - self.CCP.JERK_RAMP_RATE, self.CCP.JERK_LIMIT_MIN)
+      self.jerk_upper = min(self.jerk_upper + self.CCP.JERK_RAMP_RATE, self.CCP.JERK_LIMIT_MAX)
 
     values = {
       "DAS_setSpeed": set_speed,
       "DAS_accState": acc_state,
       "DAS_aebEvent": 0,
-      "DAS_jerkMin": CarControllerParams.JERK_LIMIT_MIN,
-      "DAS_jerkMax": CarControllerParams.JERK_LIMIT_MAX,
+      "DAS_jerkMin": self.jerk_lower,
+      "DAS_jerkMax": self.jerk_upper,
       "DAS_accelMin": accel,
       "DAS_accelMax": max(accel, 0),
       "DAS_controlCounter": counter,
@@ -115,7 +111,9 @@ class TeslaCAN:
     values = {
       "APS_eacAllow": 1,
     }
+
     return self.packer.make_can_msg("APS_eacMonitor", CANBUS.party, values)
+
 
   def create_stalk_request(self, bus: int, msg_stw_actn_req: dict | None, *,
                            cruise_button: int | None = None,
