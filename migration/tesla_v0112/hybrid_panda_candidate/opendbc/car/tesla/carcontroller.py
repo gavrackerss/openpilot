@@ -28,9 +28,16 @@ import os
 import numpy as np
 import time
 
-from openpilot.common.params import Params
-from openpilot.common.swaglog import cloudlog
-from opendbc.car.tesla.legacy_modules.LONG_module import LongController
+# Standalone opendbc must load the Tesla interface and safety definitions
+# without the openpilot runtime. Never pretend the full Hybrid controller is
+# operable in that environment: constructing a legacy car fails closed below.
+try:
+  from openpilot.common.params import Params
+  from openpilot.common.swaglog import cloudlog
+except ImportError:
+  Params = None
+  import logging
+  cloudlog = logging.getLogger("tesla_hybrid_standalone")
 
 from opendbc.can import CANPacker
 from opendbc.car import Bus, structs
@@ -145,6 +152,11 @@ class CarController(CarControllerBase):
     from opendbc.car.tesla.interface import CarInterface
     self.VM = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))
 
+    if Params is None:
+      raise RuntimeError("Tesla Hybrid controller requires the full openpilot Params runtime")
+    # LONG/ACC import the running cereal transport; only initialise on
+    # HW1/HW2/HW3, never when importing opendbc's native safety test package.
+    from opendbc.car.tesla.legacy_modules.LONG_module import LongController
     self.params = Params()
     self._long_module = LongController()
     self._cached_autopilot_disabled = False
