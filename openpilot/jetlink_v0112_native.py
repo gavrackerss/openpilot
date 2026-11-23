@@ -22,6 +22,18 @@ import inspect
 from typing import Callable
 
 
+def require_offroad_probe() -> None:
+  """Never start a Pixel diagnostic session during an onroad lifecycle.
+
+  This is a second boundary beyond JoiningModelState(in_control=True):
+  no automatic attach, no remote output publication, and no connection
+  attempts if the IsOffroad state is absent or false.
+  """
+  from openpilot.common.params import Params
+  if not Params().get_bool("IsOffroad"):
+    raise RuntimeError("XNOR v0.11.2 Pixel probe requires confirmed offroad state")
+
+
 def validate_native_small_model(small) -> None:
   """Fail closed unless the small model has the *0.11.2* modeld ABI."""
   if getattr(small, "chestnut", None) is not False:
@@ -38,6 +50,8 @@ def validate_native_small_model(small) -> None:
   params = tuple(sig.parameters)
   if len(params) < 4 or params[:4] != ("bufs", "transforms", "inputs", "after_enqueue"):
     raise ValueError(f"Expected native run(..., after_enqueue), found {sig}")
+  if sig.parameters["after_enqueue"].default is not None:
+    raise ValueError("Native after_enqueue must default to None")
   for name in ("state_pairs", "input_queues", "packed_input", "prev_desire"):
     if not hasattr(small, name):
       raise ValueError(f"Missing native v0.11.2 model state: {name}")
@@ -80,6 +94,7 @@ def attach_offroad_probe(small, cam_w: int, cam_h: int):
   spec while parked, but cannot publish the large model's predictions.
   Does NOT run on vehicle or register with manager.
   """
+  require_offroad_probe()
   validate_native_small_model(small)
   if cam_w <= 0 or cam_h <= 0:
     raise ValueError("Invalid camera dimensions")
@@ -102,6 +117,9 @@ def attach_offroad_probe(small, cam_w: int, cam_h: int):
   def connect(should_stop=None):
     if should_stop is not None and should_stop():
       raise InterruptedError("Native probe stopped")
+    # A parked test may cross an offroad/onroad transition after it starts.
+    # Recheck for every retry; no Pixel connection should begin onroad.
+    require_offroad_probe()
     transport = _pixel_transport(discover_phone(), PORT)
     client = JetlinkClient(transport, deadline=JETLINK_FRAME_FAILURE_S,
                            name="XNOR-v0.11.2-Pixel-offroad", want_hidden=False)
