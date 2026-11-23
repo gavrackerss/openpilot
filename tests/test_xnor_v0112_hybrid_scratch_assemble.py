@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Non-actuating contract tests for the 0.11.2 scratch Hybrid assembler."""
-import importlib.util
 from pathlib import Path
 import sys
 import tempfile
