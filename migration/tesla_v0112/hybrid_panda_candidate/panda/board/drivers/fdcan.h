@@ -169,7 +169,7 @@ void can_rx(uint8_t can_number) {
     }
 
     uint32_t RxFIFO0SA = FDCAN_START_ADDRESS + (can_number * FDCAN_OFFSET);
-    CANPacket_t to_push;
+    CANPacket_t to_push = {0};  // private forward copy must not inherit uninitialised CAN-FD payload bytes
     const canfd_fifo *fifo;
 
     // getting address
