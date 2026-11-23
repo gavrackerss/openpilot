@@ -14,6 +14,8 @@ on:
       - 'tests/test_xnor_v0112_base_contract.py'
       - 'tests/test_xnor_v0112_jetlink_contract.py'
       - 'tests/test_xnor_v0112_sunnypilot_port.py'
+      - 'tests/test_xnor_v0112_model_selection_status.py'
+      - 'tools/xnor_v0112_model_selection_status.py'
       - '.github/workflows/xnor-v0112-upstream-base-contract.yml'
   workflow_dispatch:
 
@@ -40,6 +42,10 @@ jobs:
         run: |
           python3 tests/test_xnor_v0112_sunnypilot_port.py -v
           python3 -m compileall -q openpilot/sunnypilot/models
+      - name: Functional workstation tests for stock-only SunnyPilot catalog reporting
+        run: |
+          python3 tests/test_xnor_v0112_model_selection_status.py -v
+          python3 -m py_compile tools/xnor_v0112_model_selection_status.py
       - name: Confirm pinned XNOR Panda and opendbc commits
         shell: bash
         run: |
