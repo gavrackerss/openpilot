@@ -10,8 +10,10 @@ on:
       - 'openpilot/selfdrive/modeld/**'
       - 'openpilot/system/manager/process_config.py'
       - 'migration/**'
+      - 'openpilot/sunnypilot/**'
       - 'tests/test_xnor_v0112_base_contract.py'
       - 'tests/test_xnor_v0112_jetlink_contract.py'
+      - 'tests/test_xnor_v0112_sunnypilot_port.py'
       - '.github/workflows/xnor-v0112-upstream-base-contract.yml'
   workflow_dispatch:
 
@@ -34,6 +36,10 @@ jobs:
         run: |
           python3 -m py_compile migration/jetlink_xnor_v0112/native_contract.py tests/test_xnor_v0112_jetlink_contract.py
           python3 tests/test_xnor_v0112_jetlink_contract.py -v
+      - name: Check staged native SunnyPilot manager imports and disabled process
+        run: |
+          python3 tests/test_xnor_v0112_sunnypilot_port.py -v
+          python3 -m compileall -q openpilot/sunnypilot/models
       - name: Confirm pinned XNOR Panda and opendbc commits
         shell: bash
         run: |
