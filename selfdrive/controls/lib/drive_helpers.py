@@ -14,6 +14,13 @@ MAX_LATERAL_JERK = 5.0  # m/s^3
 MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 
 
+# comma openpilot v0.11.2: low-speed stop contract for action-head models.
+# Keep the legacy (acceleration, stop) trajectory helper below until the full
+# planner migration is complete, so the working small model remains unchanged.
+def should_stop(v_ego: float, a_target: float) -> bool:
+  return bool(v_ego < 0.3 and a_target < 0.1)
+
+
 def clamp(val, min_val, max_val):
   clamped_val = float(np.clip(val, min_val, max_val))
   return clamped_val, clamped_val != val
