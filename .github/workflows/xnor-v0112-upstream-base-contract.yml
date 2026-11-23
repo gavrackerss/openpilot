@@ -19,6 +19,10 @@ on:
       - 'tests/test_xnor_v0112_tesla_hybrid_long_owner.py'
       - 'tools/xnor_v0112_longitudinal_migration_audit.py'
       - 'tools/xnor_v0112_model_selection_status.py'
+      - 'tools/xnor_v0112_tesla_panda_preflight.py'
+      - 'tools/xnor_v0112_export_tesla_opendbc_patch.py'
+      - 'tests/test_xnor_v0112_tesla_panda_overlay.py'
+      - 'tests/test_xnor_v0112_tesla_passive_patch.py'
       - '.github/workflows/xnor-v0112-upstream-base-contract.yml'
   workflow_dispatch:
 
@@ -63,6 +67,15 @@ jobs:
           set -euo pipefail
           test "$(git ls-tree HEAD opendbc_repo | awk '{print $3}')" = "3f86206a13c3181f0224e8f1424b836592e2b2d2"
           test "$(git ls-tree HEAD panda | awk '{print $3}')" = "fa83a40ad799c827ab9cbda4560cf3426531ceff"
+
+      - name: Initialise exact pinned opendbc for isolated Tesla tests
+        run: git submodule update --init opendbc_repo
+      - name: Check Tesla HW2 Panda AEB safety, native DBC and additive opendbc review patch
+        run: |
+          python3 -m py_compile tools/xnor_v0112_tesla_panda_preflight.py tools/xnor_v0112_export_tesla_opendbc_patch.py migration/tesla_v0112/di_state_layout.py
+          python3 tools/xnor_v0112_tesla_panda_preflight.py
+          python3 tests/test_xnor_v0112_tesla_panda_overlay.py -v
+          python3 tests/test_xnor_v0112_tesla_passive_patch.py -v
 
 # These are source-only checks. They do not compile capnp, build Panda safety,
 # replay recordings or qualify Tesla longitudinal control.
