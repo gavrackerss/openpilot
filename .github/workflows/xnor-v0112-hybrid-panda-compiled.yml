@@ -55,7 +55,7 @@ jobs:
           git clone -q --no-hardlinks "$GITHUB_WORKSPACE/panda" "$RUNNER_TEMP/panda-hybrid"
           git -C "$RUNNER_TEMP/opendbc-hybrid" apply "$RUNNER_TEMP/xnor-hybrid-patches/xnor-v0112-tesla-hybrid-opendbc.patch"
           git -C "$RUNNER_TEMP/panda-hybrid" apply "$RUNNER_TEMP/xnor-hybrid-patches/xnor-v0112-tesla-hybrid-panda.patch"
-          grep -q 'fwd_msg = tesla_legacy_fwd_msg_hook' "$RUNNER_TEMP/opendbc-hybrid/opendbc/safety/modes/tesla_legacy.h"
+          grep -q 'fwd_msg = tesla_hybrid_dispatch_fwd_msg' "$RUNNER_TEMP/opendbc-hybrid/opendbc/safety/modes/tesla_legacy.h"
           grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/bxcan.h"
           grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/fdcan.h"
 
