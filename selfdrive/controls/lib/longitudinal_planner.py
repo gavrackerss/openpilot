@@ -12,7 +12,7 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
-from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
+from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, radar_lead_present
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -189,7 +189,7 @@ class LongitudinalPlanner:
         preview_x = float(np.interp(3.0, T_IDXS_MPC, model_x))
         preview_v = float(np.interp(3.0, T_IDXS_MPC, model_v))
         cloudlog.info(f'[XNOR_V220_PLANNER_SHADOW] experimental={int(bool(sm["selfdriveState"].experimentalMode))} '
-                      f'lead={int(bool(sm["radarState"].leadOne.status))} '
+                      f'lead={int(radar_lead_present(sm["radarState"].leadOne))} '
                       f'ego={v_ego:.2f} cruiseCap={v_cruise:.2f} '
                       f'model3s_x={preview_x:.2f} model3s_v={preview_v:.2f} '
                       f'e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} '
@@ -212,7 +212,7 @@ class LongitudinalPlanner:
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
-    longitudinalPlan.hasLead = sm['radarState'].leadOne.status
+    longitudinalPlan.hasLead = radar_lead_present(sm['radarState'].leadOne)
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
 
