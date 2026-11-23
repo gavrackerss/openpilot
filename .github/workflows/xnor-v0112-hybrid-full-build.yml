@@ -74,6 +74,15 @@ jobs:
           git -C opendbc_repo diff --check
           git -C panda diff --check
 
+      - name: Install native desktop USB development headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # XNOR's setup_dependencies.sh intentionally skips apt packages if
+          # gcc/g++/make/curl already exist. The hosted runner lacks libusb.h.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
+
       - name: Install native XNOR 0.11.2 desktop build dependencies
         shell: bash
         working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
