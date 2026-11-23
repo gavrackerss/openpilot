@@ -31,7 +31,7 @@ NATIVE_BLOBS = {
     "opendbc/car/tesla/carcontroller.py": "6d5e40a1e74b0f10c43ecdffd626ae82337cb745",
     "opendbc/car/tesla/carstate.py": "eb44677e0a85a5b47dfdc60f3d4faff657476152",
     "opendbc/car/tesla/teslacan.py": "9760f926615ef90b2c0897ef217c59330dd1bbc8",
-    "opendbc/car/tesla/teslacan_legacy.py": "3d905b7754d0021b427d079c42166c29b95db2",
+    "opendbc/car/tesla/teslacan_legacy.py": "3d905b7754d0021b427d4d079c42166c29b95db2",
   },
   "panda": {
     "board/drivers/bxcan.h": "52872e3c2ae9fab162ed9a3074622167bd08c592",
