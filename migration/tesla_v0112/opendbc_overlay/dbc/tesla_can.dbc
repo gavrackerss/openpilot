@@ -754,6 +754,17 @@ BO_ 780 DriverSeat: 8 XXX
  SG_ occupancyStatus : 16|3@1+ (1,0) [0|7] "" XXX
  SG_ buckleStatus : 19|2@1+ (1,0) [0|3] "" XXX
 
+BO_ 937 DAS_telemetry: 8 XXX
+ SG_ DAS_telemetryMultiplexer : 0|8@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telLeftLaneType : 8|3@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telRightLaneType : 11|3@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telLeftMarkerQuality : 14|2@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telRightMarkerQuality : 16|2@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telLeftMarkerColor : 18|2@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telRightMarkerColor : 20|2@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telLeftLaneCrossing : 22|1@1+ (1,0) [0|0] "" XXX
+ SG_ DAS_telRightLaneCrossing : 23|1@1+ (1,0) [0|0] "" XXX
+
 VAL_ 3 StW_Angl 16383 "SNA" ;
 VAL_ 3 StW_AnglSens_Id 2 "MUST" 0 "PSBL" 1 "SELF" ;
 VAL_ 3 StW_AnglSens_Stat 2 "ERR" 3 "ERR_INI" 1 "INI" 0 "OK" ;
@@ -928,13 +939,4 @@ VAL_ 1160 DAS_steeringAngleRequest 16384 "ZERO_ANGLE" ;
 VAL_ 1160 DAS_steeringControlType 2 "LANE_KEEP_ASSIST" 0 "NONE" 1 "ANGLE_CONTROL" 3 "EMERGENCY_LANE_KEEP" ;
 VAL_ 1160 DAS_steeringHapticRequest 1 "ACTIVE" 0 "IDLE" ;
 
-BO_ 937 DAS_telemetry: 8 XXX
- SG_ DAS_telemetryMultiplexer : 0|8@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telLeftLaneType : 8|3@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telRightLaneType : 11|3@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telLeftMarkerQuality : 14|2@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telRightMarkerQuality : 16|2@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telLeftMarkerColor : 18|2@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telRightMarkerColor : 20|2@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telLeftLaneCrossing : 22|1@1+ (1,0) [0|0] "" XXX
- SG_ DAS_telRightLaneCrossing : 23|1@1+ (1,0) [0|0] "" XXX
+
