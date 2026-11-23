@@ -1,0 +1,43 @@
+name: XNOR native v0.11.2 integration contract
+
+on:
+  push:
+    branches:
+      - 'upgrade/xnor-v0112-native-integration'
+    paths:
+      - 'openpilot/jetlink_v0112_native.py'
+      - 'openpilot/cereal/**'
+      - 'openpilot/common/params_keys.h'
+      - '.gitmodules'
+      - 'migration/tesla_opendbc_legacy/**'
+      - 'tests/test_xnor_v0112_*'
+      - '.github/workflows/xnor-v0112-native-contract.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-staging-contract:
+    name: Zero-dependency source checks (NOT a road safety test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Verify v0.11.2 integration boundaries and Tesla snapshots
+        run: python3 tests/test_xnor_v0112_native_contract.py -v
+      - name: Verify XNOR Cereal wire IDs and services
+        run: python3 tests/test_xnor_v0112_schema_contract.py -v
+      - name: Verify native Params key migration
+        run: python3 tests/test_xnor_v0112_params_contract.py -v
+      - name: Check Python syntax
+        run: |
+          python3 -m py_compile \
+            openpilot/jetlink_v0112_native.py \
+            tests/test_xnor_v0112_native_contract.py \
+            tests/test_xnor_v0112_schema_contract.py \
+            tests/test_xnor_v0112_params_contract.py
+
+# This workflow cannot validate Cap'n Proto C++ generation, panda safety,
+# native Tinygrad, Pixel inference, Tesla behavior or road stopping.
