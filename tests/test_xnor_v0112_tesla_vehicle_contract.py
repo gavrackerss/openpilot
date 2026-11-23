@@ -53,7 +53,11 @@ class TeslaHybridVehicleFunctionContracts(unittest.TestCase):
       }
     ))
     cls.compute_owner = staticmethod(detached_function(
-      "carcontroller.py", "CarController", "_v229_compute_owner", {}
+      "carcontroller.py", "CarController", "_v229_compute_owner", {
+        "structs": SimpleNamespace(
+          CarState=SimpleNamespace(GearShifter=SimpleNamespace(drive="drive"))
+        ),
+      }
     ))
 
   def test_native_cruise_setpoint_is_not_doubled(self):
@@ -120,17 +124,69 @@ class TeslaHybridVehicleFunctionContracts(unittest.TestCase):
     self.assertTrue(all(p[1][5] & 0x01 for p in packets))
     self.assertTrue(all((p[1][5] & 0x08) == 0 for p in packets))
 
-  def test_v229_hands_back_to_native_autosteer(self):
+  @staticmethod
+  def eligible_v229_states():
     sender = SimpleNamespace(
       _v229_stopgo_selected=True, _cached_autopilot_disabled=False,
       _cached_hybrid_native_ap=True, _cached_enable_acc=True
     )
-    CS = SimpleNamespace(out=SimpleNamespace(stockLkas=True), enableACC=True)
-    self.assertFalse(self.compute_owner(sender, CS))
-    CS.out.stockLkas = False
-    self.assertTrue(self.compute_owner(sender, CS))
+    CC = SimpleNamespace(
+      enabled=True, longActive=True,
+      cruiseControl=SimpleNamespace(cancel=False)
+    )
+    CS = SimpleNamespace(
+      out=SimpleNamespace(
+        stockLkas=False, canValid=True, canTimeout=False,
+        gearShifter="drive", brakePressed=False, gasPressed=False,
+        stockAeb=False, accFaulted=False
+      ),
+      enableACC=True,
+    )
+    return sender, CC, CS
+
+  def test_v229_hands_back_to_native_autosteer(self):
+    sender, CC, CS = self.eligible_v229_states()
+    self.assertTrue(self.compute_owner(sender, CC, CS))
+    CS.out.stockLkas = True
+    self.assertFalse(self.compute_owner(sender, CC, CS))
     sender._v229_stopgo_selected = False
-    self.assertFalse(self.compute_owner(sender, CS))
+    CS.out.stockLkas = False
+    self.assertFalse(self.compute_owner(sender, CC, CS))
+
+  def test_v229_has_no_disengaged_or_pedal_override_ownership(self):
+    sender, CC, CS = self.eligible_v229_states()
+    for field in ("enabled", "longActive"):
+      setattr(CC, field, False)
+      self.assertFalse(self.compute_owner(sender, CC, CS), field)
+      setattr(CC, field, True)
+    CC.cruiseControl.cancel = True
+    self.assertFalse(self.compute_owner(sender, CC, CS))
+    CC.cruiseControl.cancel = False
+    for field in ("brakePressed", "gasPressed", "stockAeb", "accFaulted"):
+      setattr(CS.out, field, True)
+      self.assertFalse(self.compute_owner(sender, CC, CS), field)
+      setattr(CS.out, field, False)
+    self.assertTrue(self.compute_owner(sender, CC, CS))
+
+  def test_v229_requires_valid_CAN_and_drive_gear(self):
+    sender, CC, CS = self.eligible_v229_states()
+    CS.out.canValid = False
+    self.assertFalse(self.compute_owner(sender, CC, CS))
+    CS.out.canValid = True
+    CS.out.canTimeout = True
+    self.assertFalse(self.compute_owner(sender, CC, CS))
+    CS.out.canTimeout = False
+    for gear in (None, "park", "reverse", "neutral"):
+      CS.out.gearShifter = gear
+      self.assertFalse(self.compute_owner(sender, CC, CS))
+    CS.out.gearShifter = "drive"
+    self.assertTrue(self.compute_owner(sender, CC, CS))
+
+  def test_v229_absent_CC_or_state_fails_closed(self):
+    sender, CC, CS = self.eligible_v229_states()
+    self.assertFalse(self.compute_owner(sender, None, CS))
+    self.assertFalse(self.compute_owner(sender, CC, SimpleNamespace(out=None)))
+    self.assertFalse(self.compute_owner(sender, CC, SimpleNamespace(out=SimpleNamespace())))
 
 
 if __name__ == "__main__":
