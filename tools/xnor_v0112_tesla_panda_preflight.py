@@ -134,8 +134,8 @@ def audit() -> dict:
   original_speed = signal("DI_digitalSpeed", original_dbc)
   if native_cruise == original_cruise or native_speed == original_speed:
     raise RuntimeError("DI_state signal-layout conflict unexpectedly disappeared")
-  native_status2 = native_dbc.split("BO_ 905 DAS_status2:", 1)[1].split("\\nBO_", 1)[0]
-  legacy_status2 = original_dbc.split("BO_ 905 DAS_status2:", 1)[1].split("\\nBO_", 1)[0]
+  native_status2 = native_dbc.split("BO_ 905 DAS_status2:", 1)[1].split("\nBO_", 1)[0]
+  legacy_status2 = original_dbc.split("BO_ 905 DAS_status2:", 1)[1].split("\nBO_", 1)[0]
   if "31|3@1+" not in signal("DAS_lssState", native_status2):
     raise RuntimeError("Pinned DAS_status2 no longer defines native LSS occupancy")
   if "31|1@1+" not in signal("DAS_relaxCruiseLimits", legacy_status2):
