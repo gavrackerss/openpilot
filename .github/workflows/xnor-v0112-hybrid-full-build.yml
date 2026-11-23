@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           # The setup tool creates the project environment. The native
           # management build also generates all native capnp/DBC modules.
-          ./tools/op.sh scons --minimal
+          ./tools/op.sh build --minimal
 
       - name: Validate no original source dependency was modified
         if: always()
