@@ -64,7 +64,7 @@ def audit() -> dict:
 
   return {
     "installed_reference": "24d304bb06b6beef6b0a0633bf966dbbc23e9d39",
-    "installed_baseline_sha256_status": "git blob SHA-1 exact match for 7 files",
+    "installed_git_blob_integrity": "git blob SHA-1 exact match for 7 files",
     "native_reference": "xnor-tech/openpilot xnor-dev 44be035782288ed94d1a15116907cc08c0a7c83d",
     "installed_dec_present": False,
     "native_dec_present": False,
