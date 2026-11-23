@@ -39,7 +39,8 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     mutable = safety.index("current_hooks->fwd_msg(bus_num, to_fwd)", start)
     self.assertLess(aeb, mutable)
     self.assertIn("if (block || (to_fwd->addr != before.addr)", safety)
-    self.assertIn("return -1;", safety[aeb:mutable])
+    self.assertIn("return destination_bus;", safety[aeb:mutable])
+    self.assertNotIn("to_fwd->data[", safety[aeb:mutable])
 
   def test_panda_copies_the_original_receive_frame(self):
     for controller in ("bxcan.h", "fdcan.h"):
