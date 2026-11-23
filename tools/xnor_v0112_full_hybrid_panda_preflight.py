@@ -150,16 +150,57 @@ def audit() -> dict:
   require("current_safety_mode != SAFETY_TESLA_LEGACY" in fdcan and
           "#ifdef PANDA_BODY" in fdcan,
           "Tesla safety block must not fall back to an unsafe bus, or lose native body support")
-  for rel in NEW_TESTS:
+  # Keep native capnp field numbering stable. Native @61 is carNotReady,
+  # whereas the installed Tesla fork reused @61 for followDistanceS.
+  capnp = text("opendbc/car/car.capnp", "opendbc")
+  carstate = text("opendbc/car/tesla/carstate.py", "opendbc")
+  controller = text("opendbc/car/tesla/carcontroller.py", "opendbc")
+  teslacan = text("opendbc/car/tesla/teslacan.py", "opendbc")
+  native_st = text("opendbc/car/tesla/carstate_native_0112.py", "opendbc")
+  native_ct = text("opendbc/car/tesla/carcontroller_native_0112.py", "opendbc")
+  require("carNotReady @61 :Bool;" in capnp and
+          "followDistanceS @66 :UInt8;" in capnp and
+          "adaptiveCruiseEnabled @62 :Bool;" in capnp and
+          "teslaAlcHandoverReady @63 :Bool;" in capnp and
+          "teslaEacStatus @64 :UInt8;" in capnp and
+          "teslaEacError @65 :UInt8;" in capnp and
+          "brake @5 :Float32;" in capnp,
+          "Tesla car.capnp reuses native IDs or dropped diagnostic fields")
+  require("DI_cruiseSet_native_0112" in carstate and
+          "_cruise_set_scale" not in carstate and
+          "CarState as NativeCarState" in carstate,
+          "Native DI_state format or unaffected Model3/Y fallback broken")
+  require("apply_steer_angle_limits_vm(" in controller and
+          "CarController as NativeCarController" in controller and
+          "_GTW_TX_AUTOPILOT2_BUS2 = False" in controller and
+          "_UNITY_2B9_OVERLAY_TEMPLATE = False" in controller and
+          "_ALLOW_LEGACY_HUD_WARNING_OVERLAY = False" in controller,
+          "VM steering limit, native fallback, or experimental safety gate broken")
+  require("def create_fake_das_msg(" in teslacan and
+          "def create_stalk_request(" in teslacan and
+          "def create_telemetry_road_info(" in teslacan,
+          "Missing 0x659 internal carrier or Tesla CAN helpers")
+  require(native_st == (SOURCES["opendbc"] / "opendbc/car/tesla/carstate.py").read_text(encoding="utf-8") and
+          native_ct == (SOURCES["opendbc"] / "opendbc/car/tesla/carcontroller.py").read_text(encoding="utf-8"),
+          "Modern Model3/Y fallback files must be exact native XNOR copies")
+  require("ignore_hud_aeb = False" in interface,
+          "Unverified HUD/stock AEB warning suppression was enabled")
+
+  for rel in (*NEW_TESTS, *NEW_VEHICLE_FILES):
     require((BASE / "opendbc" / rel).is_file(),
-            f"Missing compiled-safety negative tests: {rel}")
+            f"Missing test or Tesla vehicle module: {rel}")
 
   for rel in (
       "opendbc/car/tesla/values.py",
       "opendbc/car/tesla/interface.py",
       "opendbc/car/tesla/radar_interface.py",
+      "opendbc/car/tesla/carcontroller.py",
+      "opendbc/car/tesla/carstate.py",
+      "opendbc/car/tesla/teslacan.py",
+      "opendbc/car/tesla/teslacan_legacy.py",
       "opendbc/safety/tests/libsafety/libsafety_py.py",
       *NEW_TESTS,
+      *NEW_VEHICLE_FILES,
   ):
     file = BASE / "opendbc" / rel
     compile(file.read_text(encoding="utf-8"), str(file), "exec")
@@ -171,6 +212,11 @@ def audit() -> dict:
     },
     "native_blob_sources_verified": count,
     "full_hybrid_staged": True,
+    "native_tesla_vehicle_state_and_controller_staged": True,
+    "carNotReady_tag_61_preserved": True,
+    "tesla_follow_distance_tag": 66,
+    "legacy_HUD_warning_override_default": "OFF",
+    "native_DI_cruiseSet_doubled": False,
     "packet_aware_fwd_present": True,
     "both_panda_drivers_ported": True,
     "genuine_stock_AEB_unmodified": True,
