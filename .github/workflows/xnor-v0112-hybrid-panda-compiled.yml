@@ -98,12 +98,28 @@ jobs:
           print("Pinned 0.11.2 CarState Cap'n Proto loads and Tesla tags do not collide.")
           PY
 
-      - name: Execute compiled Tesla HW1/HW2/HW3/Model3 safety regressions
+      - name: Confirm standalone opendbc Tesla imports require no openpilot runtime
         shell: bash
         run: |
           set -euo pipefail
           VENV="$RUNNER_TEMP/tesla-v0112-safety-venv"
           "$VENV/bin/pip" install --disable-pip-version-check -e "$RUNNER_TEMP/opendbc-hybrid" 'cffi>=1.16' 'pytest>=8'
+          cd "$RUNNER_TEMP/opendbc-hybrid"
+          "$VENV/bin/python" - <<'PY'
+          import importlib.util
+          assert importlib.util.find_spec("openpilot") is None, "Must test without openpilot runtime"
+          from opendbc.car.tesla.carcontroller import CarController
+          from opendbc.car.tesla.carstate import CarState
+          from opendbc.car.tesla.interface import CarInterface
+          assert CarController and CarState and CarInterface
+          print("Tesla native and Hybrid interfaces imported without openpilot runtime")
+          PY
+
+      - name: Execute compiled Tesla HW1/HW2/HW3/Model3 safety regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/tesla-v0112-safety-venv"
           cd "$RUNNER_TEMP/opendbc-hybrid"
           "$VENV/bin/python" -m pytest -q \
             opendbc/safety/tests/test_tesla.py \
