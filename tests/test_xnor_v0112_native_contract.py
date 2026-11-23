@@ -26,12 +26,13 @@ spec.loader.exec_module(module)
 
 def fake_native_model():
   class NativeSmall:
-    chestnut = False
-    vision_input_names = ("img", "big_img")
-    state_pairs = {"prev_feat": "next_prev_feat"}
-    input_queues = {"prev_feat": object()}
-    packed_input = bytearray(12)
-    prev_desire = [0] * 8
+    def __init__(self):
+      self.chestnut = False
+      self.vision_input_names = ("img", "big_img")
+      self.state_pairs = {"prev_feat": "next_prev_feat"}
+      self.input_queues = {"prev_feat": object()}
+      self.packed_input = bytearray(12)
+      self.prev_desire = [0] * 8
 
     def run(self, bufs, transforms, inputs, after_enqueue=None):
       return {}
