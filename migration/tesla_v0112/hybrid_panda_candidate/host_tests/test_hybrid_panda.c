@@ -36,6 +36,23 @@ static CANPacket_t das_packet(int addr, int bus, int speed, int aeb, int counter
   return p;
 }
 
+// Build a valid former V229 disengaged-prime request: setSpeed=0,
+// accel envelope [-1.4,+1.8], jerk in the old narrow priming band.
+// The candidate must reject it when longitudinal authority is absent.
+static CANPacket_t unsafe_old_priming_template(void) {
+  CANPacket_t p = das_packet(0x2BF, 0, 0, 0, 1);
+  const int raw_min = 340;
+  const int raw_max = 420;
+  const int jerk_min = 492;
+  const int jerk_max = 8;
+  p.data[2] = (uint8_t)((jerk_min & 0x3F) << 2);
+  p.data[3] = (uint8_t)(((jerk_min >> 6) & 0x07) | ((jerk_max & 0x1F) << 3));
+  p.data[4] = (uint8_t)(((jerk_max >> 5) & 0x07) | ((raw_min & 0x1F) << 3));
+  p.data[5] = (uint8_t)(((raw_min >> 5) & 0x0F) | ((raw_max & 0x0F) << 4));
+  p.data[6] = (uint8_t)(((raw_max >> 4) & 0x1F) | ((1U & 0x07U) << 5));
+  return p;
+}
+
 static void arm_external_owner(void) {
   assert(set_safety_hooks(SAFETY_TESLA_LEGACY, TESLA_EXTERNAL_HW2_FLAGS) == 0);
   init_tests();
@@ -101,11 +118,37 @@ static void test_main_panda_does_not_send_unsolicited_chassis_long(void) {
   assert(safety_fwd_hook_pkt(0, &carrier) == -1);
 }
 
+static void test_disengaged_priming_never_rewrites_a_genuine_ap_frame(void) {
+  arm_external_owner();
+  set_controls_allowed(false);
+  CANPacket_t prime = unsafe_old_priming_template();
+  assert(!safety_tx_hook(&prime));  // consumed as a template, never wire TX
+  assert(!tesla_legacy_v229_tmpl_valid);  // template MUST be invalid
+  CANPacket_t native = das_packet(0x2BF, 2, 30, 0, 5);
+  CANPacket_t original = native;
+  assert(safety_fwd_hook_pkt(2, &native) == 0);
+  assert(memcmp(native.data, original.data, 8) == 0);
+}
+
+static void test_captured_template_revoked_before_stock_frame_is_not_applied(void) {
+  arm_external_owner();
+  CANPacket_t tmpl = das_packet(0x2BF, 0, 55, 0, 1);
+  assert(!safety_tx_hook(&tmpl));
+  assert(tesla_legacy_v229_tmpl_valid);
+  set_controls_allowed(false);  // permission can change between TX and AP RX
+  CANPacket_t genuine = das_packet(0x2BF, 2, 30, 0, 4);
+  CANPacket_t original = genuine;
+  assert(safety_fwd_hook_pkt(2, &genuine) == 0);
+  assert(memcmp(genuine.data, original.data, 8) == 0);
+}
+
 int main(void) {
   test_external_owner_and_genuine_aeb();
   test_v229_native_counter_preserved_when_forward_rewritten();
   test_unqualified_or_stale_owner_forwards_native();
   test_main_panda_does_not_send_unsolicited_chassis_long();
+  test_disengaged_priming_never_rewrites_a_genuine_ap_frame();
+  test_captured_template_revoked_before_stock_frame_is_not_applied();
   puts("XNOR v0.11.2 Tesla Hybrid Panda host smoke: PASS");
   return 0;
 }
