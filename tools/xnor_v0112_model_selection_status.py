@@ -12,6 +12,13 @@ import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
+import sys
+
+# Standalone workstation invocation via "python tools/..." does not promise
+# that the repository root is already on sys.path.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+  sys.path.insert(0, str(ROOT))
 
 from openpilot.sunnypilot.models.catalog_guard import audit_bundle
 
