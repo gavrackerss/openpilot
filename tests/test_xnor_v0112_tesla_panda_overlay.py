@@ -27,7 +27,7 @@ class TeslaNativePandaContract(unittest.TestCase):
     cls.result = audit.audit()
 
   def test_pinned_native_files_verified(self):
-    self.assertEqual(self.result["verified_native_blob_count"], 4)
+    self.assertEqual(self.result["verified_native_blob_count"], 5)
     self.assertFalse(self.result["ready_to_flash_panda"])
     self.assertFalse(self.result["ready_to_enable_tesla_longitudinal"])
 
@@ -56,6 +56,23 @@ class TeslaNativePandaContract(unittest.TestCase):
     self.assertEqual(overlay[:insertion_start] + overlay[insertion_end + 2:], pinned)
     self.assertEqual(audit.message_names(overlay)[937], "DAS_telemetry")
     self.assertEqual(len(audit.message_names(overlay)), len(audit.message_names(pinned)) + 1)
+
+  def test_radar_overlay_preserves_native_Bosch_cache(self):
+    native = audit.read(audit.PINNED / "car/tesla/radar_interface.py")
+    overlay = audit.read(audit.OVERLAY / "car/tesla/radar_interface.py")
+    self.assertIn("return self.last_radar_data", overlay)
+    self.assertIn("self.last_radar_data = rr", overlay)
+    self.assertIn("self.pts[i].aRel = msg_a['LongAccel']", overlay)
+    self.assertIn("self.pts[i].yvRel = msg_b['LatSpeed']", overlay)
+    self.assertIn("self.pts[i].measured = bool(msg_a['Meas'])", overlay)
+    self.assertIn("native Bosch 8 Hz update cache retained", self.result["radar_overlay"])
+    # No message cadence, fault handling, or point filtering change.
+    fields = (
+      "      self.pts[i].aRel = msg_a['LongAccel']\n"
+      "      self.pts[i].yvRel = msg_b['LatSpeed']\n"
+      "      self.pts[i].measured = bool(msg_a['Meas'])\n"
+    )
+    self.assertEqual(overlay.replace(fields, "", 1), native)
 
   def test_cruise_signal_layout_requires_vehicle_replay(self):
     self.assertIn("32|9@1+", self.result["native_DI_cruiseSet"])
