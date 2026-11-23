@@ -139,7 +139,7 @@ void can_rx(uint8_t can_number) {
     can_health[can_number].total_rx_cnt += 1U;
 
     // add to my fifo
-    CANPacket_t to_push;
+    CANPacket_t to_push = {0};  // deterministic contents before full-struct forwarding copy
 
     to_push.fd = 0U;
     to_push.returned = 0U;
