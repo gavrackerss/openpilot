@@ -31,6 +31,12 @@ class ParamsPortTest(unittest.TestCase):
       with self.subTest(key=k):
         self.assertIn(f'{{"{k}",', HEADER)
 
+  def test_native_jetlink_is_disabled_by_default(self):
+    self.assertIn('{"JetlinkLink", {PERSISTENT, INT, "0"}}', HEADER)
+    self.assertIn('{"JetlinkChargePhone", {PERSISTENT, BOOL, "0"}}', HEADER)
+    self.assertIn('{"JetlinkProgress", {CLEAR_ON_MANAGER_START, JSON}}', HEADER)
+    self.assertIn('{"JetlinkSpec", {PERSISTENT, JSON}}', HEADER)
+
   def test_native_0112_contracts_not_silently_overwritten(self):
     self.assertIn('{"ExperimentalMode", {PERSISTENT, BOOL, "1"}}', HEADER)
     self.assertIn('{"LastGPSPosition", {PERSISTENT, BYTES}}', HEADER)
