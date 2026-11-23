@@ -175,6 +175,51 @@ not modified by these commits.
     - No active Tesla CarState/CarController, opendbc safety, Panda
       firmware or SCons/native build has been changed/validated.
 
+## 2026-11-23 Full Hybrid Panda source candidate — the coordinated port
+
+16. **Complete HW1/HW2/HW3 Tesla Hybrid Panda candidate staged** under
+    [`migration/tesla_v0112/hybrid_panda_candidate/`](migration/tesla_v0112/hybrid_panda_candidate/README.md).
+    This includes the entire legacy **2,223-line Tesla Hybrid C safety
+    mode**, ported opendbc safety declarations/dispatcher, both STM32F4
+    bxCAN and STM32H7 FD-CAN forwarding drivers, dual-Panda Tesla
+    `CarInterface` safety params, Tesla values, native-compatible
+    radar/DBC, CFFI packet API, compiled host smoke and Python packet
+    safety tests.
+    - A new `safety_fwd_hook_pkt(int,CANPacket_t *)` preserves
+      XNOR's original address-only `safety_fwd_hook(int,int)`.
+      Pandas forward a **private RX copy**, with packet metadata
+      immutable and original safety RX unmodified.
+    - Real stock AEB event=1 never reaches the packet mutation hook;
+      it is forwarded unmodified if forwarding is otherwise allowed.
+      The old optional warning-scrub setting cannot author/suppress
+      actual physical AEB in the new dispatcher.
+    - Native opendbc RX minimum-frequency checks and safety mode
+      initialisation are retained.
+    - The original experimental `GTW_carConfig` MITM default is
+      deliberately disabled. Legacy `0x659`, V229 ownership, valid
+      0x2B9/0x2BF templates, fallback/neutral semantics and
+      native counters/checksums are staged for compiled validation.
+    - The native 0.11.2 `opendbc/safety/ignition.h` already includes
+      Model S 0x348 counter-based ignition detection; the older Panda
+      ignition subsystem is **not** copied over it.
+17. **Isolated patch/export and build gate:**
+    `tools/xnor_v0112_full_hybrid_panda_preflight.py` verifies exact
+    pinned Git blob IDs for 8 opendbc files and 2 Panda files.
+    `tools/xnor_v0112_export_full_hybrid_panda_patch.py` generates
+    one full opendbc and one Panda patch and performs read-only
+    `git apply --check` without modifying either live submodule.
+    `.github/workflows/xnor-v0112-hybrid-panda-compiled.yml`
+    creates disposable clones, applies both patches and compiles the C
+    safety module plus host synthetic AEB/V229 tests.
+    **No GitHub Actions CI run or compiled C result has been observed.**
+18. **Still blocking any driving use:** the actual user-custom
+    `CarController`, `CarState` and 0x659 sender are still archived,
+    not natively adapted or enabled in the XNOR 0.11.2 car stack.
+    All physical dual-Panda CAN replay, hardware firmware build,
+    native Tesla safety regression, LS2 lead-braking validation and
+    on-vehicle independent sign-off are outstanding.
+    The primary `xnor-dev` branch and installed Panda remain untouched.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
