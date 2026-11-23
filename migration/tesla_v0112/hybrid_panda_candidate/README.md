@@ -9,6 +9,44 @@ LS2 action contract, capnp code generation, actual CAN/ECU acceptance
 and safety regression tests remain separate gates. The live car
 software and both submodule pointers are unchanged.
 
+## Reproducible assembled source (staging worktree, no on-road install)
+
+The actual live XNOR gitlinks still point to the **unmodified native
+upstream** Panda and opendbc. To compile the complete port, it is now
+possible to assemble a **separate clone** where both pins are replaced
+with the reviewed candidate source (never change production submodule
+refs or the existing comma installation):
+
+```bash
+# On a Linux development workstation, NOT a comma device
+git checkout upgrade/xnor-v0112-xnor-base
+git submodule update --init panda opendbc_repo
+
+python3 tools/xnor_v0112_assemble_hybrid_candidate.py \
+  --output-dir /tmp/xnor-v0112-hybrid-assembled
+```
+
+The script confirms exact Git SHA pins, checks for dirty original
+submodules and that output is outside the original repository, uses
+scratch Git clones, applies both reviewed patches, records a JSON
+manifest, and refuses AGNOS and /data paths. It never flashes Panda,
+starts openpilot, enables sendcan, or approves vehicle authority.
+Run the separate host safety regressions before building any firmware.
+
+The additional [draft build verification PR](https://github.com/gavrackerss/openpilot/pull/6)
+targets the *staging branch*, not `xnor-dev`. It is purely a means
+of requesting/building the source in disposable CI checkouts.
+GitHub Actions has **not confirmed a run** on this branch.
+The full-desktop-workspace workflow
+`.github/workflows/xnor-v0112-hybrid-full-build.yml` attempts an
+isolated native SCons build on Ubuntu using the paired hybrid Panda
+and opendbc source, without resetting the patched modules.
+
+**Important:** This creates a reproducible *source* candidate. It
+does **not** complete the LS2 model output/action-head reconciliation,
+prove lead-following or curve braking, validate the Tesla CAN bus
+topology or make a safe release available for the car.
+
 ## Exact base dependencies (unchanged in openpilot)
 
 | Live submodule | XNOR upstream pin |
