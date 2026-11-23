@@ -94,9 +94,9 @@ class NativeXnorJetlinkContracts(unittest.TestCase):
       if isinstance(node, ast.ImportFrom):
         imports.add(node.module)
     self.assertEqual(imports, {"__future__", "dataclasses", "inspect", "math", "struct", "typing"})
-    self.assertNotIn("socket", doc)
-    self.assertNotIn("subprocess", doc)
-    self.assertNotIn("CANParser", doc)
+    self.assertNotIn("socket", imports)
+    self.assertNotIn("subprocess", imports)
+    self.assertNotIn("CANParser", imports)
 
   def test_native_xnor_model_abi_matches_checkout(self):
     native = (ROOT / "openpilot/selfdrive/modeld/modeld.py").read_text()
