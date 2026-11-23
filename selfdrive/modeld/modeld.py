@@ -24,7 +24,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
-from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan
+from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan, should_stop as should_stop_from_accel
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState
 from openpilot.common.file_chunker import read_file_chunked
@@ -57,11 +57,11 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
       remote_action = np.asarray(model_output['action']).reshape(-1)
       if remote_action.size < 2 or not np.isfinite(remote_action[:2]).all():
         raise ValueError('Jetlink model action head invalid')
-      _accel, should_stop = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0],
-                                                plan[:, Plan.ACCELERATION][:, 0], ModelConstants.T_IDXS,
-                                                action_t=long_action_t)
-      # Apply the same 0.3 s longitudinal smoothing used by the local model.
-      # Keep the existing LS2 plan-based shouldStop contract unchanged.
+      # comma openpilot v0.11.2 uses action acceleration and actual ego speed
+      # for the action-head stop flag, not a separate predicted-trajectory stop.
+      # Only change the remote action-head path. The local stock small-model
+      # path retains its original trajectory-derived stop semantics.
+      should_stop = should_stop_from_accel(v_ego, float(remote_action[1]))
       desired_accel = smooth_value(float(remote_action[1]), prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
       return log.ModelDataV2.Action(desiredCurvature=float(remote_action[0]) / max(2.5, v_ego) ** 2,
                                     desiredAcceleration=float(desired_accel),
