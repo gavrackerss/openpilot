@@ -18,8 +18,13 @@ class CarInterface(CarInterfaceBase):
     The packet heartbeat and the hardware-specific safety dispatcher still
     determine steering/longitudinal ownership independently.
     """
-    from openpilot.common.params import Params
-    p = Params()
+    # Standalone opendbc unit tests may not have compiled openpilot Params.
+    # Fall back to *no Hybrid request*, never an assumed ownership grant.
+    try:
+      from openpilot.common.params import Params
+      p = Params()
+    except (ImportError, OSError):
+      return False, False, False
     disabled = bool(p.get_bool("TinklaAutopilotDisabled"))
     hybrid = bool(p.get_bool("TinklaHybridNativeAP")) and not disabled
     ignore_hud_aeb = bool(p.get_bool("TinklaIgnoreStockAeb"))
