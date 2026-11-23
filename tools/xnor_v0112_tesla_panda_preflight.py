@@ -155,9 +155,9 @@ def audit() -> dict:
   native_radar = read(PINNED / "car/tesla/radar_interface.py")
   overlay_radar = read(OVERLAY / "car/tesla/radar_interface.py")
   radar_fields = (
-    "      self.pts[i].aRel = msg_a['LongAccel']\\n"
-    "      self.pts[i].yvRel = msg_b['LatSpeed']\\n"
-    "      self.pts[i].measured = bool(msg_a['Meas'])\\n"
+    "      self.pts[i].aRel = msg_a['LongAccel']\n"
+    "      self.pts[i].yvRel = msg_b['LatSpeed']\n"
+    "      self.pts[i].measured = bool(msg_a['Meas'])\n"
   )
   if overlay_radar.replace(radar_fields, "", 1) != native_radar:
     raise RuntimeError("Radar overlay changed native behavior beyond 3 point fields")
