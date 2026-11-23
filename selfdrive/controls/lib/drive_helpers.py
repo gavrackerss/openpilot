@@ -23,6 +23,18 @@ def should_stop(v_ego: float, a_target: float) -> bool:
   return bool(v_ego < 0.3 and a_target < 0.1)
 
 
+def radar_lead_present(lead) -> bool:
+  """XNOR compatibility for legacy .status and v0.11.2 .present lead schemas."""
+  if lead is None:
+    return False
+  if isinstance(lead, dict):
+    return bool(lead.get("present", lead.get("status", False)))
+  try:
+    return bool(getattr(lead, "status"))
+  except (AttributeError, ValueError):
+    return bool(getattr(lead, "present", False))
+
+
 def clamp(val, min_val, max_val):
   clamped_val = float(np.clip(val, min_val, max_val))
   return clamped_val, clamped_val != val
