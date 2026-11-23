@@ -23,7 +23,7 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
 
   def test_staged_complete_panda_safety_source_preflight(self):
     report = audit()
-    self.assertEqual(report["native_blob_sources_verified"], 10)
+    self.assertEqual(report["native_blob_sources_verified"], 15)
     self.assertTrue(report["full_hybrid_staged"])
     self.assertTrue(report["packet_aware_fwd_present"])
     self.assertTrue(report["both_panda_drivers_ported"])
@@ -66,6 +66,45 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     self.assertIn("OP_STALK_ENABLE = 64", values)
     self.assertIn("IGNORE_STOCK_AEB = 128", values)
 
+  def test_native_car_schema_adds_no_colliding_tesla_tags(self):
+    capnp = (BASE / "opendbc/opendbc/car/car.capnp").read_text()
+    native = (SOURCES["opendbc"] / "opendbc/car/car.capnp").read_text()
+    self.assertIn("carNotReady @61 :Bool;", capnp)
+    self.assertIn("followDistanceS @66 :UInt8;", capnp)
+    self.assertIn("adaptiveCruiseEnabled @62 :Bool;", capnp)
+    self.assertIn("teslaAlcHandoverReady @63 :Bool;", capnp)
+    self.assertIn("teslaEacStatus @64 :UInt8;", capnp)
+    self.assertIn("teslaEacError @65 :UInt8;", capnp)
+    self.assertIn("brake @5 :Float32;", capnp)
+    # Native schema text must survive without deleting or renumbering
+    # any existing CarState entry.
+    self.assertTrue(all(line in capnp.splitlines() for line in native.splitlines()))
+
+  def test_model3_y_implementations_are_exact_xnor_source(self):
+    for path, native in (
+        ("carstate_native_0112.py", "carstate.py"),
+        ("carcontroller_native_0112.py", "carcontroller.py")):
+      with self.subTest(path=path):
+        staged = (BASE / "opendbc/opendbc/car/tesla" / path).read_bytes()
+        pinned = (SOURCES["opendbc"] / "opendbc/car/tesla" / native).read_bytes()
+        self.assertEqual(staged, pinned)
+
+  def test_tesla_legacy_native_vm_and_no_unsupported_cruise_scaling(self):
+    state = (BASE / "opendbc/opendbc/car/tesla/carstate.py").read_text()
+    ctrl = (BASE / "opendbc/opendbc/car/tesla/carcontroller.py").read_text()
+    interface = (BASE / "opendbc/opendbc/car/tesla/interface.py").read_text()
+    self.assertIn("apply_steer_angle_limits_vm(", ctrl)
+    self.assertIn('VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))', ctrl)
+    self.assertNotIn("apply_std_steer_angle_limits(", ctrl)
+    self.assertIn("DI_cruiseSet_native_0112", state)
+    self.assertNotIn("_cruise_set_scale", state)
+    self.assertIn("_GTW_TX_AUTOPILOT2_BUS2 = False", ctrl)
+    self.assertIn("_UNITY_2B9_OVERLAY_TEMPLATE = False", ctrl)
+    self.assertIn("_ALLOW_LEGACY_HUD_WARNING_OVERLAY = False", ctrl)
+    self.assertIn("ignore_hud_aeb = False", interface)
+    self.assertIn("def _emit_internal_0x659(", ctrl)
+    self.assertIn("def _v229_stopgo_long(", ctrl)
+
   def test_export_both_patches_cleanly_without_changing_gitlinks(self):
     before = subprocess.run(
       ["git", "ls-tree", "HEAD", "opendbc_repo", "panda"],
@@ -81,7 +120,7 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
       self.assertIn("board/drivers/fdcan.h", exported["panda"].read_text())
       self.assertIn("safety/tests/test_tesla_hybrid_packet.py", exported["opendbc"].read_text())
       self.assertGreater(exported["opendbc"].stat().st_size, 100_000)
-      self.assertEqual(len(PATCH_FILES["opendbc"]), 9)
+      self.assertEqual(len(PATCH_FILES["opendbc"]), 23)
       self.assertEqual(len(PATCH_FILES["panda"]), 2)
     after = subprocess.run(
       ["git", "ls-tree", "HEAD", "opendbc_repo", "panda"],
