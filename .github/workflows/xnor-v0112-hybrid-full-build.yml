@@ -78,6 +78,9 @@ jobs:
         run: |
           set -euo pipefail
           ./tools/setup_dependencies.sh
+          # The scratch repo was cloned locally from the CI worktree; point
+          # LFS fetch at the actual repo rather than an empty runner cache.
+          git remote set-url origin "https://github.com/gavrackerss/openpilot.git"
           git lfs pull --exclude='openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx'
           # Ensure uv/system setup has not replaced our candidate code.
           grep -q 'static bool tesla_legacy_fwd_msg_hook' \
