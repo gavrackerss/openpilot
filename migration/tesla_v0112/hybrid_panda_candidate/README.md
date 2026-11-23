@@ -1,11 +1,13 @@
 # XNOR 0.11.2 — Full Tesla Hybrid Panda candidate
 
-**Status: fully staged source port, NOT compiled/qualified/installed.**
-This is a coordinated **opendbc + Panda safety** port of the installed
-`24d304b` Tesla Hybrid safety implementation. It is not a complete
-0.11.2 vehicle integration: the custom Tesla CarState/CarController,
-independent OP longitudinal planner, LS2 action contract and ECU
-actuation replay are separate gates.
+**Status: full Panda safety and Tesla HW2 vehicle-source candidate staged,
+NOT compiled/qualified/installed.**
+This is a coordinated **opendbc + Panda safety + Tesla CarState/
+CarController + 0x659 sender** source port from installed `24d304b`,
+adapted to XNOR 0.11.2 APIs. The independent OP longitudinal planner,
+LS2 action contract, capnp code generation, actual CAN/ECU acceptance
+and safety regression tests remain separate gates. The live car
+software and both submodule pointers are unchanged.
 
 ## Exact base dependencies (unchanged in openpilot)
 
@@ -48,6 +50,64 @@ the active submodules or original `xnor-dev`.
    genuine emergency braking. It also preserves the original unmodified
    RX packet for safety evaluation.
 
+## Tesla vehicle-side source port (2026-11-23 continuation)
+
+The staged opendbc candidate now also includes:
+
+- `opendbc/car/tesla/carstate.py`: recovered installed ~1,800-line
+  Tesla state logic, rehomed to `openpilot.cereal` and the staged
+  `opendbc.car.tesla.legacy_modules`. Uses **the pinned native 0x368
+  DBC layout** without guessing or doubling cruise-set speed.
+- `opendbc/car/tesla/carcontroller.py`: recovered ~2,000-line Hybrid
+  controller, including the 0x659 dual-Panda carrier, V229 owner request,
+  real stalk edges, 0x2B9/0x2BF template creation, and EPAS
+  handback logic. Steering now uses
+  `apply_steer_angle_limits_vm(..., CarControllerParams, self.VM)` and
+  native Model S HW3 vehicle model, matching XNOR's Model S/X steering
+  limiter contract. Physical steering/accelerator limits and safety
+  approval still require dedicated replay.
+- `opendbc/car/tesla/teslacan.py` and
+  `teslacan_legacy.py`: native 0.11.2 CAN helper preserved with added
+  0x659, STW CRC/counter, lane telemetry, chassis and powertrain
+  V229 template helpers.
+- `opendbc/car/tesla/legacy_modules/`: exact installed
+  CFG/BLNK/ALC/HSO/ACC/LONG controller sources, with native package
+  imports adapted, pending runtime integration tests. This includes
+  the older longitudinal/lead logic but **does not prove that LS2
+  braking works**.
+- `carstate_native_0112.py` and `carcontroller_native_0112.py`:
+  byte-for-byte XNOR 0.11.2 implementations. Non-legacy Model 3/Y
+  requests delegate to these, rather than entering HW1/2/3 Hybrid.
+- `opendbc/car/car.capnp`: restores Tesla diagnostic fields
+  `adaptiveCruiseEnabled` (62), `teslaAlcHandoverReady` (63),
+  `teslaEacStatus` (64), `teslaEacError` (65) and
+  `followDistanceS` (**66**). Native XNOR
+  `carNotReady @61` is untouched. The removed analog
+  `brake @5` is restored for compatibility with the legacy state.
+
+**Deliberately disabled pending replay:** inherited experimental
+0x398 gateway injection, the extra standalone 0x2B9 template, legacy
+0x399/0x389 HUD warning override, and the
+`TinklaIgnoreStockAeb` flag. The old
+`DAS_csaState` in `DAS_status2` overlaps the native
+`DAS_lssState` definition; do not re-enable old HUD builders
+without resolving that conflict. The V229 ownership/template source
+remains staged for compiled and on-bench validation.
+
+The native `DI_cruiseSet` is **already scaled by CANParser**:
+`32|9@1+` at factor 0.5. The installed heuristic could
+multiply that value by two under plausible speed conditions.
+The staged logic selects that native decoded value when cruise
+is engaged, and refuses to substitute current dashboard speed
+for a missing engaged setpoint. Vehicle-specific raw CAN replay
+is required to verify that the pinned DBC is correct on this HW2 car.
+
+Additional dependency-free source-function tests:
+`python3 tests/test_xnor_v0112_tesla_vehicle_contract.py -v`.
+These execute the actual staged function ASTs to verify the 0x659
+MAIN/CANCEL edges, V229 native LKAS handback and lack of
+cruise-set-speed doubling. They are **not hardware validation**.
+
 ## What the packet-aware bridge does
 
 The baseline XNOR `safety_fwd_hook(bus, addr)` remains available so
@@ -74,11 +134,12 @@ git checkout upgrade/xnor-v0112-xnor-base
 git submodule update --init opendbc_repo panda
 python3 tools/xnor_v0112_full_hybrid_panda_preflight.py
 python3 tests/test_xnor_v0112_full_hybrid_panda.py -v
+python3 tests/test_xnor_v0112_tesla_vehicle_contract.py -v
 python3 tools/xnor_v0112_export_full_hybrid_panda_patch.py \
   --output-dir /tmp/xnor-v0112-hybrid-review
 ```
 
-The export verifies all **10 pinned Git blob hashes**, checks
+The export verifies all **15 pinned Git blob hashes**, checks
 the full safety/driver source contract, writes two independent patches
 and runs read-only `git apply --check` in both pinned submodules.
 
@@ -125,10 +186,12 @@ has been observed as of this staging commit.**
 - Validate the mismatched `DI_state` 0x368 fields and native
   `DAS_status2` 0x389 occupancy against this specific vehicle's
   **raw** rlogs before porting CarState and cruise speeds.
-- Port the installed custom `CarController`, `CarState`, remaining
-  Tesla modules and actual 0x659 sender to native XNOR 0.11.2.
-  A Panda safety port **alone cannot run Hybrid** with XNOR's stock
-  Tesla controller.
+- Build and replay-test the **now-staged** native Tesla
+  `CarController`, `CarState`, supporting modules and 0x659 sender,
+  including generated `car.capnp` bindings. Confirm actual
+  dual-Panda bus routing; the source port is not yet runtime validated.
+  The independent longitudinal planner, LS2 model action path and
+  actual lead/curve braking remain unqualified.
 - Independently prove that LS2's observed lead-following and curve
   deceleration problem is resolved by replay/diagnostics. **Do not**
   treat a successful Hybrid Panda build as evidence of sufficient braking.
