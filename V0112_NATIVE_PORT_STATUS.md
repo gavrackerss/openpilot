@@ -81,6 +81,11 @@ small-model Tesla branch remains unchanged.
 - GitHub Actions workflow now watches and compiles both Jetlink adapter
   sources. These changes are source-level only, not a successful device
   build or verified test run.
+- Read-only `tools/xnor_v0112_action_contract.py` now audits the
+  legacy Pixel raw-action span against the upstream v0.11.2 modeld
+  direct-action interface, reporting `pixel_authority_qualified=False`
+  until numerical semantics are established. The CI workflow runs this
+  source audit; it does not test camera inference or validate braking.
 - **Important remaining action output question:** upstream v0.11.2
   `get_action_from_model` can consume the raw `action` head, while
   the legacy Pixel response and older plan-derived fallback do not
