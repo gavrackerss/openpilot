@@ -14,11 +14,13 @@ What this file does (only two things):
 
 It does *not* change steering behavior or ALC behavior.
 
-V229 (XNOR_V229_UNITY_STOPGO_OWNER): Unity-style stop-and-go. On HW2 legacy cars in Hybrid or
-Autopilot-Disabled+EnableACC mode, openpilot is the single DAS_control author on both buses
-(main 0x2B9 / external 0x2BF). Userspace sends TEMPLATES; panda substitutes them onto the genuine
-AP frames. While disengaged a gentle Unity "priming" frame (ACC_ON, 0 kph) is kept on the bus so a
-stalk pull arms the DI from 0 mph without a lead. Opt out: touch /data/xnor_disable_op_stopgo.
+V229 (XNOR_V229_UNITY_STOPGO_OWNER): HW2 Hybrid longitudinal templates are accepted
+only when openpilot is engaged, longitudinally active, CAN-valid, in Drive, with no pedal,
+stock AEB, ACC fault or native Autosteer owner. They are consumed by both Pandas and
+may be substituted onto genuine AP 0x2B9/0x2BF frames only after Panda safety checks.
+The old disconnected/standby 0 km/h priming exception is DISABLED: do not infer
+zero-speed auto-arm or lead/curve braking capability from this source port.
+Opt out: touch /data/xnor_disable_op_stopgo.
 """
 
 from __future__ import annotations
