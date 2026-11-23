@@ -267,10 +267,12 @@ static int get_fwd_bus(int bus_num) {
 // Preserve the upstream address-only forwarding ABI for all existing tests and
 // safety modes. Panda's firmware RX drivers use safety_fwd_hook_pkt below.
 int safety_fwd_hook(int bus_num, int addr) {
-  // 0x659 is a private Panda safety-control carrier, NEVER a vehicle
+  // In explicit Hybrid mode, 0x659 is a private safety-control carrier,
+  // NEVER a vehicle frame. Native unselected Tesla mode retains XNOR's
+  // original address-only forward semantics for existing safety contracts.
   // CAN frame. Deny in BOTH forwarding ABIs (old address-only tests
   // and new packet-aware hardware drivers), including on external Panda.
-  if (current_safety_mode == SAFETY_TESLA_LEGACY && addr == 0x659) {
+  if (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && addr == 0x659) {
     return -1;
   }
   bool blocked = relay_malfunction || current_safety_config.disable_forwarding;

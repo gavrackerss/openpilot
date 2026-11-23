@@ -39,7 +39,7 @@ class FullHybridPandaSourceContracts(unittest.TestCase):
     mutable = safety.index("current_hooks->fwd_msg(bus_num, to_fwd)", start)
     self.assertLess(aeb, mutable)
     self.assertIn("if (block || (to_fwd->addr != before.addr)", safety)
-    self.assertIn("if (current_safety_mode == SAFETY_TESLA_LEGACY && addr == 0x659)", safety)
+    self.assertIn("if (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && addr == 0x659)", safety)
     self.assertIn("return destination_bus;", safety[aeb:mutable])
     self.assertNotIn("to_fwd->data[", safety[aeb:mutable])
 

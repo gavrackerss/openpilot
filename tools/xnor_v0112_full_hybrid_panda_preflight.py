@@ -115,7 +115,7 @@ def audit() -> dict:
           "Address-only and packet-aware safety dispatch ABIs must coexist")
   require("int safety_fwd_hook_pkt(int bus_num, CANPacket_t *to_fwd) {" in safety,
           "Packet-forward dispatcher implementation missing")
-  require("if (current_safety_mode == SAFETY_TESLA_LEGACY && addr == 0x659)" in safety,
+  require("if (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && addr == 0x659)" in safety,
           "Legacy internal 0x659 may escape through address-only forwarding")
   require("const CANPacket_t before = *to_fwd;" in safety and
           "if (block || (to_fwd->addr != before.addr)" in safety,
