@@ -82,6 +82,27 @@ class NativeXnorJetlinkContracts(unittest.TestCase):
       with self.assertRaises(ValueError):
         module.inspect_pixel_reply(struct.pack("<2068f", *floats))
 
+  def test_offline_sequence_audit_is_bounded_and_never_authorises(self):
+    def packet(head):
+      floats = [0.] * module.PIXEL_REPLY_FLOATS
+      floats[2062:2066] = head
+      return struct.pack("<2068f", *floats)
+
+    report = module.audit_pixel_reply_sequence([
+      packet([1., 2., 3., 4.]),
+      packet([3., 1., 3., -2.]),
+      packet([2., 4., 0., 2.]),
+    ])
+    self.assertEqual(report.frames, 3)
+    self.assertEqual(report.raw_head_min, (1., 1., 0., -2.))
+    self.assertEqual(report.raw_head_max, (3., 4., 3., 4.))
+    self.assertEqual(report.largest_adjacent_raw_delta, (2., 3., 3., 6.))
+    self.assertFalse(report.native_action_semantics_proven)
+    self.assertFalse(report.authority_allowed)
+    for invalid in ([], [b""], [packet([0., 0., 0., 0.])] * 10001):
+      with self.assertRaises(ValueError):
+        module.audit_pixel_reply_sequence(invalid)
+
   def test_no_mechanism_can_enable_authority(self):
     with self.assertRaisesRegex(RuntimeError, "unqualified"):
       module.assert_authority_disabled()
