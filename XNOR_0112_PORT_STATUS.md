@@ -51,6 +51,43 @@ not modified by these commits.
    GitHub Actions workflow guard the static ABI, params and Cereal
    contracts. **Test execution is not yet independently confirmed.**
 
+## 2026-11-23 continuation: XNOR-native Jetlink and SunnyPilot staging
+
+7. **Jetlink native model ABI:** archived Jetlink libraries and original
+   adapters were preserved in `migration/jetlink_legacy/` and
+   `migration/jetlink_adapters_legacy/` without linking them to modeld.
+   `migration/jetlink_xnor_v0112/native_contract.py` validates the actual
+   XNOR 0.11.2 `ModelState.run(bufs, transforms, inputs)`, QCOM
+   model state, two camera inputs and XNOR input queues. It rejects the
+   official-comma four-argument/packed-input ABI.
+   - Offline decoder inspects the Pixel's **2,068-float** response and
+     **four raw action-head floats at indices 2062–2065**.
+     XNOR model constants define `ACTION_WIDTH = 2`. A raw head
+     length mismatch alone cannot establish correct or incorrect
+     semantics; **do not truncate or wire these raw values into modeld**.
+   - Explicit authority gate always raises. The staged module has no
+     socket, CAN or process hooks. Regression tests validate malformed
+     packets and incompatible model interfaces.
+8. **SunnyPilot model catalogue:** the legacy model-selector *models*
+   package (not obsolete `modeld_v2`) is now staged under
+   `openpilot/sunnypilot/models/`. Its imports are moved to
+   `openpilot.cereal` and a native `model_root()` shim uses the XNOR
+   hardware paths. The 0.11.2 modeld and manager process configuration
+   are unchanged. This does **not** make downloaded models runnable.
+   - `openpilot/sunnypilot/models/catalog_guard.py` inspects JSON
+     metadata without file downloads or execution. It always reports
+     effective runner = **stock** until separately validated.
+   - `tools/xnor_v0112_model_selection_status.py --offline-json
+     /path/to/saved-bundle.json` performs a standalone read-only
+     report; invoked without `--offline-json` it reads saved native
+     Params only when `IsOffroad=True`.
+   - Static and CLI regression tests have been added to the dedicated
+     workflow; successful workflow/device execution is **not verified**.
+9. **No writable opendbc fork found:** the available repositories do
+   not include a user-owned opendbc repository. XNOR's pinned
+   `opendbc_repo` and `panda` remain unchanged; Tesla safety,
+   controller and actuator customizations are still staged and **inactive**.
+
 ## Important implementation differences
 
 | Interface | XNOR's actual v0.11.2 | Official comma v0.11.2 |
@@ -72,9 +109,10 @@ of successful integration. Do not copy or enable the legacy wrapper.
   safety differences into a writable, **separately tested** opendbc/Panda
   stack. The XNOR reference dependency already defines HW1/HW2/HW3,
   but not the user's additional safety ownership and steering behaviour.
-- Port SunnyPilot model catalog, persistence, native model-selection
-  lifecycle and speed-limit overlays without altering the XNOR
-  modeld execution contract.
+- Validate the staged SunnyPilot model catalogue and Params JSON
+  lifecycle, then port actual model selection, checksum validation,
+  UI and speed-limit overlays to the XNOR-native modeld contract.
+  The current modeld continues to use stock model inference.
 - Reimplement Jetlink/LS2 against the **XNOR native** model-state ABI;
   demonstrate frame, recurrent-state, latency, output/action-head and
   fallback parity *offline first*. No LS2 vehicle authority.
