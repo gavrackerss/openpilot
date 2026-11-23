@@ -5,6 +5,7 @@ on:
     paths:
       - 'migration/tesla_v0112/hybrid_panda_candidate/**'
       - 'tools/xnor_v0112_assemble_hybrid_candidate.py'
+      - 'tools/xnor_v0112_scratch_tesla_runtime_probe.py'
       - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
       - '.github/workflows/xnor-v0112-hybrid-full-build.yml'
       - 'migration/tesla_v0112/hybrid_panda_candidate/CI_VERIFICATION.md'
@@ -107,6 +108,13 @@ jobs:
           export PATH="$PWD/.venv/bin:$PATH"
           command -v cythonize
           .venv/bin/scons --minimal -j2
+
+      - name: Construct Tesla HW2 and Model Y interface on a workstation (no CAN)
+        shell: bash
+        working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
+        run: |
+          set -euo pipefail
+          .venv/bin/python tools/xnor_v0112_scratch_tesla_runtime_probe.py
 
       - name: Validate no original source dependency was modified
         if: always()
