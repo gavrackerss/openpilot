@@ -122,56 +122,19 @@ class ExistingCameraWarp:
 
 
 def attach_native(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
-  """Stage a native Jetlink model; Zoompilot owns all swaps and demotions."""
-  from openpilot.jetlink_authority import (_Small, _Control, _Progress,
-                                             _reset_small, discover_phone,
-                                             PORT, MODEL_SHA, MODEL_NBYTES)
-  from openpilot.common.swaglog import cloudlog
-  from jetlink.client import JetlinkClient
-  from jetlink.openpilot.joining import JoiningModelState
-  from jetlink.openpilot.model_state import JetlinkModelState
-  from jetlink.openpilot.stock import Stock
+  """Do not connect the old 0.11.1 authority adapter to native 0.11.2.
 
-  # Stock is the only runner whose modeld interface has been checked here.
-  if runner != 'stock':
-    raise RuntimeError(f'Native LS2 adapter not qualified for local runner {runner!r}')
-  stock = Stock()
-  face = stock.model_face()
-  # Existing V5.8/V5.9.2 preprocessing from the real onroad shadow tests.
-  # Deliberately avoid the incompatible custom QCOM warp and its pickle.
-  warp = ExistingCameraWarp(int(cam_w), int(cam_h),
-                            face.frame_size(int(cam_w), int(cam_h)))
+  The legacy implementation depended on _Small(img_queues, numpy_inputs,
+  prepare_only) and _reset_small. The 0.11.2 ModelState instead uses
+  state_pairs/input_queues/packed_input and run(..., after_enqueue). Silently
+  wrapping it can break fallback inference or publish incompatible actions.
 
-  def connect(should_stop=None):
-    if should_stop is not None and should_stop():
-      raise InterruptedError('Zoompilot join stopped')
-    host = discover_phone()  # current phone USB-NCM gateway, verified usb0
-    transport = _pixel_transport(host, PORT)
-    client = JetlinkClient(transport, deadline=JETLINK_FRAME_FAILURE_S,
-                           name='XNOR-TensorG6-native-LS2', want_hidden=False)
-    try:
-      hello = client.hello(timeout=3.0)
-      if not client.t.datagrams:
-        raise RuntimeError('Custom Pixel server did not negotiate USB UDP frames')
-      spec = client.ensure_engine(MODEL_SHA, MODEL_NBYTES, frame_skip=4,
-                                  build_timeout=PIXEL_SERVER_TIMEOUT_S,
-                                  should_stop=should_stop)
-      _model_spec_checks(spec)
-      return client, spec
-    except Exception:
-      client.close()
-      raise
-
-  def build(client, spec):
-    _model_spec_checks(spec)
-    # Native JetlinkModelState owns prepare->send->end, output parsing,
-    # HOLD_FRAME measured from warp start, and _note_hold().
-    return JetlinkModelState(client, spec, warp, face=face,
-                             log=cloudlog, event=cloudlog.event)
-
-  cloudlog.warning('xnor-jetlink: native Jetlink client + V5.8 camera warp staged; stock fallback retained; offroad-only validation pending')
-  return JoiningModelState(_Small(small_model, normalize_stock_views=True), connect, build,
-                           reset_small=lambda: _reset_small(small_model),
-                           progress=_Progress(), log=cloudlog,
-                           in_control=_Control.in_control,
-                           name=lambda sha: 'XNOR LS2 Tensor G6 (native Jetlink)')
+  This is an intentionally fail-closed migration boundary. It is NOT a
+  runtime switch, and must not be relaxed to enable LS2 longitudinal control.
+  A separate *parked* adapter is staged in jetlink_v0112_native.py.
+  """
+  raise RuntimeError(
+    'XNOR legacy Jetlink attach_native is incompatible with comma 0.11.2; '
+    'use jetlink_v0112_native.attach_offroad_probe for parked-only inspection. '
+    'No LS2 model authority is permitted on this branch.'
+  )
