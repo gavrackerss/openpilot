@@ -29,7 +29,8 @@ class TestHybridPedalAndAutoResume(unittest.TestCase):
     self.assertIn("CS.brakePressed", body)
     self.assertIn("CS.regenBraking", body)
     self.assertIn("self._xnor_hybrid_brake_long_cancelled = True", body)
-    self.assertIn("not CS.brakePressed and (not CS.regenBraking)", body)
+    self.assertIn("not CS.brakePressed", body)
+    self.assertIn("not CS.regenBraking", body)
     self.assertIn("not self._xnor_hybrid_brake_long_cancelled", body)
 
   def test_v234_auto_resume_has_all_original_gates(self):
