@@ -6,7 +6,7 @@ The existing card CAN subscription and existing sendcan producer feed this obser
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 import json
 import os
 from pathlib import Path
@@ -33,7 +33,7 @@ class TeslaCanTap:
   def __init__(self, root: str = ROOT, session: str | None = None,
                max_can_bytes: int = MAX_CAN_BYTES) -> None:
     self.root = Path(root)
-    self.session = session or (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + str(os.getpid()))
+    self.session = session or (datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ') + '-' + str(os.getpid()))
     self.path = self.root / self.session
     self.max_can_bytes = max_can_bytes
     self.q: queue.Queue[tuple[str, list[tuple]]] = queue.Queue(maxsize=2048)
@@ -133,7 +133,8 @@ class TeslaCanTap:
           try:
             kind, rows = self.q.get(timeout=0.25)
           except queue.Empty:
-            cf.flush(); sf.flush()
+            cf.flush()
+            sf.flush()
             continue
           if kind == 'can':
             if cf.tell() >= self.max_can_bytes:
@@ -144,7 +145,8 @@ class TeslaCanTap:
           elif kind == 'state':
             state_writer.writerows(rows)
           self.q.task_done()
-        cf.flush(); sf.flush()
+        cf.flush()
+        sf.flush()
       with (self.path / 'capture_status.json').open('w') as f:
         json.dump({'frames_written': frame_count, 'drop_batches': self.drop_batches,
                    'drop_frames': self.drop_frames, 'invalid_frames': self.invalid_frames,
