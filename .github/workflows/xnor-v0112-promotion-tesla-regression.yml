@@ -105,10 +105,14 @@ jobs:
           Path('tesla-upgrade-parity.json').write_text(json.dumps(report,indent=2)+'\n')
           print(json.dumps(report,indent=2))
           PY
+      - name: Execute synthetic differential arbitration comparison
+        run: python3 tools/xnor_v0112_planner_differential.py
       - uses: actions/upload-artifact@v4
         with:
           name: tesla-upgrade-parity
-          path: tesla-upgrade-parity.json
+          path: |
+            tesla-upgrade-parity.json
+            tesla-planner-differential.json
       - name: Do not mistake missing feature parity for a successful release
         run: |
           python3 - <<'PY'
