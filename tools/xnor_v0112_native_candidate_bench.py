@@ -152,10 +152,25 @@ def main():
   env = {k: v for k, v in os.environ.items() if k not in (*QCOM_FLAGS, "WARP_DEV", "QUEUE_DEV", "USBGPU", "BIG_INTO_SMALL", "AMD_IFACE", "GMMU")}
   flags = QCOM_FLAGS if args.backend == "QCOM" else {"DEV": "CPU:LLVM"}
   env.update(flags)
-  env["PYTHONPATH"] = os.pathsep.join((str(ROOT), str(tg)))
+  # Cereal imports opendbc's schema through importlib.resources. The native
+  # compiler imports hardware.usb through helpers, even on the isolated bench.
+  # Use the checkout's source submodule, not an installed 0.11.1 package.
+  dbc = ROOT / "opendbc_repo"
+  expected_dbc = git(ROOT, "rev-parse", "HEAD:opendbc_repo")
+  if not (dbc / "opendbc/car/car.capnp").is_file() or not (dbc / ".git").exists():
+    raise RuntimeError("Initialise the checkout's opendbc_repo submodule")
+  if git(dbc, "rev-parse", "HEAD") != expected_dbc or git(dbc, "status", "--porcelain", "--untracked-files=no"):
+    raise RuntimeError("Exact clean opendbc gitlink required")
+  env["PYTHONPATH"] = os.pathsep.join((str(ROOT), str(tg), str(dbc)))
+  subprocess.run([sys.executable, "-c",
+                  "import opendbc; from openpilot.cereal import log; "
+                  "from openpilot.selfdrive.modeld.helpers import dump_oob, load_oob; "
+                  "import numpy, zstandard, tinygrad; print('Native compiler imports OK')"],
+                 cwd=ROOT, env=env, check=True, timeout=60)
   out.mkdir(mode=0o700, parents=False)
   report = {"source_commit": git(ROOT, "rev-parse", "HEAD"), "tinygrad_pin": TINYGRAD_PIN,
             "model_ref": MODEL_REF, "source_sha256": SOURCE_SHA256, "compiler_blob": COMPILER_BLOB,
+            "opendbc_pin": expected_dbc,
             "backend_flags": flags, "compiled": False, "loaded": False,
             "vehicle_qualified": False, "runtime_activated": False}
   try:
@@ -173,7 +188,7 @@ def main():
     # Load only this fresh compiler output, not third-party compiled pickle files.
     os.environ.clear()
     os.environ.update(env)
-    sys.path[:0] = [str(ROOT), str(tg)]
+    sys.path[:0] = [str(ROOT), str(tg), str(dbc)]
     expected = json.loads((ROOT / "migration/sunnypilot_legacy/tsfdom_native_abi_report.json").read_text())["candidate_abi"]
     if args.backend == "QCOM" and active_runtime():
       raise RuntimeError("Vehicle runtime appeared before inference")
