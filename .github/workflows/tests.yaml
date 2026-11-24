@@ -102,7 +102,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - name: Install headless GLES runtime
-      run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgles2
+      run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgles2 libegl1
     - run: ./tools/op.sh setup
     - name: Build openpilot
       run: scons
@@ -208,7 +208,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install headless GLES runtime
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgles2
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgles2 libegl1
       - run: ./tools/op.sh setup
       - name: Build openpilot
         run: scons
