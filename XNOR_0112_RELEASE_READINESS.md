@@ -61,6 +61,23 @@ The verified Hybrid dependency revisions are pinned in the separate
 `review/xnor-v0112-pinned-desktop` branch, not in production. No build
 above establishes safe operation on an actual vehicle.
 
+## Owner-confirmed scope exclusions
+
+- Legacy XNOR Dynamic Experimental Control (DEC) is not to be imported.
+  Retain native 0.11.2 MPC/cruise/E2E arbitration. Differences caused by
+  dropping DEC are intentional, not a feature-parity failure. The offline
+  differential comparison is retained as characterization only.
+- LS2/Jetlink is a separate project, remains isolated, and is not an upgrade
+  release criterion.
+- Short QCOM execution is complete; no repeat of that milestone is required.
+
+The pinned promotion branch's exact Tesla host tests passed: 308 passed,
+133 skipped, three subtests passed, zero failures
+([run 45424414155](https://github.com/gavrackerss/openpilot/actions/runs/45424414155)).
+The source comparison still identifies missing higher-level Hybrid
+brake/regen cancellation and automatic ACC resume integration.
+These are separate from DEC and the compiled safety tests.
+
 ## Required before promotion
 
 - [ ] Final release revision and exact Panda/opendbc/tinygrad commits pinned,
@@ -78,9 +95,6 @@ above establishes safe operation on an actual vehicle.
   not yet implemented/validated. No automatic engagement, no alert obstruction,
   no stale manual request after transitions, and verified vehicle feedback
   required before any live controls.
-- [ ] LS2/Jetlink remains isolated pending verified output semantics and
-  lead/curve braking parity; neither synthetic outputs nor an accepted
-  handover alone establish longitudinal safety.
 - [ ] Independent safety review, isolated hardware qualification and recorded
   release decision. No public-road testing of an unqualified build.
 - [ ] Preserve existing xnor-dev revision and device settings; prepare a
