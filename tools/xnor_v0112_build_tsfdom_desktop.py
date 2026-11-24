@@ -48,6 +48,8 @@ def main():
   parser = argparse.ArgumentParser()
   parser.add_argument("--source-checkout", type=Path, required=True)
   parser.add_argument("--report", type=Path, default=Path("tsfdom-native-build.json"))
+  parser.add_argument("--replay-npz", type=Path, help="Optional paired recorded NV12 model inputs")
+  parser.add_argument("--replay-report", type=Path, default=Path("tsfdom-paired-replay.json"))
   args = parser.parse_args()
   source = args.source_checkout.resolve()
   assert git(source, "rev-parse", "HEAD") == CANDIDATE_REF
@@ -94,6 +96,24 @@ def main():
       from openpilot.sunnypilot.models.desktop_candidate_runner import inspect_compiled_candidate
       report["inference"] = inspect_compiled_candidate(target, verified["candidate_abi"])
       report["outcome"] = "Native desktop candidate compiled and synthetic recurrent inference passed"
+      if args.replay_npz is not None:
+        from openpilot.sunnypilot.models.desktop_paired_replay import load_replay, replay_compiled
+        camera, arrays = load_replay(args.replay_npz)
+        stock_target = temp / "stock.pkl"
+        subprocess.run([sys.executable, str(COMPILER),
+                        "--model-size", "512x256",
+                        "--camera-resolutions", "1928x1208", "1344x760",
+                        "--onnx", str(stock_onnx),
+                        "--output", str(stock_target), "--frame-skip", "4"],
+                       cwd=temp, env=env, check=True, timeout=1200)
+        stock_rows = replay_compiled(stock_target, verified["stock_abi"], camera, arrays)
+        candidate_rows = replay_compiled(target, verified["candidate_abi"], camera, arrays)
+        args.replay_report.write_text(json.dumps({
+          "camera_size": camera, "frames": len(stock_rows),
+          "stock": stock_rows, "tsfdom": candidate_rows,
+          "action_semantics_verified": False, "vehicle_qualified": False,
+        }, indent=2) + "\n")
+        report["paired_replay_frames"] = len(stock_rows)
   except Exception as exc:
     report["error"] = str(exc)
     raise
