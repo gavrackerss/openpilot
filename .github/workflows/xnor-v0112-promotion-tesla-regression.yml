@@ -92,15 +92,16 @@ jobs:
           checks = [
             ('Hybrid brake/regen latch', '_xnor_hybrid_brake_last_press_ms', control_old, control_new),
             ('Hybrid automatic ACC resume', 'TinklaAutoResumeACC', control_old, control_new),
-            ('Dynamic Experimental Control', 'class XnorDynamicExperimentalControl', planner_old, planner_new),
           ]
           for name, marker, before, after in checks:
             findings.append({'feature': name, 'baseline_marker_present': marker in before,
                              'candidate_marker_present': marker in after,
                              'source_parity_missing': marker in before and marker not in after})
+          assert 'class XnorDynamicExperimentalControl' not in planner_new, 'DEC excluded by owner decision'
           report = {'baseline': baseline, 'candidate': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
                     'scope': 'source marker comparison only, not proof of behavioral equivalence',
-                    'ls2_in_scope': False, 'qcom_rebenchmark_required': False,
+                    'ls2_in_scope': False, 'dec_in_scope': False, 'native_planner_retained': True,
+                    'qcom_rebenchmark_required': False,
                     'findings': findings, 'vehicle_qualified': False}
           Path('tesla-upgrade-parity.json').write_text(json.dumps(report,indent=2)+'\n')
           print(json.dumps(report,indent=2))
