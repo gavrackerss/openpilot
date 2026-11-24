@@ -81,6 +81,47 @@ def ui_preview(output: Path):
   try:
     widget = ManualSpeedLimitPreview()
     assert not widget.enabled
+    # Exercise the actual interactive row using its native hitboxes and callbacks,
+    # not a separate mock drawing implementation. No vehicle state is involved.
+    from openpilot.selfdrive.ui.onroad.manual_speed_limit_demo import SpeedSignDemoRow
+    allowed = [True]
+    demo = SpeedSignDemoRow(lambda: allowed[0], lambda: (5., False, False))
+    demo.set_rect(rl.Rectangle(30, 20, 900, 170))
+    boxes = demo._button_rects()
+    assert len(boxes) == 5
+    def click(index):
+      box = boxes[index]
+      demo._handle_mouse_release(rl.Vector2(box.x + box.width/2, box.y + box.height/2))
+    click(1)
+    assert demo._demo.pending == 50 and demo._demo.selected == 0
+    click(1)
+    assert demo._demo.pending == 0 and demo._demo.selected == 50
+    click(4)
+    assert demo._demo.selected == 0
+    click(2)
+    click(2)
+    allowed[0] = False
+    demo._update_state()
+    assert demo._demo.selected == 0 and demo._demo.pending == 0
+    click(0)
+    assert demo._demo.pending == 0
+    allowed[0] = True
+    click(0)
+    demo.hide_event()
+    assert demo._demo.pending == 0
+    # Also verify actual typed Params persistence in a disposable directory.
+    import tempfile
+    from openpilot.common.params import Params, ParamKeyFlag
+    from openpilot.sunnypilot.models.requested_model import REQUEST_KEY, TSFDOM, save_request
+    with tempfile.TemporaryDirectory(prefix="xnor-model-preference-") as tmp:
+      params = Params(tmp)
+      params.put_bool("IsOffroad", True, block=True)
+      assert save_request(params, TSFDOM, confirmed_offroad=True)
+      params.clear_all(ParamKeyFlag.CLEAR_ON_ONROAD_TRANSITION)
+      params.clear_all(ParamKeyFlag.CLEAR_ON_OFFROAD_TRANSITION)
+      params.clear_all(ParamKeyFlag.CLEAR_ON_MANAGER_START)
+      assert Params(tmp).get(REQUEST_KEY) == TSFDOM
+      assert not save_request(params, "stock", confirmed_offroad=True)
     target = rl.load_render_texture(960, 220)
     assert target.id != 0
     rl.begin_texture_mode(target)
@@ -109,6 +150,7 @@ def ui_preview(output: Path):
     assert counts["red"] > 100 and counts["white"] > 100 and counts["dark"] > 20, counts
     assert rl.export_image(image, str(output)), "Could not export preview PNG"
     print(json.dumps({"preview_rendered": True, "touch_enabled": False,
+                      "demo_hitbox_callbacks_passed": True, "typed_model_preference_persistence_passed": True,
                       "pixel_counts": counts, "output": str(output)}))
   finally:
     if image is not None:
