@@ -8,6 +8,7 @@ on:
       - 'migration/jetlink_xnor_v0112/**'
       - 'migration/installed_24d304b/**'
       - 'openpilot/selfdrive/modeld/**'
+      - 'openpilot/selfdrive/ui/**'
       - 'openpilot/common/params_keys.h'
       - 'tests/test_xnor_v0112*'
       - 'tools/xnor_v0112*'
@@ -39,6 +40,9 @@ jobs:
             Path('openpilot/sunnypilot/models/catalog_guard.py'),
             Path('migration/jetlink_xnor_v0112/native_contract.py'),
             Path('tools/xnor_v0112_longitudinal_migration_audit.py'),
+            Path('openpilot/sunnypilot/models/artifact_audit.py'),
+            Path('openpilot/sunnypilot/models/native_envelope.py'),
+            Path('openpilot/selfdrive/ui/onroad/manual_speed_limit_preview.py'),
           ]
           for p in files:
             assert p.is_file(), f'Missing integration source: {p}'
