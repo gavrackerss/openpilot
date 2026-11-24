@@ -46,6 +46,8 @@ class ManualSpeedLimitBar(Widget):
     self._pending = 0
     self._pending_until = 0.0
     self._actual_set_mph = 0.0
+    self._map_speed_mph = 0.0
+    self._map_road_name = ""
 
   @staticmethod
   def _is_tesla() -> bool:
@@ -67,6 +69,19 @@ class ManualSpeedLimitBar(Widget):
         self._actual_set_mph = float(cruise.speedCluster) * CV.MS_TO_MPH if bool(cruise.enabled) else 0.0
       except Exception:
         self._actual_set_mph = 0.0
+
+      try:
+        if ui_state.sm.alive["mapdOut"] and ui_state.sm.valid["mapdOut"]:
+          mapd = ui_state.sm["mapdOut"]
+          speed_ms = float(mapd.speedLimit)
+          self._map_speed_mph = speed_ms * CV.MS_TO_MPH if speed_ms > 0.1 else 0.0
+          self._map_road_name = str(mapd.roadName or mapd.wayName or "")[:28]
+        else:
+          self._map_speed_mph = 0.0
+          self._map_road_name = ""
+      except Exception:
+        self._map_speed_mph = 0.0
+        self._map_road_name = ""
 
     if self._pending and now >= self._pending_until:
       self._pending = 0
@@ -144,6 +159,10 @@ class ManualSpeedLimitBar(Widget):
       return
 
     label = f"POSTED {self._value} mph - OFFSET APPLIES" if self._value else "TESLA SPEED LIMIT - AUTO"
+    if self._map_speed_mph > 0:
+      label += f" - OSM {round(self._map_speed_mph)} mph"
+      if self._map_road_name:
+        label += f" {self._map_road_name}"
     if self._actual_set_mph > 0:
       label += f" - TESLA SET {round(self._actual_set_mph)} mph"
     if self._status:
