@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable
+from collections.abc import Iterable
 
 LONG_ADDRS = (0x2B9, 0x2BF)
 
@@ -135,7 +135,7 @@ class LongitudinalShadow:
   def summary(self):
     aeb = sum(n for key, n in self.rx.items() if len(key) == 3 and key[0] == 'aeb')
     # The raw bus map must be validated on the specific external panda; do not
-    # report an arbitrary src as a physical ECU acknowledgement.
+    # report an arbitrary src as a physical ECU acknowledgment.
     ap_frames = sum(n for key, n in self.rx.items() if len(key) == 2 and key[0] == 0x2BF and key[1] in (2, 6))
     op_requested = sum(n for (addr, _), n in self.tx.items() if addr == 0x2BF)
     tx_blocked = sum(self._panda_deltas.values())
@@ -150,12 +150,14 @@ class LongitudinalShadow:
     tx_repr = ','.join(f'{addr:03X}@{bus}:{n}' for (addr, bus), n in sorted(self.tx.items())) or 'none'
     p_repr = ','.join(f'p{i}:allowed={int(self._panda_allowed.get(i, False))}:txBlockedDelta={self._panda_deltas.get(i, 0)}'
                       for i in sorted(self._panda_allowed)) or 'pandaUnavailable'
-    return (f'[XNOR_V220_OWNER_SHADOW] owner={assessment.label} reason={assessment.reason} '
-            f'cutover=0 ccEnabled={int(self.cc_enabled)} longActive={int(self.long_active)} '
-            f'nativeTacc={self.native_cruise} rx={rx_repr} sendcan={tx_repr} '
-            f'actualAeb={aeb} nativePtEchoMatch={native_echo} {p_repr} reqAccel={self.last_requested_accel:.3f} '
-            f'aEgo={self.last_a_ego:.3f} vEgo={self.last_v_ego:.3f} '
-            f'lastOp2BF={self.last_tx_hex or "none"} acceptance=UNPROVEN')
+    return "".join((
+      f'[XNOR_V220_OWNER_SHADOW] owner={assessment.label} reason={assessment.reason} ',
+      f'cutover=0 ccEnabled={int(self.cc_enabled)} longActive={int(self.long_active)} ',
+      f'nativeTacc={self.native_cruise} rx={rx_repr} sendcan={tx_repr} ',
+      f'actualAeb={aeb} nativePtEchoMatch={native_echo} {p_repr} reqAccel={self.last_requested_accel:.3f} ',
+      f'aEgo={self.last_a_ego:.3f} vEgo={self.last_v_ego:.3f} ',
+      f'lastOp2BF={self.last_tx_hex or "none"} acceptance=UNPROVEN',
+    ))
 
   def flush_if_due(self, now_ns: int) -> str | None:
     if self._window_start_ns is None:

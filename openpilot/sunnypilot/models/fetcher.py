@@ -152,7 +152,7 @@ class ModelFetcher:
     self._last_clock_log_mono = -1e9
 
   def _wall_clock_valid(self) -> bool:
-    now = time.time()
+    now = time.time_ns() / 1_000_000_000
     return self.MIN_VALID_UNIX_TIME <= now <= self.MAX_VALID_UNIX_TIME
 
   def _consume_force_refresh(self) -> bool:

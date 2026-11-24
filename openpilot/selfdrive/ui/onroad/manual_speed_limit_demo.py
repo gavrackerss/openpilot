@@ -60,7 +60,7 @@ class SpeedSignDemoRow(ManualSpeedLimitPreview):
     else:
       label += " | AUTO"
     rl.draw_text_ex(self._smaller_font, label, rl.Vector2(rect.x + 5, rect.y + 12), 24, 0, TEXT)
-    for (value, _), box in zip(OPTIONS, self._button_rects()):
+    for (value, _), box in zip(OPTIONS, self._button_rects(), strict=False):
       if value == 0:
         self._draw_tesla_cancel(box, self._demo.selected == 0)
       else:
@@ -70,7 +70,7 @@ class SpeedSignDemoRow(ManualSpeedLimitPreview):
     if not self._allowed():
       self._demo.reset()
       return
-    for (value, _), box in zip(OPTIONS, self._button_rects()):
+    for (value, _), box in zip(OPTIONS, self._button_rects(), strict=False):
       if rl.check_collision_point_rec(mouse_pos, box):
         self._demo.tap(value, time.monotonic(), True)
         break

@@ -116,7 +116,7 @@ class ManualSpeedLimitPreview(Widget):
     label = "PREVIEW ONLY - NOT A CRUISE CONTROL"
     pos = rl.Vector2(rect.x + 5, rect.y + 2)
     rl.draw_text_ex(self._smaller_font, label, pos, 24, 0, TEXT)
-    for (value, _), box in zip(OPTIONS, self._button_rects()):
+    for (value, _), box in zip(OPTIONS, self._button_rects(), strict=False):
       if value == 0:
         self._draw_tesla_cancel(box, False)
       else:
