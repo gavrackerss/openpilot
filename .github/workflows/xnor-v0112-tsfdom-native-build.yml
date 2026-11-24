@@ -5,6 +5,7 @@ on:
     branches: ['upgrade/xnor-v0112-xnor-base']
     paths:
       - 'tools/xnor_v0112_build_tsfdom_desktop.py'
+      - 'tools/xnor_v0112_native_candidate_bench.py'
       - 'openpilot/sunnypilot/models/native_abi.py'
       - 'openpilot/sunnypilot/models/desktop_candidate_runner.py'
       - 'openpilot/sunnypilot/models/desktop_paired_replay.py'
