@@ -20,6 +20,14 @@ class ActiveParityContract(unittest.TestCase):
 
     self.assertIn("const bool priming =", safety)
     self.assertIn("!long_allowed && !neutral && !priming", safety)
+    for decoder in (
+      "TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MIN",
+      "TESLA_LEGACY_V229_PRIME_JERK_MIN_RAW",
+      "tesla_legacy_das_raw_set_speed",
+      "tesla_legacy_das_raw_jerk_min",
+      "tesla_legacy_das_raw_jerk_max",
+    ):
+      self.assertIn(decoder, safety)
     self.assertIn("TESLA_LEGACY_V229_UNOWNED_DI_CANCEL_US", safety)
     self.assertIn("original_das_control_aeb_event == 1", safety)
 
