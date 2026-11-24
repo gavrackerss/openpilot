@@ -13,10 +13,11 @@ import json
 from pathlib import Path
 
 
-def stock_model():
+def stock_model(output: Path):
   from openpilot.common.file_chunker import open_file_chunked
   from openpilot.selfdrive.modeld.helpers import modeld_pkl_path, load_oob
   from openpilot.sunnypilot.models.native_envelope import inspect_envelope
+  from openpilot.sunnypilot.models.native_abi import describe_metadata
   path = modeld_pkl_path(False)
   with open_file_chunked(path) as stream:
     framing = inspect_envelope(stream)
@@ -35,7 +36,33 @@ def stock_model():
     assert action.stop - action.start == 2, action
   for key in ("run_policy", (1928, 1208), (1344, 760)):
     assert callable(bundle[key]), key
-  print(json.dumps({"stock_native_envelope": asdict(framing),
+  # Exercise the locally built model in an isolated desktop process, without
+  # any publishers, camera devices or calls to modeld.main().
+  import numpy as np
+  import time
+  from openpilot.selfdrive.modeld.modeld import ModelState
+  from openpilot.selfdrive.modeld.constants import ModelConstants
+  del bundle
+  model = ModelState(1928, 1208, False)
+  frames = {name: np.zeros(model.frame_buf_params[name][3], dtype=np.uint8)
+            for name in model.vision_input_names}
+  transforms = {name: np.eye(3, dtype=np.float32) for name in frames}
+  durations = []
+  for _ in range(5):
+    inputs = {"desire_pulse": np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32),
+              "traffic_convention": np.array([1., 0.], dtype=np.float32),
+              "action_t": np.array([.2, .3], dtype=np.float32)}
+    start = time.perf_counter()
+    result = model.run(frames, transforms, inputs)
+    durations.append((time.perf_counter() - start) * 1000.)
+    assert result is not None
+    for name in ("plan", "lead", "hidden_state"):
+      assert name in result and np.all(np.isfinite(result[name])), name
+    assert all(np.all(np.isfinite(value)) for value in result.values())
+  output.write_text(json.dumps(describe_metadata(metadata), indent=2) + "\n")
+  print(json.dumps({"synthetic_stock_inference_frames": len(durations),
+                    "desktop_inference_ms": durations,
+                    "stock_native_envelope": asdict(framing),
                     "stock_input_shapes": shapes,
                     "stock_output_names": sorted(slices),
                     "stock_bundle_deserialised": True,
@@ -94,9 +121,9 @@ def ui_preview(output: Path):
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("mode", choices=("stock", "ui"))
-  parser.add_argument("--output", type=Path, default=Path("speed-sign-preview.png"))
+  parser.add_argument("--output", type=Path)
   args = parser.parse_args()
   if args.mode == "stock":
-    stock_model()
+    stock_model(args.output or Path('native-stock-abi.json'))
   else:
-    ui_preview(args.output)
+    ui_preview(args.output or Path('speed-sign-preview.png'))
