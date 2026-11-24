@@ -27,6 +27,8 @@ COMPILER = ROOT / "openpilot/selfdrive/modeld/compile_modeld.py"
 CANDIDATE_REF = "0394d7284cfc229f772ee4fa73ff724ba8245110"
 CANDIDATE_PATH = "openpilot/selfdrive/modeld/models/driving_supercombo.onnx"
 CANDIDATE_BLOB = "0a48017d3d0d0e08649df44b78b3b7435f82ac76"
+COMPILER_BLOB = "2d27a41496e8b4071ab8deeda286dde3804d6c74"
+VERIFIED_ABI = ROOT / "migration/sunnypilot_legacy/tsfdom_native_abi_report.json"
 
 
 def git(source, *args):
@@ -51,6 +53,9 @@ def main():
   assert git(source, "rev-parse", "HEAD") == CANDIDATE_REF
   assert git(source, "rev-parse", f"HEAD:{CANDIDATE_PATH}") == CANDIDATE_BLOB
   assert not Path("/AGNOS").exists(), "Desktop CI only"
+  assert git(source, "rev-parse", "HEAD:openpilot/selfdrive/modeld/compile_modeld.py") == COMPILER_BLOB
+  assert git(ROOT, "hash-object", str(COMPILER)) == COMPILER_BLOB, "Native compiler changed; review required"
+  verified = json.loads(VERIFIED_ABI.read_text())
   report = {"model": "TSFDOM", "upstream_ref": CANDIDATE_REF,
             "upstream_git_blob": CANDIDATE_BLOB, "compiled": False,
             "vehicle_qualified": False}
@@ -64,9 +69,15 @@ def main():
       candidate = describe_metadata(make_metadata_dict(str(candidate_onnx)))
       issues = compare_native_abi(reference, candidate)
       report.update(stock_abi=reference, candidate_abi=candidate, abi_issues=issues)
-      if issues:
-        report["outcome"] = "Different native ABI; requires separate model runner"
-        return
+      # The original candidate compiler is byte-identical to the native one.
+      # Its queue shapes are metadata-driven. Compare against the verified
+      # candidate contract, not stock tensor offsets or history lengths.
+      assert report["candidate_sha256"] == verified["candidate_sha256"]
+      assert report["stock_sha256"] == verified["stock_sha256"]
+      assert not compare_native_abi(verified["candidate_abi"], candidate)
+      assert not compare_native_abi(verified["stock_abi"], reference)
+      report["compiler_blob_match"] = True
+      report["candidate_abi_match"] = True
       target = temp / "candidate.pkl"
       env = dict(os.environ, DEV="CPU:LLVM")
       subprocess.run([sys.executable, str(COMPILER),
@@ -80,6 +91,9 @@ def main():
       report.update(compiled=True, opcode_bytes=framing.opcode_bytes,
                     buffer_count=framing.buffer_count,
                     outcome="Native desktop compiler and its JIT round-trip tests passed")
+      from openpilot.sunnypilot.models.desktop_candidate_runner import inspect_compiled_candidate
+      report["inference"] = inspect_compiled_candidate(target, verified["candidate_abi"])
+      report["outcome"] = "Native desktop candidate compiled and synthetic recurrent inference passed"
   except Exception as exc:
     report["error"] = str(exc)
     raise
