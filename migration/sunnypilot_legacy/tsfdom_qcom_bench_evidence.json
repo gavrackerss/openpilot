@@ -1,0 +1,44 @@
+{
+  "scope": "User-supplied physically disconnected QCOM bench result; not independent vehicle qualification",
+  "date": "2026-11-24",
+  "source_commit": "9b1f801c33760cd95fc07aa744c64ec704b4327b",
+  "tinygrad_pin": "8611fe22a7fcc7d1928bbde19ded66277cb12f3e",
+  "model_ref": "0394d7284cfc229f772ee4fa73ff724ba8245110",
+  "source_sha256": "baa30b01cc980a2e616bca5c94f64b64cccce5acfd2456c48bd29da274f4d78b",
+  "compiler_blob": "2d27a41496e8b4071ab8deeda286dde3804d6c74",
+  "opendbc_pin": "3f86206a13c3181f0224e8f1424b836592e2b2d2",
+  "backend_flags": {
+    "DEV": "QCOM",
+    "IMAGE": "1",
+    "FLOAT16": "1",
+    "NOLOCALS": "1",
+    "JIT_BATCH_SIZE": "0",
+    "OPENPILOT_HACKS": "1"
+  },
+  "compiled": true,
+  "loaded": true,
+  "artifact_sha256": "ecdbaafcdbc25b9be7d440f50665cb7c4e65706cb68981a863c7d241bcf65b38",
+  "artifact_bytes": 126440436,
+  "inference": {
+    "backend": "QCOM",
+    "camera": [
+      1928,
+      1208
+    ],
+    "synthetic_frames": 3,
+    "inference_ms": [
+      2800.5866470000456,
+      32.21507300008852,
+      33.19315800013101
+    ],
+    "raw_action_width": 4
+  },
+  "policy_jit_replay_ms": 29.17,
+  "policy_jit_roundtrip_ms": 29.86,
+  "warp_compile_both_resolutions_reported": true,
+  "vehicle_qualified": false,
+  "runtime_activated": false,
+  "action_semantics_verified": false,
+  "artifact_independently_retrieved": false,
+  "production_promotion_approved": false
+}
