@@ -1,0 +1,57 @@
+name: XNOR 0.11.2 TSFDOM native desktop compile
+
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+    paths:
+      - 'tools/xnor_v0112_build_tsfdom_desktop.py'
+      - 'openpilot/sunnypilot/models/native_abi.py'
+      - '.github/workflows/xnor-v0112-tsfdom-native-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-tsfdom:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: '1'
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          path: xnor
+      - uses: actions/checkout@v4
+        with:
+          repository: commaai/openpilot
+          ref: 0394d7284cfc229f772ee4fa73ff724ba8245110
+          path: upstream-tsfdom
+          submodules: false
+          persist-credentials: false
+      - name: Fetch exact model source and stock source
+        run: |
+          git -C upstream-tsfdom lfs pull --include='openpilot/selfdrive/modeld/models/driving_supercombo.onnx' --exclude=''
+          git -C xnor lfs pull --exclude='openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx'
+      - name: Install native desktop dependencies
+        working-directory: xnor
+        run: |
+          git submodule update --init opendbc_repo panda
+          git submodule update --init --recursive msgq_repo rednose_repo teleoprtc_repo tinygrad_repo
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
+          ./tools/setup_dependencies.sh
+      - name: Compare real ONNX ABI and compile compatible candidate
+        working-directory: xnor
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          export PYTHONPATH="$PWD:$PWD/tinygrad_repo"
+          .venv/bin/python tools/xnor_v0112_build_tsfdom_desktop.py --source-checkout ../upstream-tsfdom
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tsfdom-native-build-report
+          path: xnor/tsfdom-native-build.json
+          if-no-files-found: warn
