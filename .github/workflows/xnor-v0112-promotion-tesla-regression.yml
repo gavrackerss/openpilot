@@ -44,6 +44,7 @@ jobs:
           PY
           python3 tests/test_xnor_v0112_tesla_vehicle_contract.py -v
           python3 tests/test_xnor_v0112_tesla_hybrid_long_owner.py -v
+          python3 tests/test_xnor_v0112_hybrid_control_review_port.py -v
       - name: Compile and run host-only safety smoke using actual pinned opendbc
         run: |
           cc -fPIC -Wall -Wextra -Werror -nostdlib -fno-builtin \
