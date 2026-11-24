@@ -1,0 +1,32 @@
+{
+  "scope": "Review-only dependency source preservation",
+  "staged_source_commit": "5c81dc254f478881256324548bc39177e01ee92b",
+  "staged_source_path": "migration/tesla_v0112/hybrid_panda_candidate",
+  "dependencies": {
+    "panda": {
+      "repository": "https://github.com/gavrackerss/panda.git",
+      "branch": "review/xnor-v0112-hybrid",
+      "native_base": "fa83a40ad799c827ab9cbda4560cf3426531ceff",
+      "review_commit": "d2900687ae9d984acd1ec2ef023677907536fe45",
+      "copied_files": 2
+    },
+    "opendbc_repo": {
+      "repository": "https://github.com/gavrackerss/opendbc.git",
+      "branch": "review/xnor-v0112-hybrid",
+      "native_base": "3f86206a13c3181f0224e8f1424b836592e2b2d2",
+      "review_commit": "d0f75528e7b080468285d5f25375fc247957cbf4",
+      "copied_files": 24
+    }
+  },
+  "all_copied_git_blob_ids_matched": true,
+  "source_logic_modified_during_transfer": false,
+  "openpilot_gitlinks_updated": false,
+  "prior_scratch_evidence": {
+    "panda_arm_run": 45258321608,
+    "tesla_safety_run": 45258321463,
+    "desktop_build_run": 45258532125,
+    "vehicle_constructor_run": 45259610612
+  },
+  "exact_review_revision_ci_verified": false,
+  "production_promotion_approved": false
+}
