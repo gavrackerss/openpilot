@@ -9,12 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class MapdRuntimeContract(unittest.TestCase):
   def test_mapd_executable_and_manager_process(self):
-    binary = ROOT / "openpilot/selfdrive/mapd"
+    binary = ROOT / "selfdrive/mapd"
     self.assertTrue(binary.is_file())
     self.assertTrue(binary.stat().st_mode & stat.S_IXUSR)
 
     processes = (ROOT / "openpilot/system/manager/process_config.py").read_text()
-    self.assertIn('NativeProcess("mapd", "openpilot/selfdrive", ["./mapd"], always_run, enabled=COMMA_HARDWARE)', processes)
+    self.assertIn('NativeProcess("mapd", "selfdrive", ["./mapd"], always_run, enabled=COMMA_HARDWARE)', processes)
 
   def test_schema_and_services_are_retained(self):
     custom = (ROOT / "openpilot/cereal/custom.capnp").read_text()
