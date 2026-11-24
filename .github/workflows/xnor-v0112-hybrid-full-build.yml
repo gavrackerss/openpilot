@@ -1,0 +1,144 @@
+name: XNOR 0.11.2 full Hybrid staging build (no installation)
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base', 'upgrade/xnor-v0112-hybrid-build-verification']
+    paths:
+      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'migration/tesla_v0112/hybrid_dependency_review_pins.json'
+      - 'tools/xnor_v0112_verify_hybrid_review_pins.py'
+      - '.gitmodules'
+      - 'tools/xnor_v0112_assemble_hybrid_candidate.py'
+      - 'tools/xnor_v0112_scratch_tesla_runtime_probe.py'
+      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
+      - '.github/workflows/xnor-v0112-hybrid-full-build.yml'
+      - 'migration/tesla_v0112/hybrid_panda_candidate/CI_VERIFICATION.md'
+  pull_request:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CI: "1"
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "lfs.fetchexclude"
+  GIT_CONFIG_VALUE_0: "openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx"
+
+jobs:
+  scratch-openpilot-and-car:
+    name: Build native XNOR 0.11.2 openpilot against patched Hybrid opendbc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+          lfs: false
+      - name: Init exact Tesla Panda and opendbc dependency pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule update --init opendbc_repo panda
+          test "$(git -C opendbc_repo rev-parse HEAD)" = "3f86206a13c3181f0224e8f1424b836592e2b2d2"
+          test "$(git -C panda rev-parse HEAD)" = "fa83a40ad799c827ab9cbda4560cf3426531ceff"
+
+      - name: Assemble complete Hybrid source from the pinned reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_assemble_hybrid_candidate.py \
+            --output-dir "$RUNNER_TEMP/xnor-v0112-full-hybrid"
+          test -f "$RUNNER_TEMP/xnor-v0112-full-hybrid/XNOR_HYBRID_ASSEMBLY_MANIFEST.json"
+          grep -q '"vehicle_authority_qualified": false' \
+            "$RUNNER_TEMP/xnor-v0112-full-hybrid/XNOR_HYBRID_ASSEMBLY_MANIFEST.json"
+          git -C "$RUNNER_TEMP/xnor-v0112-full-hybrid/opendbc_repo" diff --check
+          git -C "$RUNNER_TEMP/xnor-v0112-full-hybrid/panda" diff --check
+
+      - name: Verify full patch tree matches committed Hybrid forks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_verify_hybrid_review_pins.py \
+            --panda "$RUNNER_TEMP/xnor-v0112-full-hybrid/panda" \
+            --opendbc "$RUNNER_TEMP/xnor-v0112-full-hybrid/opendbc_repo" \
+            --report "$RUNNER_TEMP/hybrid-review-parity.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-review-source-parity
+          path: ${{ runner.temp }}/hybrid-review-parity.json
+          if-no-files-found: error
+
+      - name: Initialize only remaining stock source dependencies
+        shell: bash
+        working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
+        run: |
+          set -euo pipefail
+          # Do NOT run blanket 'op.sh setup' here: it can reset patched
+          # Panda/opendbc gitlinks. Only initialize untouched dependencies.
+          # Native XNOR .gitmodules uses ../../commaai paths; a local
+          # scratch clone resolves these against /home/runner/work instead of
+          # github.com. Override only the SCRATCH repo's Git config.
+          git submodule init msgq_repo rednose_repo teleoprtc_repo tinygrad_repo
+          git config submodule.msgq.url https://github.com/commaai/msgq.git
+          git config submodule.rednose_repo.url https://github.com/commaai/rednose.git
+          git config submodule.teleoprtc_repo.url https://github.com/commaai/teleoprtc.git
+          git submodule update --recursive \
+            msgq_repo rednose_repo teleoprtc_repo tinygrad_repo
+          test -f opendbc_repo/opendbc/safety/modes/tesla_legacy.h
+          grep -q 'tesla_legacy_v229_capture_das_control' \
+            opendbc_repo/opendbc/safety/modes/tesla_legacy.h
+          git -C opendbc_repo diff --check
+          git -C panda diff --check
+
+      - name: Install native desktop USB development headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # XNOR's setup_dependencies.sh intentionally skips apt packages if
+          # gcc/g++/make/curl already exist. The hosted runner lacks libusb.h.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
+
+      - name: Install native XNOR 0.11.2 desktop build dependencies
+        shell: bash
+        working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          ./tools/setup_dependencies.sh
+          # The scratch repo was cloned locally from the CI worktree; point
+          # LFS fetch at the actual repo rather than an empty runner cache.
+          git remote set-url origin "https://github.com/gavrackerss/openpilot.git"
+          git lfs pull --exclude='openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx'
+          # Ensure uv/system setup has not replaced our candidate code.
+          grep -q 'static bool tesla_legacy_fwd_msg_hook' \
+            opendbc_repo/opendbc/safety/modes/tesla_legacy.h
+
+      - name: Build full native XNOR 0.11.2 against patched Tesla source
+        shell: bash
+        working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/.venv/bin:$PATH"
+          command -v cythonize
+          .venv/bin/scons --minimal -j2
+
+      - name: Construct Tesla HW2 and Model Y interface on a workstation (no CAN)
+        shell: bash
+        working-directory: ${{ runner.temp }}/xnor-v0112-full-hybrid
+        run: |
+          set -euo pipefail
+          .venv/bin/python tools/xnor_v0112_scratch_tesla_runtime_probe.py
+
+      - name: Validate no original source dependency was modified
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- panda opendbc_repo
+          git -C opendbc_repo status --porcelain
+          git -C panda status --porcelain
+          echo 'No source flash, no sendcan, no Panda USB, no vehicle authority.'

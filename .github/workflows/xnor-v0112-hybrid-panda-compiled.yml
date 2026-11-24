@@ -1,0 +1,160 @@
+name: XNOR 0.11.2 Tesla Hybrid Panda candidate - compiled safety gate
+
+on:
+  push:
+    branches:
+      - 'upgrade/xnor-v0112-xnor-base'
+      - 'upgrade/xnor-v0112-hybrid-build-verification'
+    paths:
+      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'migration/tesla_v0112/hybrid_dependency_review_pins.json'
+      - 'tools/xnor_v0112_verify_hybrid_review_pins.py'
+      - '.gitmodules'
+      - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
+      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
+      - 'tests/test_xnor_v0112_full_hybrid_panda.py'
+      - 'tests/test_xnor_v0112_tesla_vehicle_contract.py'
+      - 'tests/test_xnor_v0112_hybrid_scratch_assemble.py'
+      - '.github/workflows/xnor-v0112-hybrid-panda-compiled.yml'
+      - 'migration/tesla_v0112/hybrid_panda_candidate/CI_VERIFICATION.md'
+  pull_request:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-c-safety-only:
+    name: Source checks and compiled host safety library; no Panda firmware/vehicle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Initialise exact XNOR 0.11.2 Panda/opendbc pins
+        run: git submodule update --init opendbc_repo panda
+
+      - name: Validate all source identities and generate isolated review patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_full_hybrid_panda_preflight.py
+          python3 tests/test_xnor_v0112_full_hybrid_panda.py -v
+          python3 tests/test_xnor_v0112_tesla_vehicle_contract.py -v
+          python3 tests/test_xnor_v0112_hybrid_scratch_assemble.py -v
+          python3 tools/xnor_v0112_export_full_hybrid_panda_patch.py \
+            --output-dir "$RUNNER_TEMP/xnor-hybrid-patches"
+
+      - name: Apply patches to disposable local dependency clones only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --no-hardlinks "$GITHUB_WORKSPACE/opendbc_repo" "$RUNNER_TEMP/opendbc-hybrid"
+          git clone -q --no-hardlinks "$GITHUB_WORKSPACE/panda" "$RUNNER_TEMP/panda-hybrid"
+          git -C "$RUNNER_TEMP/opendbc-hybrid" apply "$RUNNER_TEMP/xnor-hybrid-patches/xnor-v0112-tesla-hybrid-opendbc.patch"
+          git -C "$RUNNER_TEMP/panda-hybrid" apply "$RUNNER_TEMP/xnor-hybrid-patches/xnor-v0112-tesla-hybrid-panda.patch"
+          grep -q 'fwd_msg = tesla_hybrid_dispatch_fwd_msg' "$RUNNER_TEMP/opendbc-hybrid/opendbc/safety/modes/tesla_legacy.h"
+          grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/bxcan.h"
+          grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/fdcan.h"
+
+      - name: Verify full patch tree matches committed Hybrid forks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_verify_hybrid_review_pins.py \
+            --panda "$RUNNER_TEMP/panda-hybrid" \
+            --opendbc "$RUNNER_TEMP/opendbc-hybrid" \
+            --report "$RUNNER_TEMP/hybrid-review-parity.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-review-source-parity
+          path: ${{ runner.temp }}/hybrid-review-parity.json
+          if-no-files-found: error
+
+      - name: Compile full Panda-opendbc safety dispatcher with warnings as errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -fPIC -Wall -Wextra -Werror -nostdlib -fno-builtin \
+             -std=gnu11 -Wfatal-errors -Wno-pointer-to-int-cast -DALLOW_DEBUG \
+             -I "$RUNNER_TEMP/opendbc-hybrid" \
+             -c "$RUNNER_TEMP/opendbc-hybrid/opendbc/safety/tests/libsafety/safety.c" \
+             -o "$RUNNER_TEMP/xnor-v0112-safety.o"
+          cc -shared "$RUNNER_TEMP/xnor-v0112-safety.o" -o "$RUNNER_TEMP/xnor-v0112-safety.so"
+
+      - name: Run compiled host-only Panda safety ownership and AEB smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -Wall -Wextra -Werror -std=gnu11 -DALLOW_DEBUG \
+             -I "$RUNNER_TEMP/opendbc-hybrid" \
+             "$GITHUB_WORKSPACE/migration/tesla_v0112/hybrid_panda_candidate/host_tests/test_hybrid_panda.c" \
+             -o "$RUNNER_TEMP/xnor-v0112-hybrid-host-smoke" -lm
+          "$RUNNER_TEMP/xnor-v0112-hybrid-host-smoke"
+
+      - name: Validate full native Cap'n Proto schema and Tesla extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/tesla-v0112-safety-venv"
+          "$RUNNER_TEMP/tesla-v0112-safety-venv/bin/pip" install --disable-pip-version-check pycapnp==2.1.0
+          export TESLA_OPENDDBC_ROOT="$RUNNER_TEMP/opendbc-hybrid"
+          "$RUNNER_TEMP/tesla-v0112-safety-venv/bin/python" - <<'PY'
+          import os
+          from pathlib import Path
+          import capnp
+          root = Path(os.environ["TESLA_OPENDDBC_ROOT"])
+          file = root / "opendbc/car/car.capnp"
+          schema = capnp.load(str(file), imports=[str(file.parent)])
+          state = schema.CarState.new_message()
+          state.carNotReady = True
+          state.followDistanceS = 4
+          state.adaptiveCruiseEnabled = True
+          state.teslaEacStatus = 2
+          assert state.carNotReady and state.followDistanceS == 4
+          assert state.adaptiveCruiseEnabled and state.teslaEacStatus == 2
+          print("Pinned 0.11.2 CarState Cap'n Proto loads and Tesla tags do not collide.")
+          PY
+
+      - name: Confirm standalone opendbc Tesla imports require no openpilot runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/tesla-v0112-safety-venv"
+          "$VENV/bin/pip" install --disable-pip-version-check -e "$RUNNER_TEMP/opendbc-hybrid" 'cffi>=1.16' 'pytest>=8'
+          cd "$RUNNER_TEMP/opendbc-hybrid"
+          "$VENV/bin/python" - <<'PY'
+          import importlib.util
+          assert importlib.util.find_spec("openpilot") is None, "Must test without openpilot runtime"
+          from opendbc.car.tesla.carcontroller import CarController
+          from opendbc.car.tesla.carstate import CarState
+          from opendbc.car.tesla.interface import CarInterface
+          assert CarController and CarState and CarInterface
+          print("Tesla native and Hybrid interfaces imported without openpilot runtime")
+          PY
+
+      - name: Execute compiled Tesla HW1/HW2/HW3/Model3 safety regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/tesla-v0112-safety-venv"
+          cd "$RUNNER_TEMP/opendbc-hybrid"
+          "$VENV/bin/python" -m pytest -q \
+            opendbc/safety/tests/test_tesla.py \
+            opendbc/safety/tests/test_tesla_hw1.py \
+            opendbc/safety/tests/test_tesla_hw23.py \
+            opendbc/safety/tests/test_tesla_hybrid_packet.py
+
+      - name: Show explicit unverified gates
+        run: |
+          echo 'C safety build complete. No ARM Panda firmware or firmware flash performed.'
+          echo 'Compiled host smoke covers the selected synthetic AEB/0x659/owner paths only.'
+          echo 'Tesla Python CFFI regressions have run if this job is green; all-car full suites remain unverified.'
+          echo 'CAN replay and firmware flashing remain unverified.'
+          echo 'Tesla car.capnp generator and HW2 CarState/Controller runtime integration remain unverified.'
+          echo 'NO VEHICLE AUTHORITY IS APPROVED.'

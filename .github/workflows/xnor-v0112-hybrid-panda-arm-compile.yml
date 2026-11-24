@@ -1,0 +1,101 @@
+name: XNOR 0.11.2 Tesla Hybrid Panda - isolated ARM compilation
+
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base', 'upgrade/xnor-v0112-hybrid-build-verification']
+    paths:
+      - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'migration/tesla_v0112/hybrid_dependency_review_pins.json'
+      - 'tools/xnor_v0112_verify_hybrid_review_pins.py'
+      - '.gitmodules'
+      - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
+      - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
+      - '.github/workflows/xnor-v0112-hybrid-panda-arm-compile.yml'
+      - 'migration/tesla_v0112/hybrid_panda_candidate/CI_VERIFICATION.md'
+  pull_request:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-both-pandas:
+    name: Cross-compile F4 and H7 in scratch clones (never flash)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check out exact pinned opendbc and Panda source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule update --init opendbc_repo panda
+          git -C opendbc_repo rev-parse HEAD | grep -qx '3f86206a13c3181f0224e8f1424b836592e2b2d2'
+          git -C panda rev-parse HEAD | grep -qx 'fa83a40ad799c827ab9cbda4560cf3426531ceff'
+      - name: Export and verify the isolated full Hybrid patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_full_hybrid_panda_preflight.py
+          python3 tools/xnor_v0112_export_full_hybrid_panda_patch.py --output-dir "$RUNNER_TEMP/tesla-hybrid-review"
+          git clone --no-hardlinks opendbc_repo "$RUNNER_TEMP/tesla-opendbc"
+          git clone --no-hardlinks panda "$RUNNER_TEMP/tesla-panda"
+          git -C "$RUNNER_TEMP/tesla-opendbc" apply --check "$RUNNER_TEMP/tesla-hybrid-review/xnor-v0112-tesla-hybrid-opendbc.patch"
+          git -C "$RUNNER_TEMP/tesla-panda" apply --check "$RUNNER_TEMP/tesla-hybrid-review/xnor-v0112-tesla-hybrid-panda.patch"
+          git -C "$RUNNER_TEMP/tesla-opendbc" apply "$RUNNER_TEMP/tesla-hybrid-review/xnor-v0112-tesla-hybrid-opendbc.patch"
+          git -C "$RUNNER_TEMP/tesla-panda" apply "$RUNNER_TEMP/tesla-hybrid-review/xnor-v0112-tesla-hybrid-panda.patch"
+          # Fail if either source clone still uses the original no-packet forward path.
+          grep -q 'int safety_fwd_hook_pkt(int bus_num, CANPacket_t \*to_fwd)' "$RUNNER_TEMP/tesla-opendbc/opendbc/safety/safety.h"
+          grep -q 'safety_fwd_hook_pkt(bus_number, &to_send)' "$RUNNER_TEMP/tesla-panda/board/drivers/bxcan.h"
+          grep -q 'safety_fwd_hook_pkt(bus_number, &to_send)' "$RUNNER_TEMP/tesla-panda/board/drivers/fdcan.h"
+      - name: Verify full patch tree matches committed Hybrid forks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_verify_hybrid_review_pins.py \
+            --panda "$RUNNER_TEMP/tesla-panda" \
+            --opendbc "$RUNNER_TEMP/tesla-opendbc" \
+            --report "$RUNNER_TEMP/hybrid-review-parity.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-review-source-parity
+          path: ${{ runner.temp }}/hybrid-review-parity.json
+          if-no-files-found: error
+
+      - name: Install host SCons and ARM compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi
+          python3 -m venv "$RUNNER_TEMP/tesla-hybrid-venv"
+          "$RUNNER_TEMP/tesla-hybrid-venv/bin/python" -m pip install --disable-pip-version-check 'scons>=4.6,<5'
+          arm-none-eabi-gcc --version | head -n 1
+      - name: Build STM32F4 and STM32H7 Panda with the same patched safety headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$RUNNER_TEMP/tesla-opendbc${PYTHONPATH:+:$PYTHONPATH}"
+          cd "$RUNNER_TEMP/tesla-panda"
+          mkdir -p board/obj
+          "$RUNNER_TEMP/tesla-hybrid-venv/bin/scons" --jobs=2 \
+            board/obj/panda_f4.bin.signed board/obj/panda_h7.bin.signed
+          test -s board/obj/panda_f4.bin.signed
+          test -s board/obj/panda_h7.bin.signed
+          sha256sum board/obj/panda_f4.bin.signed board/obj/panda_h7.bin.signed
+          echo 'Compiled images are scratch-only. No firmware artifacts are uploaded.'
+      - name: Audit original gitlinks remain untouched
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C opendbc_repo rev-parse HEAD)" = "3f86206a13c3181f0224e8f1424b836592e2b2d2"
+          test "$(git -C panda rev-parse HEAD)" = "fa83a40ad799c827ab9cbda4560cf3426531ceff"
+          git diff --exit-code -- opendbc_repo panda
+          echo 'ARM compilation only; no Panda hardware, no CAN, no onroad authority.'

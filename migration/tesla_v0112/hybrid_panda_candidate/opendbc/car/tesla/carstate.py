@@ -1,0 +1,1823 @@
+import copy
+import math
+import time
+from dataclasses import dataclass
+
+# A standalone opendbc test import must not initialize openpilot Params,
+# legacy CFG stores, or cereal sockets. These are required at HW1/2/3
+# construction, but not for native Model 3/Y or static safety testing.
+try:
+  from openpilot.common.swaglog import cloudlog
+  from openpilot.common.params import Params
+  from openpilot.cereal import messaging
+except ImportError:
+  Params = None
+  messaging = None
+  import logging
+  cloudlog = logging.getLogger("tesla_hybrid_standalone")
+from opendbc.can import CANDefine, CANParser
+from opendbc.car import Bus, structs
+from opendbc.car.common.conversions import Conversions as CV
+from opendbc.car.interfaces import CarStateBase
+from opendbc.car.tesla.teslacan import get_steer_ctrl_type
+from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, CAR, TeslaLegacyParams, TeslaFlags, LEGACY_CARS, CruiseButtons
+
+ButtonType = structs.CarState.ButtonEvent.Type
+
+
+@dataclass
+class _TinklaConfig:
+  autopilot_disabled: bool = False
+  hybrid_native_ap: bool = False
+  hands_on_level: float = 2.0
+  adjust_acc_with_speed_limit: bool = True
+  speed_limit_offset: float = 0.0
+  speed_limit_use_relative: bool = False
+  vision_speed_limit: bool = True
+  enable_alc: bool = True
+  alc_delay: float = 0.75
+  enable_hso: bool = True
+  hso_numb_period: float = 1.5
+  enable_acc: bool = False
+
+
+class CarState(CarStateBase):
+  def __new__(cls, CP):
+    if cls is CarState and CP.carFingerprint not in LEGACY_CARS:
+      from opendbc.car.tesla.carstate_native_0112 import CarState as NativeCarState
+      return NativeCarState(CP)
+    return super().__new__(cls)
+
+  DOUBLE_PULL_WINDOW_MS = 750
+  XNOR_CRUISE_SET_HOLD_MS = 8_000
+
+  # V1.7 camera/map arbitration. A camera observation is strongest immediately
+  # after it is seen, but must not remain an unconditional five-minute truth
+  # after the vehicle has moved onto another road/estate.
+  VISION_MAP_MATCH_TOLERANCE_MPH = 1.5
+  VISION_MAP_SYNC_SECONDS = 2.0
+  VISION_SYNCED_HIGHER_RELEASE_SECONDS = 4.0
+  VISION_SYNCED_HIGHER_RELEASE_DISTANCE_M = 20.0
+  VISION_SYNCED_LOWER_RELEASE_SECONDS = 1.5
+  VISION_SYNCED_LOWER_RELEASE_DISTANCE_M = 5.0
+  VISION_UNSYNC_RELEASE_SECONDS = 60.0
+  VISION_UNSYNC_RELEASE_DISTANCE_M = 300.0
+  VISION_HARD_RELEASE_SECONDS = 90.0
+  VISION_HARD_RELEASE_DISTANCE_M = 150.0
+  VISION_MAP_DISAGREE_SECONDS = 5.0
+  VISION_PROVISIONAL_HOLD_SECONDS = 30.0
+
+  def update_button_enable(self, button_events: list[structs.CarState.ButtonEvent]):
+    # Non-PCM modes retain their established falling-edge behaviour. Hybrid is deliberately PCM
+    # here and engages through V198's cruiseState rising edge, not through buttonEnable.
+    if not self.CP.pcmCruise:
+      for event in button_events:
+        if event.type == ButtonType.resumeCruise and not event.pressed:
+          return True
+    return super().update_button_enable(button_events)
+
+  def __init__(self, CP):
+    if Params is None or messaging is None:
+      raise RuntimeError("Tesla Hybrid CarState requires openpilot Params and cereal runtime")
+    # Legacy helper modules are only loaded for the older Tesla platform,
+    # not as transitive imports of the XNOR Model3/Y safety interface.
+    from opendbc.car.tesla.legacy_modules.BLNK_module import BLNKController
+    from opendbc.car.tesla.legacy_modules.ALC_module import ALCController
+    from opendbc.car.tesla.legacy_modules.HSO_module import HSOController
+    super().__init__(CP)
+    self.msg_stw_actn_req = None
+    self.stw_actn_bus = int(CANBUS.party)
+    # Follow-distance (DTR_Dist_Rq) can be intermittently missing/SNA; keep last valid.
+    self.cruise_distance = int(getattr(self, "cruise_distance", 255))
+    self._last_follow_distance_s = int(getattr(self, "_last_follow_distance_s", 6))
+    # Remember which STW_ACTN_RQ bus actually carries valid DTR_Dist_Rq, to avoid mirrored/pinned copies.
+    self._follow_stw_bus = getattr(self, "_follow_stw_bus", None)
+    self.can_define = CANDefine(DBC[CP.carFingerprint][Bus.party])
+
+    if self.CP.carFingerprint in LEGACY_CARS:
+      if self.CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
+        CANBUS.chassis = 1
+        CANBUS.radar = 5
+      elif self.CP.carFingerprint in (CAR.TESLA_MODEL_S_HW1, CAR.TESLA_MODEL_X_HW1, ):
+        CANBUS.powertrain = CANBUS.party
+        CANBUS.autopilot_powertrain = CANBUS.autopilot_party
+
+      self.can_define_party = CANDefine(DBC[CP.carFingerprint][Bus.party])
+      self.can_define_pt = CANDefine(DBC[CP.carFingerprint][Bus.pt])
+      self.can_define_chassis = CANDefine(DBC[CP.carFingerprint][Bus.chassis])
+      self.can_defines = {
+        **self.can_define_party.dv,
+        **self.can_define_pt.dv,
+        **self.can_define_chassis.dv,
+      }
+      self.shifter_values = self.can_defines["DI_torque2"]["DI_gear"]
+    else:
+      self.shifter_values = self.can_define.dv["DI_systemStatus"]["DI_gear"]
+
+    self.autopark = False
+    self.autopark_prev = False
+    self.cruise_enabled_prev = False
+
+    self.hands_on_level = 0
+    self.eac_status_raw = 0
+    self.eac_error_code_raw = 0
+    self._xnor_hybrid_epas_failed = False
+    self._xnor_hybrid_epas_rearm = False
+    self._alc_epas_good_frames = 0
+    self._alc_native_idle_good_frames = 0
+    self._alc_planner_ready_prev = False
+    self.das_control = None
+    # Unity parity fields
+    self._tinkla = _TinklaConfig()
+    self._param_frame = 0
+    self.autopilot_disabled = False
+    self.cruiseEnabled = False
+    self._prev_cruise_buttons = 0
+    self.cruise_buttons = 0
+    # Unity parity: double-pull to enable adaptive speed matching
+    self.enable_adaptive_cruise = False
+    self._prev_enable_adaptive_cruise = False
+    self.acc_speed_max_ms = 0.0
+    self._last_cruise_stalk_pull_ms = 0
+    self._prev_pull_button = 0
+    self._xnor_last_virtual_btn = 0
+    self._xnor_last_virtual_ms = 0
+    self._xnor_last_virtual_turn = 0
+    self._xnor_last_virtual_turn_ms = 0
+
+    # XNOR CSA (Curve Speed Adaptation) decoded off the party-bus parser (Option 1).
+    # No second 'can' socket: signals come from the already-deserialized party CAN list.
+    self.xnor_csa_ok = False           # party parser carried a CSA frame this run
+    self.xnor_csa_c2 = 0.0             # UI_csaRoadCurvC2: road-ahead curvature kappa (1/m)
+    self.xnor_csa_range_m = 0.0        # UI_csaRoadCurvRange: lookahead distance (m)
+    self.xnor_csa_counter = -1         # UI_csaRoadCurvCounter: 0..255 liveness
+    self.xnor_csa_advancing = False    # counter changed within the liveness window
+    self._xnor_csa_last_counter = -1
+    self._xnor_csa_last_change_ms = 0
+
+    self.turnSignalStalkState = 0
+    self.speed_units = "MPH"
+    self.speed_limit_ms = 0.0
+    self.speed_limit_ms_das = 0.0
+    self.baseMapSpeedLimitMPS = 0.0
+    self.lastValidMapSpeedLimitMPS = 0.0
+    # XNOR V1-UK camera speed-limit cache. Params are sampled at 5 Hz, not on
+    # every 100 Hz CarState update.
+    self._vision_params = Params()
+    # V279: driver-selected posted limit (not camera inference)
+    self._xnor_manual_speed_limit_mph = 0
+    self._xnor_manual_speed_limit_last_read_frame = -100000
+    self._vision_speed_limit_ms = 0.0
+    self._vision_speed_limit_confidence = 0.0
+    self._vision_speed_limit_timestamp = 0.0
+    self._vision_speed_limit_candidate_ms = 0.0
+    self._vision_speed_limit_candidate_confidence = 0.0
+    self._vision_speed_limit_candidate_timestamp = 0.0
+    self._vision_candidate_last_processed_timestamp = 0.0
+    self._vision_lower_latched_ms = 0.0
+    self._vision_lower_latched_confidence = 0.0
+    self._vision_lower_latched_until = 0.0
+    self._vision_speed_limit_last_read_frame = -100000
+
+    # V1.7 camera-limit aging / map synchronisation state.
+    self._vision_ignored_timestamp = 0.0
+    self._vision_observation_timestamp = 0.0
+    self._vision_observation_distance_m = 0.0
+    self._vision_distance_total_m = 0.0
+    self._vision_distance_last_update = 0.0
+    self._vision_map_match_since = 0.0
+    self._vision_map_synced = False
+    self._vision_map_disagree_since = 0.0
+    self._vision_map_disagree_distance_m = 0.0
+    # Tesla UI speed-limit offset (if present on CAN)
+    self.ui_speed_limit_offset_uom = 0.0
+    self.ui_speed_limit_offset_units = ""  # "MPH" or "KPH"
+    self.ui_speed_limit_offset_valid = False
+    self.stock_cruise_enabled = False
+    self.stock_cruise_state = ""
+    self.stock_cruise_set_speed_ms = 0.0
+    self._last_valid_stock_cruise_set_speed_ms = 0.0
+    self._last_valid_stock_cruise_set_ms = 0
+    self._cruise_set_hold_src = ""
+    self.leftBlinkerLamp = False
+    self.rightBlinkerLamp = False
+    # ALC/BLNK/HSO/ACC (Unity parity)
+    self.enableALC = bool(self._tinkla.enable_alc)
+    self.autoStartAlcaDelay = float(self._tinkla.alc_delay)
+    self.enableHSO = bool(self._tinkla.enable_hso)
+    self.hsoNumbPeriod = float(self._tinkla.hso_numb_period)
+    self.enableACC = bool(self._tinkla.enable_acc)
+
+    self.tap_direction = 0
+    self._alc_tap_latch_dir = 0
+    self._alc_tap_latch_until = 0
+    self.alca_direction = 0  # 0-none, 1-left, 2-right
+    self.alca_pre_engage = False
+    self.prev_alca_pre_engage = False
+    self.alca_engaged = False
+    self.alca_done = False
+    self.alca_need_engagement = False
+    self._native_alc_state = 31  # Tesla DBC: ALC_SNA
+    self._native_alc_last_frame = -100000
+    self._native_alc_valid = False
+    self.native_steer_angle_deg = 0.0
+
+    self.HSOSteeringPressed = False
+    self.human_control = False
+
+    self.blinker_controller = BLNKController()
+    self.alca_controller = ALCController()
+    self.hso_controller = HSOController()
+    self._alc_plan_services = [s for s in ("modelV2", "lateralPlan") if s in messaging.SERVICE_LIST]
+    self._alc_sm = messaging.SubMaster(self._alc_plan_services, ignore_avg_freq=True) if self._alc_plan_services else None
+    self._vego_nan_logged = False
+    try:
+      self._reload_tinkla_params()
+      self.autopilot_disabled = bool(self._tinkla.autopilot_disabled)
+      # Hybrid mode is intentionally latched for the drive. The UI toggle takes effect after
+      # restart/next drive so CarParams/safety/controller ownership cannot change mid-engagement.
+      self.hybrid_native_ap = bool(self._tinkla.hybrid_native_ap) and not self.autopilot_disabled
+    except Exception:
+      pass
+
+
+  def _update_hybrid_alc_planner_ready(self, ret: structs.CarState, native_lkas_active: bool) -> None:
+    """Publish the physical handover state modeld needs before starting ALC."""
+    eac_status = int(getattr(self, "eac_status_raw", 0))
+    eac_error = int(getattr(self, "eac_error_code_raw", 0))
+    hands = int(getattr(self, "hands_on_level", 0))
+
+    ret.teslaEacStatus = max(0, min(eac_status, 255))
+    ret.teslaEacError = max(0, min(eac_error, 255))
+
+    hybrid = bool(getattr(self, "hybrid_native_ap", False))
+    engaged = bool(ret.cruiseState.enabled)
+    epas_healthy = bool(eac_status == 2 and eac_error == 0 and hands <= 1)
+    steer_inhibit = bool(
+      ret.steerFaultTemporary or
+      ret.steerFaultPermanent or
+      ret.steeringDisengage or
+      bool(getattr(self, "_xnor_hybrid_epas_failed", False)) or
+      bool(getattr(self, "_xnor_hybrid_epas_rearm", False))
+    )
+
+    if hybrid and engaged and epas_healthy and not steer_inhibit:
+      self._alc_epas_good_frames = min(100, int(self._alc_epas_good_frames) + 1)
+      if not native_lkas_active:
+        self._alc_native_idle_good_frames = min(25, int(self._alc_native_idle_good_frames) + 1)
+      else:
+        self._alc_native_idle_good_frames = 0
+    else:
+      self._alc_epas_good_frames = 0
+      self._alc_native_idle_good_frames = 0
+
+    ready = bool(
+      hybrid and engaged and
+      not native_lkas_active and
+      epas_healthy and
+      not steer_inhibit and
+      int(self._alc_epas_good_frames) >= 25 and
+      int(self._alc_native_idle_good_frames) >= 5
+    )
+    ret.teslaAlcHandoverReady = ready
+
+    if ready != bool(self._alc_planner_ready_prev):
+      cloudlog.warning(
+        f"[XNOR_ALC_PLANNER_READY] ready={int(ready)} native_lkas={int(native_lkas_active)} "
+        f"eac={eac_status} error={eac_error} hands={hands} "
+        f"epas_good={int(self._alc_epas_good_frames)} idle_good={int(self._alc_native_idle_good_frames)} "
+        f"rearm={int(bool(getattr(self, '_xnor_hybrid_epas_rearm', False)))} "
+        f"failed={int(bool(getattr(self, '_xnor_hybrid_epas_failed', False)))} "
+        f"inhibit={int(steer_inhibit)}"
+      )
+    self._alc_planner_ready_prev = ready
+
+
+  def _reload_tinkla_params(self) -> None:
+    from opendbc.car.tesla.legacy_modules.CFG_module import load_bool_param, load_float_param
+    self._tinkla.autopilot_disabled = load_bool_param("TinklaAutopilotDisabled", False)
+    self._tinkla.hybrid_native_ap = load_bool_param("TinklaHybridNativeAP", False)
+    self._tinkla.hands_on_level = load_float_param("TinklaHandsOnLevel", 2.0)
+    self._tinkla.adjust_acc_with_speed_limit = load_bool_param("TinklaAdjustAccWithSpeedLimit", False)
+    self._tinkla.speed_limit_offset = load_float_param("TinklaSpeedLimitOffset", 0.0)
+    self._tinkla.speed_limit_use_relative = load_bool_param("TinklaSpeedLimitUseRelative", False)
+    self._tinkla.vision_speed_limit = load_bool_param("VisionSpeedLimitDetection", True)
+    self._tinkla.enable_alc = load_bool_param("TinklaEnableALC", True)
+    self._tinkla.alc_delay = load_float_param("TinklaAlcDelay", 0.75)
+    self._tinkla.enable_hso = load_bool_param("TinklaEnableHSO", True)
+    self._tinkla.hso_numb_period = load_float_param("TinklaHsoNumbPeriod", 1.5)
+    self._tinkla.enable_acc = load_bool_param("TinklaEnableACC", False)
+    self.enableALC = bool(self._tinkla.enable_alc)
+    self.autoStartAlcaDelay = float(self._tinkla.alc_delay)
+    self.enableHSO = bool(self._tinkla.enable_hso)
+    self.hsoNumbPeriod = float(self._tinkla.hso_numb_period)
+    self.enableACC = bool(self._tinkla.enable_acc)
+
+  def _update_alc_state_from_plan(self, enabled: bool) -> None:
+    # CarState is the SOLE ALC state owner. Do not use a second modelV2 socket in
+    # CarInterface: a 100Hz empty poll can otherwise erase a valid 20Hz model phase.
+    plan_msg = None
+    if self._alc_sm is not None:
+      try:
+        self._alc_sm.update(0)
+        for service in ("modelV2", "lateralPlan"):
+          if service in self._alc_plan_services and self._alc_sm.updated[service]:
+            plan_msg = self._alc_sm[service]
+            break
+      except Exception:
+        pass
+    self.alca_controller.update(bool(enabled), self, self._param_frame, plan_msg)
+
+  def _update_native_alc_state(self, cp_ap_pt) -> None:
+    # Diagnostics only, never an OP lane-change or steering-authority gate.
+    # Keep native AP status internal: no new CarState schema fields are required.
+    try:
+      updates = cp_ap_pt.vl_all["AutopilotStatus"]["DAS_autoLaneChangeState"]
+      if updates:
+        state = int(updates[-1])
+        if 0 <= state <= 31:
+          self._native_alc_state = state
+          self._native_alc_last_frame = int(self._param_frame)
+    except (KeyError, AttributeError, IndexError, TypeError, ValueError):
+      pass
+    self._native_alc_valid = (int(self._param_frame) - self._native_alc_last_frame) <= 50
+
+  def _apply_alc_blinkers(self, ret) -> None:
+    self.blinker_controller.update_state(self, self._param_frame)
+    self.tap_direction = int(self.blinker_controller.tap_direction)
+
+    hold_dir = 0
+    one_lamp = bool(self.leftBlinkerLamp) != bool(self.rightBlinkerLamp)
+    alca_pre_engage = bool(getattr(self, "alca_pre_engage", False))
+    alca_engaged = bool(getattr(self, "alca_engaged", False))
+    alca_done = bool(getattr(self, "alca_done", False))
+
+    if alca_engaged:
+      # Once the lane change has started, the pre-engage tap latch is no longer needed.
+      self._alc_tap_latch_dir = 0
+      self._alc_tap_latch_until = 0
+
+    if self.enableALC and int(self.turnSignalStalkState) == 0:
+      # Only extend the comfort tap once the planner has actually entered preLaneChange.
+      # This avoids turning ordinary non-ALC indicator taps into a virtual held blinker.
+      if alca_pre_engage and one_lamp and int(getattr(self, "_alc_tap_latch_until", 0)) <= int(self._param_frame):
+        self._alc_tap_latch_dir = 1 if self.leftBlinkerLamp else 2
+        dur_s = max(2.5, float(self.autoStartAlcaDelay) + 0.5)
+        self._alc_tap_latch_until = int(self._param_frame + dur_s * 100)
+
+      # Unity-style lifecycle: pre-engage owns the remembered tap, active change owns the blinker,
+      # then finishing must be allowed to clear so DesireHelper does not re-arm another lane change.
+      if alca_engaged and (not alca_done) and int(getattr(self, "alca_direction", 0) or 0) in (1, 2):
+        hold_dir = int(self.alca_direction)
+      elif (not alca_engaged) and int(getattr(self, "_alc_tap_latch_until", 0)) > int(self._param_frame):
+        hold_dir = int(getattr(self, "_alc_tap_latch_dir", 0) or 0)
+
+    if hold_dir == 1:
+      ret.leftBlinker = True
+      ret.rightBlinker = False
+    elif hold_dir == 2:
+      ret.leftBlinker = False
+      ret.rightBlinker = True
+    else:
+      ret.leftBlinker = bool(self.leftBlinkerLamp) and int(self.turnSignalStalkState) == 0 and int(self.tap_direction) == 1
+      ret.rightBlinker = bool(self.rightBlinkerLamp) and int(self.turnSignalStalkState) == 0 and int(self.tap_direction) == 2
+
+  def _now_ms(self) -> int:
+    return int(time.monotonic() * 1000.0)
+
+  def _decode_csa(self, cp_party) -> None:
+    """Option 1: decode Tesla CSA (Curve Speed Adaptation) off the party-bus parser.
+
+    No second 'can' socket and no extra deserialize: UI_csaRoadCurvature is added to the
+    party parser's check list, so it arrives already decoded in cp_party.vl. We stash the
+    curvature/lookahead/liveness as instance attributes for LONG_module to read via getattr.
+
+    Fail-safe: any missing message/signal leaves xnor_csa_ok=False and never raises, so the
+    rest of CarState/LONG is undisturbed when CSA is absent (off-route / unsupported car).
+    """
+    try:
+      csa = cp_party.vl.get("UI_csaRoadCurvature", None)
+    except Exception:
+      csa = None
+
+    if not csa:
+      self.xnor_csa_ok = False
+      self.xnor_csa_advancing = False
+      return
+
+    try:
+      c2 = float(csa.get("UI_csaRoadCurvC2", 0.0) or 0.0)
+    except Exception:
+      c2 = 0.0
+    try:
+      range_m = float(csa.get("UI_csaRoadCurvRange", 0.0) or 0.0)
+    except Exception:
+      range_m = 0.0
+    try:
+      counter = int(csa.get("UI_csaRoadCurvCounter", -1))
+    except Exception:
+      counter = -1
+
+    now_ms = int(self._now_ms())
+    # Counter-advancing liveness: DAS_csaState is always 0 and must NOT be used to gate.
+    # The 0..255 counter ticks while CSA is publishing; hold "advancing" for ~500ms after
+    # the last observed change so a slow/just-wrapped counter doesn't flap the gate.
+    if counter != int(getattr(self, "_xnor_csa_last_counter", -1)):
+      self._xnor_csa_last_counter = counter
+      self._xnor_csa_last_change_ms = now_ms
+    advancing = (0 <= (now_ms - int(getattr(self, "_xnor_csa_last_change_ms", 0))) <= 500)
+
+    self.xnor_csa_c2 = c2
+    self.xnor_csa_range_m = range_m
+    self.xnor_csa_counter = counter
+    self.xnor_csa_advancing = bool(advancing)
+    self.xnor_csa_ok = True
+
+  def _filter_virtual_turn_stalk(self, raw_ts: int) -> int:
+    """Ignore our own virtual STW turn-hold frames so they do not look like a real held stalk."""
+    raw_ts = int(raw_ts or 0)
+    if raw_ts == 3:
+      raw_ts = 0
+
+    vturn = int(getattr(self, "_xnor_last_virtual_turn", 0) or 0)
+    vms = int(getattr(self, "_xnor_last_virtual_turn_ms", 0) or 0)
+    now_ms = int(self._now_ms())
+
+    if raw_ts in (1, 2) and raw_ts == vturn and (0 <= (now_ms - vms) <= 250):
+      return 0
+    return raw_ts
+
+  def _calc_speed_limit_target_ms(self, speed_units: str) -> float:
+    """Compute target speed for speed-limit matching (Unity parity).
+
+    If Tesla UI offset is present on CAN (UI_userSpeedOffset), use it as the base offset value.
+    Then apply the repo's relative/absolute setting:
+      - relative: treat offset as a percent
+      - absolute: treat offset as an absolute MPH/KPH delta
+
+    If Tesla UI offset is not available, fall back to Tinkla params.
+    """
+    limit_ms = float(getattr(self, "speed_limit_ms", 0.0) or getattr(self, "speed_limit_ms_das", 0.0) or 0.0)
+    if limit_ms <= 0.0:
+      return 0.0
+
+    use_relative = bool(getattr(self._tinkla, "speed_limit_use_relative", False))
+
+    # Base offset comes from Tesla UI if available, else from param.
+    if bool(getattr(self, "ui_speed_limit_offset_valid", False)):
+      off_uom = float(getattr(self, "ui_speed_limit_offset_uom", 0.0) or 0.0)
+      off_units = str(getattr(self, "ui_speed_limit_offset_units", speed_units) or speed_units)
+    else:
+      off_uom = float(getattr(self._tinkla, "speed_limit_offset", 0.0) or 0.0)
+      off_units = str(speed_units or "MPH")
+
+    if use_relative:
+      return max(0.0, limit_ms * (1.0 + off_uom / 100.0))
+
+    if off_units == "KPH":
+      return max(0.0, limit_ms + off_uom * CV.KPH_TO_MS)
+    return max(0.0, limit_ms + off_uom * CV.MPH_TO_MS)
+  def _update_adaptive_cruise_mode(self, *, now_ms: int, v_ego_ms: float) -> None:
+    """Unity outcome: double stalk pull toggles adaptive speed matching.
+
+    - Two MAIN pulls within 750ms enables adaptive matching.
+    - One MAIN pull while enabled disables it.
+    - Auto-disables when stock cruise is not ENABLED/STANDBY or speed is below minimum.
+    """
+    btn = int(getattr(self, "cruise_buttons", 0) or 0)
+    prev_btn = int(getattr(self, "_prev_pull_button", 0) or 0)
+
+    pull_btns = {int(CruiseButtons.MAIN), int(CruiseButtons.DECEL_SET)}
+    is_pull = int(btn) in pull_btns
+    is_edge = is_pull and (prev_btn != int(btn))
+
+    if is_edge:
+      # Ignore our own virtual stalk pulses (sent by CarController).
+      vbtn = int(getattr(self, "_xnor_last_virtual_btn", 0) or 0)
+      vms = int(getattr(self, "_xnor_last_virtual_ms", 0) or 0)
+      is_virtual = (int(btn) == vbtn) and (0 <= (int(now_ms) - vms) <= 250)
+
+      if not is_virtual:
+        last_ms = int(getattr(self, "_last_cruise_stalk_pull_ms", 0) or 0)
+        double_pull = (int(now_ms) - last_ms) <= int(self.DOUBLE_PULL_WINDOW_MS)
+        self._last_cruise_stalk_pull_ms = int(now_ms)
+
+        stock_state = str(getattr(self, "stock_cruise_state", "") or "")
+        ready = (stock_state in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")) and (float(v_ego_ms) > (17.1 * CV.MPH_TO_MS))
+
+        if ready and (not bool(getattr(self, "enable_adaptive_cruise", False))):
+          if double_pull:
+            self.enable_adaptive_cruise = True
+        elif ready and bool(getattr(self, "enable_adaptive_cruise", False)):
+          # single pull toggles off
+          self.enable_adaptive_cruise = False
+
+    # auto-disable when cruise not ready
+    stock_state = str(getattr(self, "stock_cruise_state", "") or "")
+    if (stock_state not in ("ENABLED", "STANDBY", "OVERRIDE", "STANDSTILL")) or (float(v_ego_ms) <= (17.1 * CV.MPH_TO_MS)):
+      self.enable_adaptive_cruise = False
+
+    self._prev_pull_button = int(btn)
+
+  def _pick_stock_cruise_set_u(self, di_state: dict, v_ego_ms: float,
+                               cruise_enabled: bool, speed_units: str) -> tuple[float, str]:
+    """Interpret exactly the PINNED XNOR 0.11.2 DI_state DBC (CAN 0x368).
+
+    Native DI_cruiseSet is 32|9@1+ with factor 0.5 and DI_digitalSpeed
+    is 48|8@1+. CANParser applies that factor: the earlier heuristic
+    scaling by 2 could double a correct set speed.
+
+    Do not infer vehicle DBC layout from plausible values. Real 0x368
+    captures are a deployment prerequisite.
+    """
+    try:
+      set_u = float(di_state.get("DI_cruiseSet", 0.0) or 0.0)
+      speed_u = float(di_state.get("DI_digitalSpeed", 0.0) or 0.0)
+    except (ValueError, TypeError, OverflowError):
+      return 0.0, "invalid"
+    if not math.isfinite(set_u) or not math.isfinite(speed_u):
+      return 0.0, "nonfinite"
+    if cruise_enabled:
+      if 0.0 < set_u <= 255.5:
+        return set_u, "DI_cruiseSet_native_0112"
+      # Do not confuse dash speed with stock cruise set speed.
+      return 0.0, "DI_cruiseSet_unavailable"
+    if 0.0 < speed_u <= 250.0:
+      return speed_u, "DI_digitalSpeed_native_0112"
+    return 0.0, "DI_digitalSpeed_unavailable"
+
+  def _update_cruise_set_speed(
+    self,
+    ret: structs.CarState,
+    di_state: dict,
+    *,
+    v_ego_ms: float,
+    raw_cruise_enabled: bool,
+    cruise_state: str,
+    speed_units: str,
+  ) -> None:
+    """Keep a stable Tesla setpoint through transient DI_cruiseState drops.
+
+    In XNOR/Unity-style longitudinal control, OP can remain logically engaged while
+    Tesla DI_state reports STANDBY. Falling back to DI_digitalSpeed in that window
+    makes the set speed follow ego speed, so virtual stalk pulses look like they
+    do not stick. Hold the last trusted DI_cruiseSet briefly instead.
+    """
+    now_ms = int(time.monotonic_ns() // 1_000_000)
+    uom = speed_units if speed_units in ("KPH", "MPH") else "MPH"
+    conv = CV.KPH_TO_MS if uom == "KPH" else CV.MPH_TO_MS
+
+    cruise_set_u, src = self._pick_stock_cruise_set_u(di_state, float(v_ego_ms), bool(raw_cruise_enabled), uom)
+    picked_ms = float(cruise_set_u) * float(conv) if float(cruise_set_u) > 0.0 else 0.0
+
+    self._cruise_set_hold_src = ""
+    if bool(raw_cruise_enabled) and picked_ms > 0.1 and str(src).startswith("DI_cruiseSet"):
+      self._last_valid_stock_cruise_set_speed_ms = float(picked_ms)
+      self._last_valid_stock_cruise_set_ms = int(now_ms)
+
+    hold_age_ms = int(now_ms) - int(getattr(self, "_last_valid_stock_cruise_set_ms", 0) or 0)
+    hold_ms = float(getattr(self, "_last_valid_stock_cruise_set_speed_ms", 0.0) or 0.0)
+    hold_allowed = (
+      (not bool(raw_cruise_enabled))
+      and bool(getattr(self, "autopilot_disabled", False))
+      and bool(getattr(self, "cruiseEnabled", False))
+      and str(cruise_state or "") in ("STANDBY", "PRE_CANCEL", "PRE_FAULT")
+      and hold_ms > 0.1
+      and 0 <= hold_age_ms <= int(self.XNOR_CRUISE_SET_HOLD_MS)
+    )
+
+    if hold_allowed:
+      self.stock_cruise_set_speed_ms = float(hold_ms)
+      ret.cruiseState.speed = max(float(hold_ms), 1e-3)
+      self._cruise_set_src = "DI_cruiseSet_hold_last_valid"
+      self._cruise_set_hold_src = f"hold_last_valid:{hold_age_ms}ms"
+      return
+
+    if picked_ms > 0.0:
+      self.stock_cruise_set_speed_ms = float(picked_ms)
+      ret.cruiseState.speed = max(float(picked_ms), 1e-3)
+    else:
+      self.stock_cruise_set_speed_ms = 0.0
+      ret.cruiseState.speed = max(float(v_ego_ms), 1e-3)
+    self._cruise_set_src = str(src)
+
+
+  def _get_vision_speed_limit_ms(self) -> float:
+    """Return a fresh confirmed V1.7-UK camera limit in m/s.
+
+    V1.7 also samples a provisional lower candidate. That candidate is never
+    allowed to raise speed: CarState only latches it when it is already below
+    the current trusted Tesla/map limit at the moment it is first observed.
+    """
+    if not bool(getattr(self._tinkla, "vision_speed_limit", True)):
+      self._vision_speed_limit_ms = 0.0
+      self._vision_speed_limit_candidate_ms = 0.0
+      self._vision_lower_latched_ms = 0.0
+      return 0.0
+
+    if (int(self._param_frame) - int(self._vision_speed_limit_last_read_frame)) < 20:
+      return float(self._vision_speed_limit_ms)
+
+    self._vision_speed_limit_last_read_frame = int(self._param_frame)
+    try:
+      limit_ms = float(self._vision_params.get("VisionSpeedLimit") or 0.0)
+      confidence = float(self._vision_params.get("VisionSpeedLimitConfidence") or 0.0)
+      timestamp = float(self._vision_params.get("VisionSpeedLimitTimestamp") or 0.0)
+      candidate_ms = float(self._vision_params.get("VisionSpeedLimitCandidate") or 0.0)
+      candidate_conf = float(self._vision_params.get("VisionSpeedLimitCandidateConfidence") or 0.0)
+      candidate_ts = float(self._vision_params.get("VisionSpeedLimitCandidateTimestamp") or 0.0)
+    except Exception:
+      limit_ms = 0.0
+      confidence = 0.0
+      timestamp = 0.0
+      candidate_ms = 0.0
+      candidate_conf = 0.0
+      candidate_ts = 0.0
+
+    now = time.monotonic()
+    age_s = now - timestamp if timestamp > 0.0 else 1e9
+    min_ms = 15.0 * CV.MPH_TO_MS
+    max_ms = 75.0 * CV.MPH_TO_MS
+    valid = (
+      min_ms <= limit_ms <= max_ms and
+      confidence >= 0.18 and
+      0.0 <= age_s <= 310.0 and
+      timestamp != float(self._vision_ignored_timestamp)
+    )
+
+    candidate_age_s = now - candidate_ts if candidate_ts > 0.0 else 1e9
+    candidate_valid = (
+      min_ms <= candidate_ms <= max_ms and
+      candidate_conf >= 0.18 and
+      0.0 <= candidate_age_s <= self.VISION_PROVISIONAL_HOLD_SECONDS + 10.0
+    )
+
+    self._vision_speed_limit_ms = float(limit_ms) if valid else 0.0
+    self._vision_speed_limit_confidence = float(confidence) if valid else 0.0
+    self._vision_speed_limit_timestamp = float(timestamp) if valid else 0.0
+    self._vision_speed_limit_candidate_ms = float(candidate_ms) if candidate_valid else 0.0
+    self._vision_speed_limit_candidate_confidence = float(candidate_conf) if candidate_valid else 0.0
+    self._vision_speed_limit_candidate_timestamp = float(candidate_ts) if candidate_valid else 0.0
+
+    # An explicit daemon clear (0 timestamp/value) cancels any provisional cap.
+    if candidate_ms <= 0.0 or candidate_ts <= 0.0:
+      self._vision_lower_latched_ms = 0.0
+      self._vision_lower_latched_confidence = 0.0
+      self._vision_lower_latched_until = 0.0
+      self._vision_candidate_last_processed_timestamp = 0.0
+
+    return float(self._vision_speed_limit_ms)
+
+  def _get_latched_vision_lower_candidate_ms(self, current_limit_ms: float) -> float:
+    """Latch a newly-seen camera candidate only when it lowers a trusted limit.
+
+    A single unconfirmed read is deliberately short lived in V1.7. Reacquisition
+    should either promote it to a confirmed 2/2 sign or allow it to expire; it
+    must not suppress speed for five minutes after the road context changes.
+    """
+    now = time.monotonic()
+    candidate_ms = float(getattr(self, "_vision_speed_limit_candidate_ms", 0.0) or 0.0)
+    candidate_conf = float(getattr(self, "_vision_speed_limit_candidate_confidence", 0.0) or 0.0)
+    candidate_ts = float(getattr(self, "_vision_speed_limit_candidate_timestamp", 0.0) or 0.0)
+
+    if candidate_ts > 0.0 and candidate_ts != float(self._vision_candidate_last_processed_timestamp):
+      self._vision_candidate_last_processed_timestamp = candidate_ts
+      if current_limit_ms > 0.0 and candidate_ms > 0.0 and candidate_ms < current_limit_ms:
+        self._vision_lower_latched_ms = float(candidate_ms)
+        self._vision_lower_latched_confidence = float(candidate_conf)
+        self._vision_lower_latched_until = float(candidate_ts) + self.VISION_PROVISIONAL_HOLD_SECONDS
+        cloudlog.warning(
+          f"[XNOR_VSL_V12UK] lower_candidate_latched="
+          f"{candidate_ms * CV.MS_TO_MPH:.0f}mph "
+          f"against={current_limit_ms * CV.MS_TO_MPH:.0f}mph "
+          f"confidence={candidate_conf:.3f}"
+        )
+
+    if self._vision_lower_latched_ms > 0.0 and now <= self._vision_lower_latched_until:
+      return float(self._vision_lower_latched_ms)
+
+    if self._vision_lower_latched_ms > 0.0:
+      self._vision_lower_latched_ms = 0.0
+      self._vision_lower_latched_confidence = 0.0
+      self._vision_lower_latched_until = 0.0
+    return 0.0
+
+
+  def _update_vision_distance(self, v_ego_ms: float) -> None:
+    now = time.monotonic()
+    last = float(self._vision_distance_last_update)
+    self._vision_distance_last_update = now
+    if last <= 0.0:
+      return
+    dt = float(max(min(now - last, 0.25), 0.0))
+    speed = float(v_ego_ms) if math.isfinite(float(v_ego_ms)) else 0.0
+    self._vision_distance_total_m += max(speed, 0.0) * dt
+
+  def _reset_vision_map_arbitration(self, timestamp: float) -> None:
+    self._vision_observation_timestamp = float(timestamp)
+    self._vision_observation_distance_m = float(self._vision_distance_total_m)
+    self._vision_map_match_since = 0.0
+    self._vision_map_synced = False
+    self._vision_map_disagree_since = 0.0
+    self._vision_map_disagree_distance_m = float(self._vision_distance_total_m)
+
+  def _release_confirmed_vision(self, reason: str) -> None:
+    old_ms = float(self._vision_speed_limit_ms)
+    old_ts = float(self._vision_speed_limit_timestamp)
+    if old_ts > 0.0:
+      self._vision_ignored_timestamp = old_ts
+    self._vision_speed_limit_ms = 0.0
+    self._vision_speed_limit_confidence = 0.0
+    self._vision_speed_limit_timestamp = 0.0
+    self._vision_map_match_since = 0.0
+    self._vision_map_synced = False
+    self._vision_map_disagree_since = 0.0
+    if old_ms > 0.0:
+      cloudlog.warning(
+        f"[XNOR_VSL_V12UK] vision_release={old_ms * CV.MS_TO_MPH:.0f}mph "
+        f"reason={reason}"
+      )
+
+  def _confirmed_vision_is_authoritative(self, vision_ms: float, map_ms: float, v_ego_ms: float) -> bool:
+    """Give a confirmed camera sign strong but decaying authority.
+
+    A newly confirmed camera value remains authoritative against a map that was
+    already stale. Once map and Vision have subsequently agreed, however, a new
+    stable map transition is evidence of a road/segment change. Lower map
+    transitions release faster than higher ones; higher transitions retain the
+    conservative 4 s / 20 m debounce.
+    """
+    if vision_ms <= 0.0:
+      return False
+
+    now = time.monotonic()
+    timestamp = float(self._vision_speed_limit_timestamp)
+    if timestamp <= 0.0:
+      return False
+
+    if timestamp != float(self._vision_observation_timestamp):
+      # Start distance integration at this observation. Do not charge a new
+      # camera sign for time/distance elapsed while no Vision limit was active.
+      self._vision_distance_last_update = now
+      self._reset_vision_map_arbitration(timestamp)
+      cloudlog.info(
+        f"[XNOR_VSL_V12UK] vision_anchor={vision_ms * CV.MS_TO_MPH:.0f}mph "
+        f"confidence={float(self._vision_speed_limit_confidence):.3f}"
+      )
+    else:
+      self._update_vision_distance(v_ego_ms)
+
+    age_s = max(now - timestamp, 0.0)
+    distance_m = max(
+      float(self._vision_distance_total_m) - float(self._vision_observation_distance_m),
+      0.0,
+    )
+
+    if map_ms <= 0.0:
+      self._vision_map_match_since = 0.0
+      self._vision_map_disagree_since = 0.0
+      return True
+
+    tolerance_ms = self.VISION_MAP_MATCH_TOLERANCE_MPH * CV.MPH_TO_MS
+    delta_ms = float(map_ms) - float(vision_ms)
+    map_matches = abs(delta_ms) <= tolerance_ms
+
+    if map_matches:
+      self._vision_map_disagree_since = 0.0
+      self._vision_map_disagree_distance_m = float(self._vision_distance_total_m)
+      if self._vision_map_match_since <= 0.0:
+        self._vision_map_match_since = now
+      elif not self._vision_map_synced and now - self._vision_map_match_since >= self.VISION_MAP_SYNC_SECONDS:
+        self._vision_map_synced = True
+        cloudlog.info(
+          f"[XNOR_VSL_V12UK] vision_map_synced="
+          f"{vision_ms * CV.MS_TO_MPH:.0f}mph age={age_s:.1f}s distance={distance_m:.0f}m"
+        )
+      return True
+
+    self._vision_map_match_since = 0.0
+    if self._vision_map_disagree_since <= 0.0:
+      self._vision_map_disagree_since = now
+      self._vision_map_disagree_distance_m = float(self._vision_distance_total_m)
+
+    disagree_s = max(now - self._vision_map_disagree_since, 0.0)
+    disagree_distance_m = max(
+      float(self._vision_distance_total_m) - float(self._vision_map_disagree_distance_m),
+      0.0,
+    )
+
+    # Important asymmetry retained from the original conservative design:
+    # a higher map value must work harder to displace a lower confirmed camera
+    # limit. A lower map transition after proven synchronization releases more
+    # quickly, but a map that was already lower before camera confirmation does
+    # not defeat the new camera value because _vision_map_synced is still false.
+    if self._vision_map_synced and delta_ms < -tolerance_ms:
+      if (
+        disagree_s >= self.VISION_SYNCED_LOWER_RELEASE_SECONDS and
+        disagree_distance_m >= self.VISION_SYNCED_LOWER_RELEASE_DISTANCE_M
+      ):
+        self._release_confirmed_vision(
+          f"synced lower map transition to {map_ms * CV.MS_TO_MPH:.0f}mph "
+          f"stable={disagree_s:.1f}s travel={disagree_distance_m:.0f}m"
+        )
+        return False
+
+    if self._vision_map_synced and delta_ms > tolerance_ms:
+      if (
+        disagree_s >= self.VISION_SYNCED_HIGHER_RELEASE_SECONDS and
+        disagree_distance_m >= self.VISION_SYNCED_HIGHER_RELEASE_DISTANCE_M
+      ):
+        self._release_confirmed_vision(
+          f"synced higher map transition to {map_ms * CV.MS_TO_MPH:.0f}mph "
+          f"stable={disagree_s:.1f}s travel={disagree_distance_m:.0f}m"
+        )
+        return False
+
+    if (
+      not self._vision_map_synced and
+      age_s >= self.VISION_UNSYNC_RELEASE_SECONDS and
+      distance_m >= self.VISION_UNSYNC_RELEASE_DISTANCE_M and
+      disagree_s >= self.VISION_MAP_DISAGREE_SECONDS
+    ):
+      self._release_confirmed_vision(
+        f"aged unsynced map={map_ms * CV.MS_TO_MPH:.0f}mph "
+        f"age={age_s:.1f}s travel={distance_m:.0f}m"
+      )
+      return False
+
+    if (
+      age_s >= self.VISION_HARD_RELEASE_SECONDS and
+      distance_m >= self.VISION_HARD_RELEASE_DISTANCE_M and
+      disagree_s >= self.VISION_MAP_DISAGREE_SECONDS
+    ):
+      self._release_confirmed_vision(
+        f"stale map={map_ms * CV.MS_TO_MPH:.0f}mph "
+        f"age={age_s:.1f}s travel={distance_m:.0f}m"
+      )
+      return False
+
+    return True
+
+
+  def _update_speed_limit(self, can_parsers, v_ego_ms: float = 0.0) -> None:
+    """Unity-parity speed limit parsing (map/sign + DAS fallback) into m/s."""
+    speed_limit_ms = 0.0
+    speed_limit_ms_das = 0.0
+
+    # Debug/raw inputs (logged when TinklaAdjustAccWithSpeedLimit is enabled)
+    gps_units = None
+    gps_mpp = None
+    rd_sign = None
+    rd_base_mps = None
+    map_type = None
+    das_mph = None
+    def _msg(name: str):
+      for bk in (Bus.party, Bus.ap_party, Bus.cam, Bus.chassis, Bus.pt, Bus.ap_pt):
+        cp = can_parsers.get(bk)
+        if cp is None:
+          continue
+        try:
+          return cp.vl.get(name)
+        except KeyError:
+          continue
+      return None
+
+    try:
+      gps = _msg("UI_gpsVehicleSpeed")
+      if gps is not None:
+        # Tesla UI offset setting (absolute offset in MPH/KPH)
+        try:
+          off_u = float(gps.get("UI_userSpeedOffset", 0.0) or 0.0)
+          off_units = int(gps.get("UI_userSpeedOffsetUnits", 0) or 0)
+          self.ui_speed_limit_offset_uom = float(off_u)
+          self.ui_speed_limit_offset_units = "KPH" if off_units == 1 else "MPH"
+          self.ui_speed_limit_offset_valid = True
+        except Exception:
+          self.ui_speed_limit_offset_valid = False
+          self.ui_speed_limit_offset_uom = 0.0
+          self.ui_speed_limit_offset_units = ""
+        msu = int(gps.get("UI_mapSpeedLimitUnits", 0))
+        gps_units = msu
+        map_uom_to_ms = CV.KPH_TO_MS if msu == 1 else CV.MPH_TO_MS
+        map_ms_to_uom = CV.MS_TO_KPH if msu == 1 else CV.MS_TO_MPH
+
+        map_data = _msg("UI_driverAssistMapData") or {}
+        speed_limit_type = int(map_data.get("UI_mapSpeedLimitType", map_data.get("UI_mapSpeedLimitType", map_data.get("UI_mapSpeedLimit", 0))) or 0)
+        map_type = speed_limit_type
+
+        rd = _msg("UI_driverAssistRoadSign") or {}
+        try:
+          rd_sign = int(rd.get("UI_roadSign", 0) or 0)
+        except Exception:
+          rd_sign = None
+        try:
+          rd_base_mps = float(rd.get("UI_baseMapSpeedLimitMPS", 0.0) or 0.0)
+        except Exception:
+          rd_base_mps = None
+        if int(rd.get("UI_roadSign", 0)) == 3:
+          base_map = float(rd.get("UI_baseMapSpeedLimitMPS", 0.0) or 0.0)
+          self.baseMapSpeedLimitMPS = int(base_map * map_ms_to_uom + 0.99) / map_ms_to_uom
+
+        base_map = float(getattr(self, "baseMapSpeedLimitMPS", 0.0) or 0.0)
+        gps_mpp = float(gps.get("UI_mppSpeedLimit", 0.0) or 0.0)
+
+        # UI_mppSpeedLimit (gps_mpp) is the stable Tesla map/nav posted limit -- on this car it
+        # sits steady at the real value, while the road-sign-derived base_map can flicker between
+        # adjacent limits and drive the 40<->30 SET oscillation. Prefer mpp as the primary source;
+        # fall back to the road-sign base_map only when mpp is unavailable. (Revert: swap the order.)
+        mpp_ms = gps_mpp * map_uom_to_ms if gps_mpp > 0.0 else 0.0
+        live_map_limit_ms = 0.0
+        if mpp_ms > 0.0:
+          live_map_limit_ms = float(mpp_ms)
+        elif base_map > 0.0 and (speed_limit_type != 0x1F or base_map >= 5.56):
+          live_map_limit_ms = float(base_map)
+
+        if live_map_limit_ms > 0.0:
+          self.lastValidMapSpeedLimitMPS = float(live_map_limit_ms)
+          speed_limit_ms = float(live_map_limit_ms)
+        else:
+          speed_limit_ms = float(getattr(self, "lastValidMapSpeedLimitMPS", 0.0) or 0.0)
+    except Exception:
+      pass
+
+    try:
+      ds2 = _msg("DAS_status2") or {}
+      if isinstance(ds2, dict) and "DAS_accSpeedLimit" in ds2:
+        das_mph = float(ds2.get("DAS_accSpeedLimit", 0.0) or 0.0)
+        speed_limit_ms_das = das_mph * CV.MPH_TO_MS
+    except Exception:
+      pass
+
+    self.speed_limit_ms_das = float(speed_limit_ms_das)
+    # Empirically on HW2, DAS_accSpeedLimit can stick at a low default (e.g. 15mph) while map/sign shows the real limit.
+    # Use DAS as fallback only, never as a cap.
+    chosen = speed_limit_ms if speed_limit_ms > 0.0 else speed_limit_ms_das
+
+    # XNOR Vision Speed Limit V1.7-UK:
+    # - Confirmed camera signs are initially authoritative but age with time and
+    #   distance. A stable map transition after prior map/Vision agreement can
+    #   release an old camera observation instead of holding it for five minutes.
+    # - A provisional 1/2 numeric candidate remains lower-only and now expires
+    #   quickly unless reacquisition promotes it to a confirmed sign.
+    vision_ms = float(self._get_vision_speed_limit_ms())
+    # A new lower 1/2 sign should be able to cap an older confirmed camera
+    # value even when Tesla map is already at that same lower value.
+    provisional_reference_ms = max(float(chosen), float(vision_ms))
+    provisional_ms = float(self._get_latched_vision_lower_candidate_ms(provisional_reference_ms))
+    vision_applied = False
+    provisional_applied = False
+
+    # Only real Tesla map/navigation data may release a confirmed camera value.
+    # DAS_accSpeedLimit is a fallback and is known to stick at low defaults.
+    map_for_arbitration = float(speed_limit_ms)
+    if vision_ms > 0.0 and self._confirmed_vision_is_authoritative(
+      vision_ms, map_for_arbitration, v_ego_ms
+    ):
+      chosen = float(vision_ms)
+      vision_applied = True
+
+      # Clear only an older provisional cap. A genuinely newer lower 1/2 sign
+      # is allowed to apply immediately below an existing confirmed limit.
+      candidate_ts = float(getattr(self, "_vision_speed_limit_candidate_timestamp", 0.0) or 0.0)
+      vision_ts = float(getattr(self, "_vision_speed_limit_timestamp", 0.0) or 0.0)
+      if candidate_ts <= vision_ts:
+        self._vision_lower_latched_ms = 0.0
+        self._vision_lower_latched_confidence = 0.0
+        self._vision_lower_latched_until = 0.0
+
+    # Apply a provisional lower cap after confirmed arbitration so a newly-seen
+    # lower sign can conservatively reduce an older confirmed camera limit.
+    if provisional_ms > 0.0 and chosen > 0.0 and provisional_ms < chosen:
+      chosen = float(provisional_ms)
+      provisional_applied = True
+      vision_applied = False
+
+    # V279: driver's manual posted limit takes precedence over Tesla map and vision.
+    # The existing _calc_speed_limit_target_ms still applies Tesla/Tinkla offsets.
+    if self._param_frame - self._xnor_manual_speed_limit_last_read_frame >= 20:
+      self._xnor_manual_speed_limit_last_read_frame = self._param_frame
+      try:
+        selected = int(self._vision_params.get("XNORManualSpeedLimitMph") or 0)
+        self._xnor_manual_speed_limit_mph = selected if selected in (40, 50, 60, 70) else 0
+      except Exception:
+        self._xnor_manual_speed_limit_mph = 0
+    manual_applied = self._xnor_manual_speed_limit_mph in (40, 50, 60, 70)
+    if manual_applied:
+      chosen = self._xnor_manual_speed_limit_mph * CV.MPH_TO_MS
+    self.speed_limit_ms = float(chosen)
+    if manual_applied:
+      self._xnor_speed_limit_source = "manual_ui"
+    elif vision_applied:
+      self._xnor_speed_limit_source = "vision_uk"
+    elif provisional_applied:
+      self._xnor_speed_limit_source = "vision_uk_lower_candidate"
+    else:
+      self._xnor_speed_limit_source = "tesla_map" if speed_limit_ms > 0.0 else ("das_fallback" if speed_limit_ms_das > 0.0 else "none")
+
+    if (self._tinkla.adjust_acc_with_speed_limit or str(getattr(self, "_xnor_speed_limit_source", "")).startswith("vision_uk")) and (self._param_frame % 100 == 0):
+      try:
+        uom = str(getattr(self, "speed_units", "MPH"))
+        conv = 2.2369362920544 if uom == "MPH" else 3.6
+        cloudlog.info(
+          f"[XNOR_CS] uom={uom} src={getattr(self, '_cruise_set_src', 'none')} "
+          f"cruiseSet={float(getattr(self, 'stock_cruise_set_speed_ms', 0.0))*conv:.1f} "
+          f"stockCruise={bool(getattr(self, 'stock_cruise_enabled', False))} "
+          f"stockState={str(getattr(self, 'stock_cruise_state', '') or '')} "
+          f"hold={str(getattr(self, '_cruise_set_hold_src', '') or '')} "
+          f"speedLimit={float(getattr(self, 'speed_limit_ms', 0.0))*conv:.1f} das={float(getattr(self, 'speed_limit_ms_das', 0.0))*conv:.1f} "
+          f"vision={float(getattr(self, '_vision_speed_limit_ms', 0.0))*conv:.1f} "
+          f"visionConf={float(getattr(self, '_vision_speed_limit_confidence', 0.0)):.2f} "
+          f"visionCandidate={float(getattr(self, '_vision_speed_limit_candidate_ms', 0.0))*conv:.1f} "
+          f"visionCandidateConf={float(getattr(self, '_vision_speed_limit_candidate_confidence', 0.0)):.2f} "
+          f"visionLatched={float(getattr(self, '_vision_lower_latched_ms', 0.0))*conv:.1f} "
+          f"visionSynced={bool(getattr(self, '_vision_map_synced', False))} "
+          f"visionTravel={max(float(getattr(self, '_vision_distance_total_m', 0.0)) - float(getattr(self, '_vision_observation_distance_m', 0.0)), 0.0):.0f}m "
+          f"slSrc={str(getattr(self, '_xnor_speed_limit_source', 'none'))} "
+          f"raw(gps_u={gps_units}, gps_mpp={gps_mpp}, rd_sign={rd_sign}, rd_base_mps={rd_base_mps}, map_type={map_type}, das_mph={das_mph})"
+        )
+      except Exception:
+        pass
+
+  def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
+    autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
+    if autopark_now and not self.autopark_prev and not self.cruise_enabled_prev:
+      self.autopark = True
+    if not autopark_now:
+      self.autopark = False
+    self.autopark_prev = autopark_now
+    self.cruise_enabled_prev = cruise_enabled
+
+
+  def update(self, can_parsers) -> structs.CarState:
+    if self.CP.carFingerprint in LEGACY_CARS:
+      return self.update_legacy(can_parsers)
+
+    cp_party = can_parsers[Bus.party]
+    cp_ap_party = can_parsers[Bus.ap_party]
+    ret = structs.CarState()
+
+    # Vehicle speed
+    ret.vEgoRaw = cp_party.vl["DI_speed"]["DI_vehicleSpeed"] * CV.KPH_TO_MS
+    if not math.isfinite(ret.vEgoRaw):
+      if not self._vego_nan_logged:
+        cloudlog.error(f"[XNOR_VEGO] non-finite vEgoRaw={ret.vEgoRaw!r} from DI_speed.DI_vehicleSpeed")
+        self._vego_nan_logged = True
+      ret.vEgoRaw = 0.0
+      kf = getattr(self, "v_ego_kf", None)
+      if kf is not None and hasattr(kf, "x"):
+        try:
+          kf.x = [[0.0], [0.0]]
+        except Exception:
+          try:
+            kf.x = [0.0, 0.0]
+          except Exception:
+            pass
+    ret.vEgo, ret.aEgo = self.update_speed_kf(float(ret.vEgoRaw))
+    if (not math.isfinite(ret.vEgo)) or (not math.isfinite(ret.aEgo)):
+      if not self._vego_nan_logged:
+        cloudlog.error(f"[XNOR_VEGO] non-finite vEgo/aEgo from speed_kf vEgoRaw={ret.vEgoRaw!r}")
+        self._vego_nan_logged = True
+      ret.vEgoRaw = 0.0
+      ret.vEgo = 0.0
+      ret.aEgo = 0.0
+      kf = getattr(self, "v_ego_kf", None)
+      if kf is not None and hasattr(kf, "x"):
+        try:
+          kf.x = [[0.0], [0.0]]
+        except Exception:
+          try:
+            kf.x = [0.0, 0.0]
+          except Exception:
+            pass
+
+    # Gas pedal
+    ret.gasPressed = cp_party.vl["DI_systemStatus"]["DI_accelPedalPos"] > 0
+
+    # Brake pedal
+    # Numeric brake is a deprecated nested Cap'n Proto field in 0.11.2.
+    # Only physical brakePressed is exposed to the control stack.
+    ret.brakePressed = cp_party.vl["ESP_status"]["ESP_driverBrakeApply"] == 2
+
+    # Steering wheel
+    epas_status = cp_party.vl["EPAS3S_sysStatus"]
+    self.hands_on_level = epas_status["EPAS3S_handsOnLevel"]
+    self.eac_status_raw = int(epas_status["EPAS3S_eacStatus"])
+    self.eac_error_code_raw = int(epas_status["EPAS3S_eacErrorCode"])
+    self.human_control = bool(self.hands_on_level >= 1)
+    ret.steeringAngleDeg = -epas_status["EPAS3S_internalSAS"]
+    ret.steeringRateDeg = -cp_ap_party.vl["SCCM_steeringAngleSensor"]["SCCM_steeringAngleSpeed"]
+    ret.steeringTorque = -epas_status["EPAS3S_torsionBarTorque"]
+
+    # stock handsOnLevel uses >0.5 for 0.25s, but is too slow
+    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
+
+    eac_status = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacStatus"].get(int(epas_status["EPAS3S_eacStatus"]), None)
+    ret.steerFaultPermanent = eac_status == "EAC_FAULT"
+    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
+    # V203: userspace detected a timed-out co-op/native-drop re-arm. This must
+    # surface through the existing normal OP steering-fault alert/disengage path.
+    if self.hybrid_native_ap and bool(self._xnor_hybrid_epas_failed):
+      ret.steerFaultTemporary = True
+
+    # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
+    # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
+    # disengage path while Hybrid is selected. Normal/non-Hybrid HSO behaviour is unchanged.
+    eac_error_code = self.can_define.dv["EPAS3S_sysStatus"]["EPAS3S_eacErrorCode"].get(int(epas_status["EPAS3S_eacErrorCode"]), None)
+    if self.hybrid_native_ap or self.enableHSO:
+      ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
+                                                         eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
+    else:
+      ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
+                                                         eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
+
+    # Cruise state
+    cruise_state = self.can_define.dv["DI_state"]["DI_cruiseState"].get(int(cp_party.vl["DI_state"]["DI_cruiseState"]), None)
+    self.stock_cruise_state = str(cruise_state or "")
+    speed_units = self.can_define.dv["DI_state"]["DI_speedUnits"].get(int(cp_party.vl["DI_state"]["DI_speedUnits"]), None)
+
+    autopark_state = self.can_define.dv["DI_state"]["DI_autoparkState"].get(int(cp_party.vl["DI_state"]["DI_autoparkState"]), None)
+    cruise_enabled = cruise_state in ("ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
+    self.update_autopark_state(autopark_state, cruise_enabled)
+    # Cruise set speed (DI_state): pick correct decoded field without changing the DBC
+    uom = speed_units if speed_units in ("KPH", "MPH") else "MPH"
+    self.stock_cruise_enabled = bool(cruise_enabled)
+    self._update_cruise_set_speed(
+      ret,
+      cp_party.vl["DI_state"],
+      v_ego_ms=float(ret.vEgo),
+      raw_cruise_enabled=bool(cruise_enabled),
+      cruise_state=str(cruise_state or ""),
+      speed_units=uom,
+    )
+    if self.autopilot_disabled:
+      # Unity parity: allow engagement without Tesla cruise (low-speed lateral only)
+      ret.cruiseState.available = True
+      ret.cruiseState.enabled = bool(self.cruiseEnabled)
+    else:
+      ret.cruiseState.enabled = cruise_enabled and not self.autopark
+      ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
+    ret.cruiseState.standstill = False  # This needs to be false, since we can resume from stop without sending anything special
+    ret.standstill = cruise_state == "STANDSTILL"
+    ret.accFaulted = cruise_state == "FAULT"
+
+    # Unity parity: store last STW_ACTN_RQ for virtual stalk + tap-to-ALC
+    self.speed_units = speed_units if speed_units in ("KPH", "MPH") else "MPH"
+
+    # Prefer the STW_ACTN_RQ instance that actually carries a changing follow-distance.
+    # Some harnesses/bus layouts mirror STW_ACTN_RQ onto multiple buses; a mirrored copy may pin DTR_Dist_Rq.
+    stw_candidates = []
+    for bk in (Bus.party, Bus.chassis, Bus.pt, Bus.ap_party, Bus.ap_pt):
+      _cp = can_parsers.get(bk)
+      if _cp is None:
+        continue
+      try:
+        _stw = _cp.vl["STW_ACTN_RQ"]
+      except KeyError:
+        continue
+      _bus = int(getattr(_cp, "bus", CANBUS.party))
+      _dtr = _stw.get("DTR_Dist_Rq", None)
+      try:
+        _dtr_i = int(_dtr) if _dtr is not None else None
+      except Exception:
+        _dtr_i = None
+      stw_candidates.append((_stw, _bus, _dtr_i))
+
+    stw = None
+    stw_bus = None
+    if stw_candidates:
+      # Prefer a previously-working bus for follow-distance, if still available.
+      follow_bus = getattr(self, "_follow_stw_bus", None)
+      if follow_bus is not None:
+        for _stw, _bus, _dtr_i in stw_candidates:
+          if int(_bus) == int(follow_bus):
+            stw = _stw
+            stw_bus = _bus
+            break
+
+      # Otherwise pick the STW_ACTN_RQ instance that actually carries a changing follow-distance.
+      if stw is None:
+        # 1) If any candidate shows a *change* vs last frame and is not SNA, pick it.
+        changed = [c for c in stw_candidates if (c[2] is not None and c[2] != 255 and c[2] != getattr(self, "cruise_distance", 255))]
+        if changed:
+          stw, stw_bus, _ = changed[0]
+        else:
+          # 2) Otherwise, pick the first non-SNA dtr candidate (if any).
+          non_sna = [c for c in stw_candidates if (c[2] is not None and c[2] != 255)]
+          if non_sna:
+            stw, stw_bus, _ = non_sna[0]
+          else:
+            # 3) Fallback: first available STW_ACTN_RQ.
+            stw, stw_bus, _ = stw_candidates[0]
+
+    if stw is not None:
+      # Seed virtual stalk from a known-good party-bus STW frame when available.
+      stw_seed = stw
+      for _stw, _bus, _dtr_i in stw_candidates:
+        if int(_bus) == int(CANBUS.party):
+          stw_seed = _stw
+          break
+
+      self.msg_stw_actn_req = copy.copy(stw_seed)
+      # Never transmit on CANBUS.radar (bus 1). Keep TX on CANBUS.party to avoid CAN errors.
+      self.stw_actn_bus = int(CANBUS.party)
+      self.cruise_buttons = int(stw_seed.get("SpdCtrlLvr_Stat", 0))
+      # Unity parity: publish followDistanceS from stalk distance setting (DTR_Dist_Rq).
+      # Keep last valid value if the stalk message is missing/SNA this frame.
+      ret.followDistanceS = self._last_follow_distance_s
+
+      dtr_raw = stw.get("DTR_Dist_Rq", 255)
+      try:
+        dtr = int(dtr_raw) if dtr_raw is not None else 255
+      except (ValueError, TypeError):
+        dtr = 255
+
+      if dtr != 255:
+        # Remember the bus that carries valid follow-distance.
+        self._follow_stw_bus = int(stw_bus) if stw_bus is not None else getattr(self, "_follow_stw_bus", None)
+        # pos1=0, pos2=33, pos3=66, pos4=100, pos5=133, pos6=166, pos7=200, SNA=255
+        self.cruise_distance = dtr
+        follow_s = int(dtr / 33)
+        if 0 <= follow_s <= 6:
+          self._last_follow_distance_s = follow_s
+          ret.followDistanceS = follow_s
+
+
+      raw_ts = int(stw_seed.get("TurnIndLvr_Stat", 0))
+      self.turnSignalStalkState = self._filter_virtual_turn_stalk(raw_ts)
+    else:
+      ret.followDistanceS = self._last_follow_distance_s
+      self.cruise_buttons = 0
+      self.turnSignalStalkState = 0
+      self.tap_direction = 0
+      self.blinker_controller.tap_direction = 0
+
+    if self.autopilot_disabled:
+      if self.cruise_buttons == 2:  # MAIN
+        self.cruiseEnabled = True
+      if self.cruise_buttons == 1:  # CANCEL
+        self.cruiseEnabled = False
+
+
+    # Gear
+    ret.gearShifter = GEAR_MAP[self.can_define.dv["DI_systemStatus"]["DI_gear"].get(int(cp_party.vl["DI_systemStatus"]["DI_gear"]), "DI_GEAR_INVALID")]
+
+    # Doors
+    ret.doorOpen = cp_party.vl["UI_warning"]["anyDoorOpen"] == 1
+
+    # Blinkers
+    # Modern Teslas report 1=blinking (stalk released), 2=stalk held.
+    self.leftBlinkerLamp = cp_party.vl["UI_warning"]["leftBlinkerBlinking"] != 0
+    self.rightBlinkerLamp = cp_party.vl["UI_warning"]["rightBlinkerBlinking"] != 0
+
+    self._update_alc_state_from_plan(bool(self.cruiseEnabled))
+    self._apply_alc_blinkers(ret)
+
+    # HSO (Unity parity): use handsOnLevel for steeringPressed when enabled, but never during blinkers (preserve ALC)
+    self.HSOSteeringPressed = bool(getattr(self, "hands_on_level", 0.0) >= float(self._tinkla.hands_on_level))
+    if self.enableHSO and not (ret.leftBlinker or ret.rightBlinker):
+      ret.steeringPressed = self.HSOSteeringPressed
+
+    # Seatbelt
+    ret.seatbeltUnlatched = cp_party.vl["UI_warning"]["buckleStatus"] != 1
+
+    # Blindspot
+    ret.leftBlindspot = cp_ap_party.vl["DAS_status"]["DAS_blindSpotRearLeft"] != 0
+    ret.rightBlindspot = cp_ap_party.vl["DAS_status"]["DAS_blindSpotRearRight"] != 0
+
+    # Speed limit best-effort (needed for speed-limit matching)
+    self._update_speed_limit(can_parsers, v_ego_ms=float(ret.vEgo))
+
+    # XNOR Option 1: decode CSA curvature off the party parser (zero extra socket/deserialize).
+    self._decode_csa(cp_party)
+
+
+    # AEB
+    ret.stockAeb = cp_ap_party.vl["DAS_control"]["DAS_aebEvent"] == 1
+
+    # LKAS
+    lkas_ctrl_type = get_steer_ctrl_type(self.CP.flags, 2)
+    ret.stockLkas = cp_ap_party.vl["DAS_steeringControl"]["DAS_steeringControlType"] == lkas_ctrl_type
+
+    # Stock Autosteer should be off (includes FSD)
+    if not (self.CP.flags & TeslaFlags.MISSING_DAS_SETTINGS):
+      ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
+    # Buttons # ToDo: add Gap adjust button
+
+    # Messages needed by carcontroller
+    self.das_control = copy.copy(cp_ap_party.vl["DAS_control"])
+
+    # Unity parity tail
+    if (self._param_frame % 100) == 0:
+      try:
+        self._reload_tinkla_params()
+        self.autopilot_disabled = bool(self._tinkla.autopilot_disabled)
+        self.enableHSO = bool(getattr(self._tinkla, 'enable_hso', True))
+        self.hsoNumbPeriod = float(getattr(self._tinkla, 'hso_numb_period', 1.5) or 1.5)
+        self.handsOnLimit = float(getattr(self._tinkla, 'hands_on_level', 2.0) or 2.0)
+      except Exception:
+        pass
+    self._param_frame += 1
+
+    if self.autopilot_disabled:
+      ret.cruiseState.available = True
+      ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      self.cruiseEnabled = bool(ret.cruiseState.enabled)
+
+    ret.buttonEvents = []
+    try:
+      prev = int(self._prev_cruise_buttons)
+      cur = int(getattr(self, "cruise_buttons", 0))
+      def _be(t, pressed):
+        e = structs.CarState.ButtonEvent()
+        e.type = t
+        e.pressed = pressed
+        return e
+
+      # XNOR/Unity parity:
+      # - Virtual decel/cancel presses (issued by our LONG/ACC stalk logic) must NOT lower vCruise,
+      #   otherwise the planner ceiling collapses and we never "resume" when the lead clears.
+      now_ms = int(time.monotonic_ns() // 1_000_000)
+      virt_btn = int(getattr(self, "_xnor_last_virtual_btn", 0) or 0)
+      virt_ms = int(getattr(self, "_xnor_last_virtual_ms", 0) or 0)
+      virt_prev = (prev == virt_btn) and (abs(now_ms - virt_ms) <= 1200)
+
+      accel_vals = (4, 16)
+      decel_vals = (8, 32)
+
+      # Allow virtual accel/resume to raise vCruise toward the speed limit ceiling.
+      if (prev in accel_vals) and (cur not in accel_vals):
+        ret.buttonEvents.append(_be(ButtonType.accelCruise, False))
+
+      # Suppress ONLY virtual decel/cancel so vCruise stays at the max ceiling (Unity behavior).
+      if (not virt_prev) and (prev in decel_vals) and (cur not in decel_vals):
+        ret.buttonEvents.append(_be(ButtonType.decelCruise, False))
+
+      if (not virt_prev) and (prev == 1) and (cur != 1):
+        ret.buttonEvents.append(_be(ButtonType.cancel, False))
+
+      if (prev == 2) and (cur != 2):
+        ret.buttonEvents.append(_be(ButtonType.resumeCruise, False))
+
+      self._prev_cruise_buttons = cur
+    except Exception:
+      pass
+
+
+    try:
+
+
+      self._update_adaptive_cruise_mode(now_ms=int(time.monotonic_ns()//1_000_000), v_ego_ms=float(ret.vEgo))
+
+
+    except Exception:
+
+
+      pass
+
+
+    # Unity parity: separate max cruise (planner/UI) from actual stock set speed when adaptive is enabled.
+    try:
+      prev_adapt = bool(getattr(self, "_prev_enable_adaptive_cruise", False))
+      now_adapt = bool(getattr(self, "enable_adaptive_cruise", False))
+      uom = str(getattr(self, "speed_units", "MPH") or "MPH")
+      vision_forced_lower = str(getattr(self, "_xnor_speed_limit_source", "")).startswith("vision_uk")
+      use_sl = bool(getattr(self._tinkla, "adjust_acc_with_speed_limit", False) or vision_forced_lower)
+      sl_target_ms = float(self._calc_speed_limit_target_ms(uom)) if use_sl else 0.0
+
+      # Unity parity: maintain a separate max cruise (planner/UI ceiling) so following a lead doesn't
+      # permanently lower vCruise.
+      if now_adapt:
+        actual_set_ms = float(getattr(self, "stock_cruise_set_speed_ms", 0.0) or 0.0)
+        if actual_set_ms <= 0.0:
+          actual_set_ms = float(ret.cruiseState.speed or 0.0)
+
+        if not prev_adapt:
+          # On engage, seed max from speed-limit (if available) else current set speed.
+          seed_ms = float(sl_target_ms) if sl_target_ms > 0.0 else float(actual_set_ms)
+          self.acc_speed_max_ms = float(max(float(ret.vEgoRaw), seed_ms, float(getattr(self, "acc_speed_max_ms", 0.0) or 0.0)))
+        else:
+          if sl_target_ms > 0.0:
+            # When speed-limit matching is active, keep max aligned to the current limit.
+            self.acc_speed_max_ms = float(max(float(ret.vEgoRaw), float(sl_target_ms)))
+          else:
+            # No valid limit: hold prior max (but never below current speed).
+            self.acc_speed_max_ms = float(max(float(ret.vEgoRaw), float(getattr(self, "acc_speed_max_ms", 0.0) or 0.0)))
+      else:
+        actual_set_ms = float(getattr(self, "stock_cruise_set_speed_ms", 0.0) or 0.0)
+        if actual_set_ms <= 0.0:
+          actual_set_ms = float(ret.cruiseState.speed or 0.0)
+        self.acc_speed_max_ms = 0.0
+
+      # Publish: cruiseState.speed = max cruise; cruiseState.speedCluster = actual Tesla set speed.
+      if now_adapt and (float(self.acc_speed_max_ms) > 0.1):
+        ret.cruiseState.speedCluster = max(float(actual_set_ms), 1e-3)
+        ret.cruiseState.speed = max(float(self.acc_speed_max_ms), 1e-3)
+
+        # XNOR longitudinal planner uses carState.vCruise (kph). Keep it at the ceiling while adaptive is enabled.
+
+        try:
+
+          ret.vCruise = float(self.acc_speed_max_ms) * CV.MS_TO_KPH
+
+        except Exception:
+
+          pass
+      else:
+        ret.cruiseState.speedCluster = max(float(ret.cruiseState.speed or 0.0), 1e-3)
+
+      ret.adaptiveCruiseEnabled = bool(now_adapt)
+      self._prev_enable_adaptive_cruise = bool(now_adapt)
+    except Exception:
+      ret.adaptiveCruiseEnabled = bool(getattr(self, "enable_adaptive_cruise", False))
+
+
+    return ret
+
+
+  def update_legacy(self, can_parsers) -> structs.CarState:
+    cp_party = can_parsers[Bus.party]
+    cp_ap_party = can_parsers[Bus.ap_party]
+    cp_pt = can_parsers[Bus.pt]
+    cp_ap_pt = can_parsers[Bus.ap_pt]
+    cp_chassis = can_parsers[Bus.chassis]
+    ret = structs.CarState()
+
+    # Vehicle speed
+    ret.vEgoRaw = cp_chassis.vl["ESP_B"]["ESP_vehicleSpeed"] * CV.KPH_TO_MS
+    if not math.isfinite(ret.vEgoRaw):
+      if not self._vego_nan_logged:
+        cloudlog.error(f"[XNOR_VEGO] non-finite vEgoRaw={ret.vEgoRaw!r} from ESP_B.ESP_vehicleSpeed")
+        self._vego_nan_logged = True
+      ret.vEgoRaw = 0.0
+      kf = getattr(self, "v_ego_kf", None)
+      if kf is not None and hasattr(kf, "x"):
+        try:
+          kf.x = [[0.0], [0.0]]
+        except Exception:
+          try:
+            kf.x = [0.0, 0.0]
+          except Exception:
+            pass
+    ret.vEgo, ret.aEgo = self.update_speed_kf(float(ret.vEgoRaw))
+    if (not math.isfinite(ret.vEgo)) or (not math.isfinite(ret.aEgo)):
+      if not self._vego_nan_logged:
+        cloudlog.error(f"[XNOR_VEGO] non-finite vEgo/aEgo from speed_kf vEgoRaw={ret.vEgoRaw!r}")
+        self._vego_nan_logged = True
+      ret.vEgoRaw = 0.0
+      ret.vEgo = 0.0
+      ret.aEgo = 0.0
+      kf = getattr(self, "v_ego_kf", None)
+      if kf is not None and hasattr(kf, "x"):
+        try:
+          kf.x = [[0.0], [0.0]]
+        except Exception:
+          try:
+            kf.x = [0.0, 0.0]
+          except Exception:
+            pass
+
+    # Gas pedal
+    ret.gasPressed = cp_pt.vl["DI_torque1"]["DI_pedalPos"] > 0
+
+    # Brake pedal
+    # Numeric brake is a deprecated nested Cap'n Proto field in 0.11.2.
+    # Only physical brakePressed is exposed to the control stack.
+    ret.brakePressed = cp_chassis.vl["BrakeMessage"]["driverBrakeStatus"] == 2
+
+    # Steering wheel
+    if self.CP.carFingerprint == CAR.TESLA_MODEL_S_HW3:
+      epas_status = cp_party.vl["EPAS_sysStatus"]
+    else:
+      epas_status = cp_chassis.vl["EPAS_sysStatus"]
+    self.hands_on_level = epas_status["EPAS_handsOnLevel"]
+    self.eac_status_raw = int(epas_status["EPAS_eacStatus"])
+    self.eac_error_code_raw = int(epas_status["EPAS_eacErrorCode"])
+    self.human_control = bool(self.hands_on_level >= 1)
+    ret.steeringAngleDeg = -epas_status["EPAS_internalSAS"]
+    ret.steeringRateDeg = -cp_chassis.vl["STW_ANGLHP_STAT"]["StW_AnglHP_Spd"]
+    ret.steeringTorque = -epas_status["EPAS_torsionBarTorque"]
+
+    # stock handsOnLevel uses >0.5 for 0.25s, but is too slow
+    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
+
+    eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
+    ret.steerFaultPermanent = eac_status == "EAC_FAULT"
+    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
+    # V203: userspace detected a timed-out co-op/native-drop re-arm. This must
+    # surface through the existing normal OP steering-fault alert/disengage path.
+    if self.hybrid_native_ap and bool(self._xnor_hybrid_epas_failed):
+      ret.steerFaultTemporary = True
+
+    # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
+    # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
+    # disengage path while Hybrid is selected. This matches the co-op native firmware behaviour
+    # without hiding a genuine EAC inhibit/fault.
+    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
+    if self.hybrid_native_ap or self.enableHSO:
+      ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
+                                                         eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
+    else:
+      ret.steeringDisengage = self.hands_on_level >= 3 or (eac_status == "EAC_INHIBITED" and
+                                                         eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
+
+    # V178: derive native LKAS from the parser that actually watches raw AP-side 0x488 on bus 2.
+    # The prior code read cp_ap_party (the mirrored STW parser on bus 130), so stockLkas stayed
+    # false even while genuine Tesla Autosteer was active. On this HW2 stream genuine native
+    # 0x488 transitions controlType 0 -> 1 -> 0; OP Hybrid templates are bus-0 TX and therefore
+    # cannot contaminate this raw bus-2 detector. Treat any non-zero native type as active so the
+    # detector remains compatible with firmware variants that may use type 2/3.
+    native_steer_type = int(cp_ap_pt.vl["DAS_steeringControl"]["DAS_steeringControlType"])
+    native_lkas_active = native_steer_type != 0
+    self.native_steer_angle_deg = float(cp_ap_pt.vl["DAS_steeringControl"]["DAS_steeringAngleRequest"])
+    self._update_native_alc_state(cp_ap_pt)
+
+    # Cruise state
+    cruise_state = self.can_defines["DI_state"]["DI_cruiseState"].get(int(cp_chassis.vl["DI_state"]["DI_cruiseState"]), None)
+    self.stock_cruise_state = str(cruise_state or "")
+    speed_units = self.can_defines["DI_state"]["DI_speedUnits"].get(int(cp_chassis.vl["DI_state"]["DI_speedUnits"]), None)
+
+    cruise_enabled = cruise_state in ("ENABLED", "STANDSTILL", "OVERRIDE", "PRE_FAULT", "PRE_CANCEL")
+    # Cruise set speed (DI_state): pick correct decoded field without changing the DBC
+    ret.cruiseState.enabled = cruise_enabled
+    uom = speed_units if speed_units in ("KPH", "MPH") else "MPH"
+    self.stock_cruise_enabled = bool(cruise_enabled)
+    self._update_cruise_set_speed(
+      ret,
+      cp_chassis.vl["DI_state"],
+      v_ego_ms=float(ret.vEgo),
+      raw_cruise_enabled=bool(cruise_enabled),
+      cruise_state=str(cruise_state or ""),
+      speed_units=uom,
+    )
+    ret.cruiseState.available = cruise_state == "STANDBY" or ret.cruiseState.enabled
+    ret.cruiseState.standstill = False  # This needs to be false, since we can resume from stop without sending anything special
+    ret.standstill = cruise_state == "STANDSTILL"
+    ret.accFaulted = cruise_state == "FAULT"
+
+    # Unity parity: store last STW_ACTN_RQ for virtual stalk + tap-to-ALC
+    self.speed_units = speed_units if speed_units in ("KPH", "MPH") else "MPH"
+
+
+    # Speed limit best-effort (needed for speed-limit matching)
+    self._update_speed_limit(can_parsers, v_ego_ms=float(ret.vEgo))
+
+    # XNOR Option 1: decode CSA curvature off the party parser (zero extra socket/deserialize).
+    self._decode_csa(cp_party)
+
+    stw = None
+    stw_bus = None
+    for bk in (Bus.party, Bus.chassis, Bus.pt, Bus.ap_party, Bus.ap_pt):
+      _cp = can_parsers.get(bk)
+      if _cp is None:
+        continue
+      try:
+        stw = _cp.vl["STW_ACTN_RQ"]
+        stw_bus = int(getattr(_cp, "bus", CANBUS.party))
+        break
+      except KeyError:
+        continue
+    if stw is not None:
+      self.msg_stw_actn_req = copy.copy(stw)
+      # Never transmit on CANBUS.radar (bus 1). Keep TX on CANBUS.party to avoid CAN errors.
+      self.stw_actn_bus = int(CANBUS.party)
+      self.cruise_buttons = int(stw.get("SpdCtrlLvr_Stat", 0))
+      # Unity parity: publish followDistanceS from stalk distance setting (DTR_Dist_Rq).
+      ret.followDistanceS = 255
+      try:
+        dtr = stw.get("DTR_Dist_Rq", 255)
+        self.cruise_distance = int(dtr) if dtr is not None else 255
+        if self.cruise_distance != 255:
+          # pos1=0, pos2=33, pos3=66, pos4=100, pos5=133, pos6=166, pos7=200, SNA=255
+          ret.followDistanceS = int(self.cruise_distance / 33)
+      except Exception:
+        self.cruise_distance = 255
+
+      raw_ts = int(stw.get("TurnIndLvr_Stat", 0))
+      self.turnSignalStalkState = self._filter_virtual_turn_stalk(raw_ts)
+    else:
+      self.cruise_buttons = 0
+      self.turnSignalStalkState = 0
+      self.tap_direction = 0
+      self.blinker_controller.tap_direction = 0
+
+
+    if self.autopilot_disabled or self.enableACC or self.hybrid_native_ap:
+      # OP lateral engagement source. In Hybrid, MAIN/CANCEL retains the later independent stalk
+      # latch while native Tesla TACC owns longitudinal. Native AP status only selects the proven
+      # steering carrier/recovery lifecycle.
+      if self.cruise_buttons == 2:  # MAIN
+        self.cruiseEnabled = True
+      if self.cruise_buttons == 1:  # CANCEL
+        self.cruiseEnabled = False
+
+
+    # Gear
+    ret.gearShifter = GEAR_MAP[self.can_defines["DI_torque2"]["DI_gear"].get(int(cp_chassis.vl["DI_torque2"]["DI_gear"]), "DI_GEAR_INVALID")]
+
+    # Doors
+    DOORS = ["DOOR_STATE_FL", "DOOR_STATE_FR", "DOOR_STATE_RL", "DOOR_STATE_RR", "DOOR_STATE_FrontTrunk", "BOOT_STATE"]
+    ret.doorOpen = any((self.can_defines["GTW_carState"][door].get(int(cp_chassis.vl["GTW_carState"][door]), "OPEN") == "OPEN") for door in DOORS)
+
+    # Blinkers
+    self.leftBlinkerLamp = cp_chassis.vl["GTW_carState"]["BC_indicatorLStatus"] == 1
+    self.rightBlinkerLamp = cp_chassis.vl["GTW_carState"]["BC_indicatorRStatus"] == 1
+
+    self._update_alc_state_from_plan(bool(self.cruiseEnabled))
+    self._apply_alc_blinkers(ret)
+
+    # HSO (Unity parity): use handsOnLevel for steeringPressed when enabled, but never during blinkers (preserve ALC)
+    self.HSOSteeringPressed = bool(getattr(self, "hands_on_level", 0.0) >= float(self._tinkla.hands_on_level))
+    if self.enableHSO and not (ret.leftBlinker or ret.rightBlinker):
+      ret.steeringPressed = self.HSOSteeringPressed
+
+    # Seatbelt
+    if self.CP.flags & TeslaLegacyParams.NO_SDM1:
+      ret.seatbeltUnlatched = cp_chassis.vl["RCM_status"]["RCM_buckleDriverStatus"] != 1
+    else:
+      ret.seatbeltUnlatched = cp_chassis.vl["SDM1"]["SDM_bcklDrivStatus"] != 1
+
+    if (self._param_frame % 100) == 0:
+      try:
+        self._reload_tinkla_params()
+        self.autopilot_disabled = bool(self._tinkla.autopilot_disabled)
+        self.enableHSO = bool(getattr(self._tinkla, 'enable_hso', True))
+        self.hsoNumbPeriod = float(getattr(self._tinkla, 'hso_numb_period', 1.5) or 1.5)
+        self.handsOnLimit = float(getattr(self._tinkla, 'hands_on_level', 2.0) or 2.0)
+      except Exception:
+        pass
+    self._param_frame += 1
+
+    if self.hybrid_native_ap:
+      # Exact V198 engagement contract: publish the independent MAIN/CANCEL latch through
+      # cruiseState so the normal PCM rising edge enables selfdrive. V201's VCruiseHelper override
+      # owns only planner set speed; it does not alter this engagement state.
+      ret.cruiseState.available = True
+      ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      self.cruiseEnabled = bool(ret.cruiseState.enabled)
+    elif self.autopilot_disabled or self.enableACC:
+      # Native-ACC (sub-17 TACC): openpilot is the longitudinal authority, engaged from the
+      # virtual cruise stalk (set just above) with NO stock-cruise dependency and NO 17.1 mph
+      # engage floor. This deliberately bypasses GATE B (_update_adaptive_cruise_mode, the
+      # stock-passthrough 17.1 mph lock) which a car without factory TACC cannot use anyway.
+      # Same door/gear/seatbelt sanity as the existing autopilot_disabled path.
+      ret.cruiseState.available = True
+      ret.cruiseState.enabled = bool(self.cruiseEnabled) and (not ret.doorOpen) and (ret.gearShifter == structs.CarState.GearShifter.drive) and (not ret.seatbeltUnlatched)
+      self.cruiseEnabled = bool(ret.cruiseState.enabled)
+
+    # AEB
+    ret.stockAeb = cp_ap_pt.vl["DAS_control"]["DAS_aebEvent"] == 1
+
+    # LKAS
+    ret.stockLkas = bool(native_lkas_active)  # native AP LANE_KEEP_ASSIST, raw bus-2 state
+    # V1.1: modeld must not begin an independent lane-change trajectory
+    # until EPAS and the idle native carrier are genuinely ready.
+    self._update_hybrid_alc_planner_ready(ret, native_lkas_active)
+
+    # Stock Autosteer should be off (includes FSD)
+    # ret.invalidLkasSetting = cp_ap_party.vl["DAS_settings"]["DAS_autosteerEnabled"] != 0
+
+    # Physical stalk events feed OP's set-speed helper. Hybrid MAIN/CANCEL engagement itself stays
+    # on V198's cruiseState edge; the two speed detents map to accel/decel press/release events.
+    # Build this as a normal Python list and assign it once complete. ret.buttonEvents is a
+    # Cap'n Proto list builder after assignment and does not support append(); V199 assigned []
+    # first, then silently discarded every physical stalk event in the broad exception below.
+    button_events = []
+    try:
+      prev_button = int(self._prev_cruise_buttons)
+      current_button = int(getattr(self, "cruise_buttons", 0))
+
+      def _button_event(event_type, pressed):
+        event = structs.CarState.ButtonEvent()
+        event.type = event_type
+        event.pressed = pressed
+        return event
+
+      if current_button == int(CruiseButtons.MAIN) and prev_button != int(CruiseButtons.MAIN):
+        button_events.append(_button_event(ButtonType.resumeCruise, True))
+      if prev_button == int(CruiseButtons.MAIN) and current_button != int(CruiseButtons.MAIN):
+        button_events.append(_button_event(ButtonType.resumeCruise, False))
+      if current_button == int(CruiseButtons.CANCEL) and prev_button != int(CruiseButtons.CANCEL):
+        button_events.append(_button_event(ButtonType.cancel, True))
+      if prev_button == int(CruiseButtons.CANCEL) and current_button != int(CruiseButtons.CANCEL):
+        button_events.append(_button_event(ButtonType.cancel, False))
+      if CruiseButtons.is_accel(current_button) and not CruiseButtons.is_accel(prev_button):
+        button_events.append(_button_event(ButtonType.accelCruise, True))
+      if CruiseButtons.is_accel(prev_button) and not CruiseButtons.is_accel(current_button):
+        button_events.append(_button_event(ButtonType.accelCruise, False))
+      if CruiseButtons.is_decel(current_button) and not CruiseButtons.is_decel(prev_button):
+        button_events.append(_button_event(ButtonType.decelCruise, True))
+      if CruiseButtons.is_decel(prev_button) and not CruiseButtons.is_decel(current_button):
+        button_events.append(_button_event(ButtonType.decelCruise, False))
+
+      self._prev_cruise_buttons = current_button
+    except Exception:
+      pass
+    ret.buttonEvents = button_events
+
+    # Buttons # ToDo: add Gap adjust button
+
+    # Messages needed by carcontroller
+    self.das_control = copy.copy(cp_ap_pt.vl["DAS_control"])
+
+
+    try:
+
+
+      self._update_adaptive_cruise_mode(now_ms=int(time.monotonic_ns()//1_000_000), v_ego_ms=float(ret.vEgo))
+
+
+    except Exception:
+
+
+      pass
+
+    ret.adaptiveCruiseEnabled = bool(getattr(self, "enable_adaptive_cruise", False))
+
+
+    return ret
+
+
+  @staticmethod
+  def get_can_parsers(CP):
+    """Return CANParsers keyed by opendbc.car.Bus.
+
+    XNOR note (HW2 legacy Tesla):
+      - canValid is computed as all(cp.can_valid for cp in can_parsers.values()) in interfaces.py.
+      - Therefore every parser included here must be pointed at a bus that actually carries the
+        messages we ask it to validate.
+      - On your HW2 wiring, we have measured:
+          STW_ACTN_RQ (0x045): rx_src 0 and 130 (~10Hz each)
+          DI_state    (0x368): rx_src 0, 4, 130 (~10Hz)
+          UI_gpsVehicleSpeed (0x2f8): rx_src 0 and 130 (~1Hz)
+          EPAS_sysStatus (0x370): rx_src 0 and 130 (~25Hz)
+          DAS_steeringControl (0x488): rx_src 2 and 128 (~50Hz)
+
+    This function is written to avoid CAN error false positives by:
+      - validating party on bus0
+      - validating the mirrored party on bus130 when multiple pandas are present
+      - validating powertrain on bus4
+      - validating steering-control bus on bus2
+    """
+    # Determine whether a mirrored party bus is present (2-panda HW2 setups).
+    num_pandas = int(getattr(CP, "numPandas", 1) or 1)
+    has_mirrored_party = num_pandas > 1
+
+    # Message validation lists (msg_name_or_addr, expected_hz).
+    party_checks = [
+      ("STW_ACTN_RQ", 10),
+      ("DI_state", 10),
+      ("UI_gpsVehicleSpeed", math.nan),
+      ("EPAS_sysStatus", 25),
+      # XNOR: decode Tesla CSA road curvature off the party bus we already parse.
+      # nan Hz so it never gates canValid (CSA can be absent off-route / on some cars).
+      ("UI_csaRoadCurvature", math.nan),
+    ]
+
+    mirrored_party_checks = [
+      ("STW_ACTN_RQ", 10),
+    ]
+
+    pt_checks = [
+      ("DI_state", 10),
+    ]
+
+    steer_checks = [
+      ("DAS_steeringControl", 50),
+      ("DAS_status2", math.nan),
+      ("AutopilotStatus", math.nan),  # raw 0x399 from AP bus; optional: must not gate canValid
+    ]
+
+    # Buses are the *rx_src* values we measured.
+    party_bus = CANBUS.party  # 0
+    mirrored_party_bus = 130  # measured mirror of party on HW2
+    pt_bus = CANBUS.powertrain  # 4
+    steer_bus = CANBUS.autopilot_party  # 2
+
+    # Base dict: always include the buses we truly rely on.
+    can_parsers = {
+      Bus.party: CANParser(DBC[CP.carFingerprint][Bus.party], party_checks, party_bus),
+      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_checks, pt_bus),
+      # Use Bus.ap_pt as the steering-control bus in legacy (0x488 observed on rx_src=2/128).
+      Bus.ap_pt: CANParser(DBC[CP.carFingerprint][Bus.party], steer_checks, steer_bus),
+    }
+
+    # Add mirrored party bus parser only when a 2nd panda is present.
+    if has_mirrored_party:
+      can_parsers[Bus.ap_party] = CANParser(DBC[CP.carFingerprint][Bus.party], mirrored_party_checks, mirrored_party_bus)
+    else:
+      # Single-panda fallback: keep API compatibility, but don't require a separate bus.
+      can_parsers[Bus.ap_party] = CANParser(DBC[CP.carFingerprint][Bus.party], [], CANBUS.autopilot_party)
+
+    # Keep these keys present for callers that expect them, but do not gate canValid on them.
+    # Empty check lists => cp.can_valid will converge to True once updated.
+    can_parsers[Bus.chassis] = CANParser(DBC[CP.carFingerprint][Bus.chassis], [], CANBUS.chassis if CP.carFingerprint == CAR.TESLA_MODEL_S_HW3 else CANBUS.party)
+    can_parsers[Bus.cam] = CANParser(
+      DBC[CP.carFingerprint][Bus.party],
+      [
+        ("UI_driverAssistRoadSign", math.nan),
+        ("UI_driverAssistMapData", math.nan),
+      ],
+      CANBUS.powertrain,
+    )
+
+    return can_parsers

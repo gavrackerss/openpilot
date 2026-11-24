@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# XNOR_BOOT_RAW_CAN_WATCH_V115_START
-# XNOR_V163_WATCHER_SEMANTIC_DIAG_ONLY
-if test -z "${XNOR_BOOT_RAW_CAN_WATCH_V115_DISABLE:-}" && test ! -e /tmp/xnor_boot_raw_can_watch_v115.started; then
-  touch /tmp/xnor_boot_raw_can_watch_v115.started 2>/dev/null || true
-  (
-    cd /data/openpilot 2>/dev/null || exit 0
-    nohup /usr/bin/env python3 tools/xnor_boot_raw_can_watch_v115.py --duration 210 --out-dir /data/openpilot/xnor_aeb_boot_capture --prefix xnor_boot_raw_can_v115 --max-jsonl-mb 2 --max-txt-kb 128 --quiet >/tmp/xnor_boot_raw_can_watch_v115.log 2>&1 &
-  ) >/dev/null 2>&1 || true
-fi
-# XNOR_BOOT_RAW_CAN_WATCH_V115_END
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
@@ -17,6 +7,7 @@ source "$DIR/launch_env.sh"
 function agnos_init {
   # TODO: move this to agnos
   sudo rm -f /data/etc/NetworkManager/system-connections/*.nmmeta
+  rm -f /data/scons_cache/config.lock
 
   # set success flag for current boot slot
   sudo abctl --set_success
@@ -28,12 +19,12 @@ function agnos_init {
 
   # Check if AGNOS update is required
   if [ $(< /VERSION) != "$AGNOS_VERSION" ]; then
-    AGNOS_PY="$DIR/system/hardware/tici/agnos.py"
-    MANIFEST="$DIR/system/hardware/tici/agnos.json"
+    AGNOS_PY="$DIR/openpilot/common/hardware/comma/agnos.py"
+    MANIFEST="$DIR/openpilot/system/hardware/comma/agnos.json"
     if $AGNOS_PY --verify $MANIFEST; then
       sudo reboot
     fi
-    $DIR/system/hardware/tici/updater $AGNOS_PY $MANIFEST
+    $DIR/openpilot/common/hardware/comma/updater $AGNOS_PY $MANIFEST
   fi
 }
 
@@ -79,6 +70,14 @@ function launch {
   ln -sfn $(pwd) /data/pythonpath
   export PYTHONPATH="$PWD"
 
+  # submodule package symlinks for PYTHONPATH imports on device.
+  # on PC these come from editable installs via pyproject.toml / uv.
+  ln -sfn msgq_repo/msgq msgq
+  ln -sfn opendbc_repo/opendbc opendbc
+  ln -sfn rednose_repo/rednose rednose
+  ln -sfn teleoprtc_repo/teleoprtc teleoprtc
+  ln -sfn tinygrad_repo/tinygrad tinygrad
+
   # hardware specific init
   if [ -f /AGNOS ]; then
     agnos_init
@@ -88,7 +87,7 @@ function launch {
   tmux capture-pane -pq -S-1000 > /tmp/launch_log
 
   # start manager
-  cd system/manager
+  cd openpilot/system/manager
   if [ ! -f $DIR/prebuilt ]; then
     ./build.py
   fi
