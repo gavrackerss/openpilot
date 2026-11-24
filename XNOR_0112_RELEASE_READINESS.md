@@ -78,6 +78,12 @@ The source comparison still identifies missing higher-level Hybrid
 brake/regen cancellation and automatic ACC resume integration.
 These are separate from DEC and the compiled safety tests.
 
+The draft runtime now includes a direct Tesla Hybrid brake/regen longitudinal
+inhibit in controlsd. This only narrows the existing native eligibility gate.
+The native selfdrived pedal disengagement remains unchanged. The legacy
+independent lateral engagement and automatic re-arm are not connected to
+live controls; the offline reference is not an approved vehicle port.
+
 ## Required before promotion
 
 - [ ] Final release revision and exact Panda/opendbc/tinygrad commits pinned,

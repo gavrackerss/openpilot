@@ -101,6 +101,13 @@ class Controls:
                    (not standstill or self.CP.steerAtStandstill)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl
 
+    # Tesla Hybrid: preserve the native longitudinal eligibility decision.
+    # A directly observed brake/regen request can only inhibit it. This is
+    # not the legacy automatic re-arm latch and never overrides selfdrived's
+    # native pedal disengagement or any existing event.
+    if self.CP.brand == 'tesla' and self.CP.pcmCruise and (CS.brakePressed or CS.regenBraking):
+      CC.longActive = False
+
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
 
