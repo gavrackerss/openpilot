@@ -25,7 +25,7 @@ class OffroadUIContract(unittest.TestCase):
     text = DEVELOPER.read_text()
     tree = ast.parse(text)
     methods = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-    self.assertIn("SpeedSignPreviewRow()", text)
+    self.assertIn("SpeedSignDemoRow(self._migration_offroad, self._preview_offset_settings)", text)
     self.assertIn("*self._migration_items", text)
     self.assertIn("item.set_visible(self._migration_offroad)", text)
     self.assertIn("ui_state.is_offroad()", ast.unparse(methods["_migration_offroad"]))
