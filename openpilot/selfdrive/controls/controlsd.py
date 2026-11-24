@@ -51,6 +51,7 @@ class Controls:
     self.calibrated_pose: Pose | None = None
 
     self.LoC = LongControl(self.CP)
+    self._xnor_hybrid_pedal_inhibited = False
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -101,12 +102,19 @@ class Controls:
                    (not standstill or self.CP.steerAtStandstill)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl
 
-    # Tesla Hybrid: preserve the native longitudinal eligibility decision.
-    # A directly observed brake/regen request can only inhibit it. This is
-    # not the legacy automatic re-arm latch and never overrides selfdrived's
-    # native pedal disengagement or any existing event.
-    if self.CP.brand == 'tesla' and self.CP.pcmCruise and (CS.brakePressed or CS.regenBraking):
-      CC.longActive = False
+    # Tesla Hybrid: latch longitudinal inhibition after a physical brake.
+    # Regen inhibits longitudinal while held. A completed native disengagement
+    # clears the latch; native eligibility is still required at every step.
+    # Never override selfdrived pedal events or automatically re-arm.
+    if self.CP.brand == 'tesla' and self.CP.pcmCruise:
+      if not CC.enabled:
+        self._xnor_hybrid_pedal_inhibited = False
+      elif CS.brakePressed:
+        self._xnor_hybrid_pedal_inhibited = True
+      if CS.brakePressed or CS.regenBraking or self._xnor_hybrid_pedal_inhibited:
+        CC.longActive = False
+    else:
+      self._xnor_hybrid_pedal_inhibited = False
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state

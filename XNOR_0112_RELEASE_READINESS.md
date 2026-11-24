@@ -78,8 +78,11 @@ The source comparison still identifies missing higher-level Hybrid
 brake/regen cancellation and automatic ACC resume integration.
 These are separate from DEC and the compiled safety tests.
 
-The draft runtime now includes a direct Tesla Hybrid brake/regen longitudinal
-inhibit in controlsd. This only narrows the existing native eligibility gate.
+The draft runtime now includes a Tesla Hybrid physical-brake longitudinal
+inhibition latch in controlsd. Regen inhibits while held. The latch clears on
+native disengagement, not automatically while engaged. This only narrows the
+existing native eligibility gate and is a conservative subset of the legacy
+behavior, not full V207/V234 parity.
 The native selfdrived pedal disengagement remains unchanged. The legacy
 independent lateral engagement and automatic re-arm are not connected to
 live controls; the offline reference is not an approved vehicle port.

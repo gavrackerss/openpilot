@@ -34,7 +34,8 @@ class TestPedalInhibit(unittest.TestCase):
     for brand, pcm, enabled, available, override, brake, regen in itertools.product(
         ("tesla", "other"), *[(False, True)] * 6):
       owner = NS(CP=NS(brand=brand, pcmCruise=pcm, openpilotLongitudinalControl=available),
-                 sm={"onroadEvents": [NS(overrideLongitudinal=override)]})
+                 sm={"onroadEvents": [NS(overrideLongitudinal=override)]},
+                 _xnor_hybrid_pedal_inhibited=False)
       cs = NS(brakePressed=brake, regenBraking=regen)
       def evaluate(code):
         cc = NS(enabled=enabled)
@@ -44,6 +45,36 @@ class TestPedalInhibit(unittest.TestCase):
       expected = before and not (brand == "tesla" and pcm and (brake or regen))
       self.assertEqual(after, expected)
       self.assertFalse(after and not before)
+
+  def test_latch_persists_until_native_disengagement(self):
+    native, candidate = candidate_block()
+    owner = NS(CP=NS(brand="tesla", pcmCruise=True, openpilotLongitudinalControl=True),
+               sm={"onroadEvents": []}, _xnor_hybrid_pedal_inhibited=False)
+    # Release and physical-input transitions cannot clear a held inhibition
+    # while native engagement remains active.
+    for enabled, brake, regen, expected, latched in (
+        (True, False, False, True, False),
+        (True, True, False, False, True),
+        (True, False, True, False, True),
+        (True, False, False, False, True),
+        (False, False, False, False, False),
+        (True, False, False, True, False),
+    ):
+      cc = NS(enabled=enabled)
+      cs = NS(brakePressed=brake, regenBraking=regen)
+      exec(candidate, dict(self=owner, CS=cs, CC=cc))
+      self.assertEqual(bool(cc.longActive), expected)
+      self.assertEqual(owner._xnor_hybrid_pedal_inhibited, latched)
+
+  def test_regen_alone_does_not_latch(self):
+    _, candidate = candidate_block()
+    owner = NS(CP=NS(brand="tesla", pcmCruise=True, openpilotLongitudinalControl=True),
+               sm={"onroadEvents": []}, _xnor_hybrid_pedal_inhibited=False)
+    for regen in (True, False):
+      cc = NS(enabled=True)
+      exec(candidate, dict(self=owner, CS=NS(brakePressed=False, regenBraking=regen), CC=cc))
+      self.assertEqual(bool(cc.longActive), not regen)
+      self.assertFalse(owner._xnor_hybrid_pedal_inhibited)
 
   def test_native_pedal_disengagement_is_unchanged(self):
     import subprocess
