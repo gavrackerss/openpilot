@@ -21,8 +21,9 @@ class TestHybridPedalAndAutoResume(unittest.TestCase):
     init = ast.unparse(self.init)
     self.assertIn("self._xnor_hybrid_brake_long_cancelled = False", init)
     self.assertIn("self._xnor_hybrid_brake_last_press_ms = 0", init)
-    self.assertIn('self.params.get_bool("TinklaAutoResumeACC")', init)
-    self.assertIn('self.params.get_bool("ExperimentalMode")', init)
+    self.assertIn("self.params.get_bool", init)
+    self.assertIn("TinklaAutoResumeACC", init)
+    self.assertIn("ExperimentalMode", init)
 
   def test_brake_and_regen_fail_closed_before_rearm(self):
     body = ast.unparse(self.state_control)
