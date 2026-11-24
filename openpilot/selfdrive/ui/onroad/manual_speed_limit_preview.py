@@ -28,6 +28,7 @@ SHADOW = rl.Color(0, 0, 0, 215)
 class ManualSpeedLimitPreview(Widget):
   def __init__(self):
     super().__init__()
+    self.set_enabled(False)
     self._font = gui_app.font(FontWeight.SEMI_BOLD)
     self._smaller_font = gui_app.font(FontWeight.MEDIUM)
 
@@ -119,3 +120,25 @@ class ManualSpeedLimitPreview(Widget):
         self._draw_tesla_cancel(box, False)
       else:
         self._draw_speed_sign(value, box, False, False)
+
+
+def main():
+  """Desktop-only preview; never start a second UI on the comma device."""
+  from openpilot.common.hardware import PC
+  if not PC:
+    raise RuntimeError("The preview requires a desktop checkout")
+  gui_app.init_window("XNOR 0.11.2 speed sign preview")
+  try:
+    preview = ManualSpeedLimitPreview()
+    for should_render, _, _ in gui_app.render():
+      if should_render:
+        width = min(900., gui_app.width - 20.)
+        if width >= 350. and gui_app.height >= 180:
+          preview.render(rl.Rectangle((gui_app.width-width)/2,
+                                      (gui_app.height-132)/2, width, 132))
+  finally:
+    gui_app.close()
+
+
+if __name__ == "__main__":
+  main()
