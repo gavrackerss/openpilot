@@ -5,7 +5,7 @@ on:
     branches: [xnor-dev]
     paths:
       - 'openpilot/sunnypilot/**'
-      - 'openpilot/selfdrive/mapd'
+      - 'selfdrive/mapd'
       - 'openpilot/system/manager/process_config.py'
       - 'openpilot/selfdrive/ui/ui_state.py'
       - 'openpilot/selfdrive/ui/layouts/settings/models.py'
@@ -28,9 +28,9 @@ jobs:
           submodules: false
       - name: Verify executable artifacts
         run: |
-          test -x openpilot/selfdrive/mapd
+          test -x selfdrive/mapd
           test -x openpilot/sunnypilot/modeld_v2/modeld
-          git ls-files -s openpilot/selfdrive/mapd openpilot/sunnypilot/modeld_v2/modeld
+          git ls-files -s selfdrive/mapd openpilot/sunnypilot/modeld_v2/modeld
       - name: Run XNOR runtime contracts
         run: |
           python3 tests/test_xnor_v0112_sunnypilot_port.py -v
