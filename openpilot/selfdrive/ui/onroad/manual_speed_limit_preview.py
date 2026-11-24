@@ -9,6 +9,7 @@ from __future__ import annotations
 import pyray as rl
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
+from openpilot.system.ui.lib.text_measure import measure_text_cached
 
 OPTIONS = ((40, "40"), (50, "50"), (60, "60"), (70, "NSL"), (0, "X"))
 
@@ -45,7 +46,7 @@ class ManualSpeedLimitPreview(Widget):
             for i in range(5)]
 
   def _draw_centered(self, text: str, font, size: float, rect: rl.Rectangle, color):
-    dims = rl.measure_text_ex(font, text, size, 0)
+    dims = measure_text_cached(font, text, size, 0)
     pos = rl.Vector2(rect.x + (rect.width - dims.x) / 2,
                      rect.y + (rect.height - dims.y) / 2)
     rl.draw_text_ex(font, text, rl.Vector2(pos.x + 2, pos.y + 2), size, 0, SHADOW)
@@ -55,11 +56,11 @@ class ManualSpeedLimitPreview(Widget):
     # Fit black speed numerals inside the circular white face, not the touch box.
     # Keep numerals approximately the same physical size as the previous UI while expanding the rings.
     font_size = radius * 1.22
-    dims = rl.measure_text_ex(self._font, speed, font_size, 0)
+    dims = measure_text_cached(self._font, speed, font_size, 0)
     # Leave visible white clearance between digits and the red ring.
     if dims.x > radius * 1.28:
       font_size *= (radius * 1.28) / dims.x
-      dims = rl.measure_text_ex(self._font, speed, font_size, 0)
+      dims = measure_text_cached(self._font, speed, font_size, 0)
     pos = rl.Vector2(center.x - dims.x / 2, center.y - dims.y / 2)
     rl.draw_text_ex(self._font, speed, pos, font_size, 0, SIGN_BLACK)
 
@@ -120,6 +121,27 @@ class ManualSpeedLimitPreview(Widget):
         self._draw_tesla_cancel(box, False)
       else:
         self._draw_speed_sign(value, box, False, False)
+
+
+
+class SpeedSignPreviewRow(Widget):
+  """Passive, scrollable settings-page sample; never an onroad overlay."""
+
+  def __init__(self):
+    super().__init__()
+    self.set_rect(rl.Rectangle(0, 0, 0, 170))
+    self.set_enabled(False)
+    self._preview = self._child(ManualSpeedLimitPreview())
+
+  def set_parent_rect(self, parent_rect: rl.Rectangle):
+    super().set_parent_rect(parent_rect)
+    self.set_rect(rl.Rectangle(self.rect.x, self.rect.y, parent_rect.width, 170))
+
+  def _render(self, rect: rl.Rectangle):
+    width = min(900., rect.width - 20.)
+    if width >= 350.:
+      self._preview.render(rl.Rectangle(rect.x + (rect.width-width)/2,
+                                        rect.y + 19, width, 132))
 
 
 def main():
