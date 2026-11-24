@@ -3,11 +3,49 @@ import operator
 import platform
 
 from opendbc.car.structs import car
+from openpilot.cereal import custom
 from openpilot.common.params import Params
 from openpilot.common.hardware import PC, COMMA_HARDWARE
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
+
+# XNOR SunnyPilot runtime selector. A broken/unsupported bundle must never
+# suppress stock modeld. Only verified Tinygrad bundles on comma hardware
+# are allowed to take modelV2 ownership.
+try:
+  from openpilot.sunnypilot.models.helpers import get_active_model_runner
+  XNOR_MODEL_SELECTOR_AVAILABLE = True
+except Exception as exc:
+  XNOR_MODEL_SELECTOR_AVAILABLE = False
+  print(f"XNOR_MODEL_SELECTOR: unavailable; forcing stock modeld: {exc!r}")
+
+  def get_active_model_runner(params: Params | None = None, force_check: bool = False):
+    return int(custom.ModelManagerSP.Runner.stock)
+
+_XNOR_MODEL_SELECTOR_RUNTIME_FAILED = False
+
+
+def _safe_model_runner(started: bool, params: Params) -> int:
+  global _XNOR_MODEL_SELECTOR_RUNTIME_FAILED
+  if not COMMA_HARDWARE or not XNOR_MODEL_SELECTOR_AVAILABLE or _XNOR_MODEL_SELECTOR_RUNTIME_FAILED:
+    return int(custom.ModelManagerSP.Runner.stock)
+  try:
+    return int(get_active_model_runner(params, force_check=not started))
+  except Exception as exc:
+    _XNOR_MODEL_SELECTOR_RUNTIME_FAILED = True
+    print(f"XNOR_MODEL_SELECTOR: runtime failure; forcing stock modeld for this boot: {exc!r}")
+    return int(custom.ModelManagerSP.Runner.stock)
+
+
+def is_tinygrad_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return COMMA_HARDWARE and _safe_model_runner(started, params) == int(custom.ModelManagerSP.Runner.tinygrad)
+
+
+def is_stock_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # SNPE, malformed and future/unknown runner values all fail closed to stock.
+  return not is_tinygrad_model(started, params, CP)
+
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
@@ -90,7 +128,7 @@ procs = [
   PythonProcess("micd", "openpilot.system.micd", iscar),
   PythonProcess("timed", "openpilot.system.timed", always_run, enabled=not PC),
 
-  PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", only_onroad),
+  PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", and_(only_onroad, is_stock_model)),
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
@@ -98,6 +136,7 @@ procs = [
   PythonProcess("soundd", "openpilot.selfdrive.ui.soundd", driverview),
   PythonProcess("v275shadowd", "openpilot.selfdrive.v275_shadow_manager", tesla_v275_shadow),
   PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", only_onroad),
+  NativeProcess("mapd", "openpilot/selfdrive", ["./mapd"], always_run, enabled=COMMA_HARDWARE),
   NativeProcess("_pandad", "openpilot/selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "openpilot.selfdrive.locationd.calibrationd", only_onroad),
   PythonProcess("torqued", "openpilot.selfdrive.locationd.torqued", only_onroad),
@@ -123,6 +162,7 @@ procs = [
   PythonProcess("updated", "openpilot.system.updated.updated", only_offroad, enabled=not PC),
   # Offroad-only catalogue/download manager. No custom model runner is started onroad.
   PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad),
+  NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2", ["./modeld"], and_(only_onroad, is_tinygrad_model), enabled=COMMA_HARDWARE),
   PythonProcess("uploader", "openpilot.system.loggerd.uploader", always_run),
 
   # debug procs
