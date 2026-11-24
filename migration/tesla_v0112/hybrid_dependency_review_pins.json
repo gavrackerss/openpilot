@@ -8,14 +8,16 @@
       "branch": "review/xnor-v0112-hybrid",
       "native_base": "fa83a40ad799c827ab9cbda4560cf3426531ceff",
       "review_commit": "d2900687ae9d984acd1ec2ef023677907536fe45",
-      "copied_files": 2
+      "copied_files": 2,
+      "review_tree": "13440823d737f4cec9f8fdd97c04ce0b296d0c63"
     },
     "opendbc_repo": {
       "repository": "https://github.com/gavrackerss/opendbc.git",
       "branch": "review/xnor-v0112-hybrid",
       "native_base": "3f86206a13c3181f0224e8f1424b836592e2b2d2",
       "review_commit": "d0f75528e7b080468285d5f25375fc247957cbf4",
-      "copied_files": 24
+      "copied_files": 24,
+      "review_tree": "4aedb49469994766f1ac643b457f0eded84c54ed"
     }
   },
   "all_copied_git_blob_ids_matched": true,
@@ -27,6 +29,35 @@
     "desktop_build_run": 45258532125,
     "vehicle_constructor_run": 45259610612
   },
-  "exact_review_revision_ci_verified": false,
-  "production_promotion_approved": false
+  "exact_review_revision_ci_verified": true,
+  "production_promotion_approved": false,
+  "review_revision_evidence": {
+    "scope": "Whole dependency Git tree parity and isolated compilation/host tests. Not vehicle qualification.",
+    "panda_arm": {
+      "run_id": 45404285671,
+      "job_id": 138480680649,
+      "openpilot_head": "ec9a6c9deaae1059dd766d0703a1f21dfaea920a",
+      "result": "success",
+      "f4_built": true,
+      "h7_built": true
+    },
+    "tesla_safety": {
+      "run_id": 45404276370,
+      "job_id": 138480648370,
+      "openpilot_head": "25333450d4e25da0f7640daf41e677c345e358b8",
+      "result": "success",
+      "passed": 308,
+      "skipped": 133,
+      "subtests_passed": 3
+    },
+    "native_full_build": {
+      "run_id": 45404266825,
+      "job_id": 138480619915,
+      "openpilot_head": "a68a8df3a88b142e61bbbaac1fb58427a050c682",
+      "result": "success",
+      "hw2_can_parsers": 6,
+      "model_y_can_parsers": 2,
+      "hybrid_owner_authorized": false
+    }
+  }
 }
