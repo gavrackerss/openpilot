@@ -100,7 +100,7 @@ class DeveloperLayout(Widget):
     self._native_model_item = text_item("Model runtime", "Native only",
                                         description="Custom model execution is not qualified on this port.")
     self._requested_model_item = button_item("Requested model", "SELECT",
-        description="Save a model preference only. This does not load a model or change driving behavior.",
+        description="Save a native model preference for modeld startup. Unqualified or unavailable models use stock.",
         callback=self._on_requested_model, enabled=self._migration_offroad)
     self._speed_sign_preview = SpeedSignDemoRow(self._migration_offroad, self._preview_offset_settings)
     self._migration_items = (self._saved_model_item, self._requested_model_item, self._native_model_item, self._speed_sign_preview)
@@ -164,7 +164,7 @@ class DeveloperLayout(Widget):
           save_request(self._params, selected, confirmed_offroad=self._migration_offroad())
         self._refresh_migration_items()
 
-    dialog = MultiOptionDialog("Requested model (not activation)", list(labels), current=current, callback=confirmed)
+    dialog = MultiOptionDialog("Requested native model", list(labels), current=current, callback=confirmed)
     gui_app.push_widget(dialog)
 
   def _render(self, rect):
