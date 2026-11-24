@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from openpilot.sunnypilot.models.catalog_guard import audit_bundle
 from openpilot.sunnypilot.models.artifact_audit import verify_artifacts
+from openpilot.sunnypilot.models.native_envelope import inspect_envelope
 
 
 def read_selection(offline_json: Path | None):
@@ -45,6 +46,7 @@ def main(argv=None) -> int:
   parser.add_argument("--offline-json", type=Path,
                       help="Inspect an exported JSON bundle without opening Params")
   parser.add_argument('--artifact-root', type=Path, help='Verify saved artifact bytes in this directory without deserialising')
+  parser.add_argument('--native-envelope', type=Path, help='Inspect a local compiled native bundle without loading it')
   args = parser.parse_args(argv)
   try:
     selected = read_selection(args.offline_json)
@@ -59,6 +61,10 @@ def main(argv=None) -> int:
     if args.artifact_root is not None:
       output['artifact_audit'] = asdict(verify_artifacts(selected, args.artifact_root))
       output['notice'] = 'Artifact integrity inspection; native ABI unverified; stock remains active'
+    if args.native_envelope is not None:
+      with args.native_envelope.open('rb') as stream:
+        output['native_envelope'] = asdict(inspect_envelope(stream))
+      output['notice'] = 'Native envelope framing inspected; native ABI unverified; stock remains active'
     print(json.dumps(output, indent=2, sort_keys=True))
     return 0
   except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
