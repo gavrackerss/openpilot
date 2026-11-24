@@ -131,6 +131,7 @@ class DeveloperLayout(Widget):
 
   def _refresh_migration_items(self):
     if not self._migration_offroad():
+      self._speed_sign_preview.reset_demo()
       self._saved_model_item.action_item.set_text("Not inspected")
       self._requested_model_item.action_item.set_value("")
       return
