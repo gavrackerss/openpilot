@@ -5,7 +5,7 @@ from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import toggle_item, text_item, button_item
 from openpilot.system.ui.widgets.option_dialog import MultiOptionDialog
 from openpilot.sunnypilot.models.requested_model import CHOICES, REQUEST_KEY, requested_label, requested_ref, save_request
-from openpilot.selfdrive.ui.onroad.manual_speed_limit_preview import SpeedSignPreviewRow
+from openpilot.selfdrive.ui.onroad.manual_speed_limit_demo import SpeedSignDemoRow
 from openpilot.sunnypilot.models.catalog_guard import audit_bundle
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
@@ -102,7 +102,7 @@ class DeveloperLayout(Widget):
     self._requested_model_item = button_item("Requested model", "SELECT",
         description="Save a model preference only. This does not load a model or change driving behavior.",
         callback=self._on_requested_model, enabled=self._migration_offroad)
-    self._speed_sign_preview = SpeedSignPreviewRow()
+    self._speed_sign_preview = SpeedSignDemoRow(self._migration_offroad, self._preview_offset_settings)
     self._migration_items = (self._saved_model_item, self._requested_model_item, self._native_model_item, self._speed_sign_preview)
     for item in self._migration_items:
       item.set_visible(self._migration_offroad)
@@ -120,6 +120,11 @@ class DeveloperLayout(Widget):
 
     # Toggles should be not available to change in onroad state
     ui_state.add_offroad_transition_callback(self._update_toggles)
+
+  def _preview_offset_settings(self):
+    return (float(self._params.get('TinklaSpeedLimitOffset') or 0.),
+            self._params.get_bool('TinklaSpeedLimitUseRelative'),
+            self._params.get_bool('IsMetric'))
 
   def _migration_offroad(self):
     return bool(ui_state.is_offroad() and self._params.get_bool("IsOffroad"))
