@@ -60,6 +60,7 @@ class UIState:
         "testJoystick",
         "rawAudioData",
         "modelManagerSP",
+        "mapdOut",
       ]
     )
 
