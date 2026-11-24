@@ -1,0 +1,122 @@
+name: XNOR 0.11.2 exact promotion candidate Tesla regression review
+on:
+  push:
+    branches: ['review/xnor-v0112-promotion']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  exact-pinned-tesla-host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact pinned Hybrid trees
+        run: |
+          git submodule update --init panda opendbc_repo
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          def git(*args):
+            return subprocess.check_output(['git', *args], text=True).strip()
+          pins = json.loads(Path('migration/tesla_v0112/hybrid_dependency_review_pins.json').read_text())
+          for name, dep in pins['dependencies'].items():
+            assert git('rev-parse', 'HEAD:' + name) == dep['review_commit']
+            assert git('-C', name, 'rev-parse', 'HEAD') == dep['review_commit']
+            assert git('-C', name, 'rev-parse', 'HEAD^{tree}') == dep['review_tree']
+          print('Exact pinned Hybrid trees verified')
+          PY
+      - name: Run staged vehicle contracts against byte-identical pinned sources
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          stage = Path('migration/tesla_v0112/hybrid_panda_candidate/opendbc/car/tesla')
+          actual = Path('opendbc_repo/opendbc/car/tesla')
+          for name in ('carstate.py', 'carcontroller.py', 'teslacan.py'):
+            assert (stage / name).read_bytes() == (actual / name).read_bytes(), name
+          print('Actual pinned Tesla sources match contract fixtures')
+          PY
+          python3 tests/test_xnor_v0112_tesla_vehicle_contract.py -v
+          python3 tests/test_xnor_v0112_tesla_hybrid_long_owner.py -v
+      - name: Compile and run host-only safety smoke using actual pinned opendbc
+        run: |
+          cc -fPIC -Wall -Wextra -Werror -nostdlib -fno-builtin \
+            -std=gnu11 -Wfatal-errors -Wno-pointer-to-int-cast -DALLOW_DEBUG \
+            -I opendbc_repo -c opendbc_repo/opendbc/safety/tests/libsafety/safety.c \
+            -o "$RUNNER_TEMP/safety.o"
+          cc -shared "$RUNNER_TEMP/safety.o" -o "$RUNNER_TEMP/safety.so"
+          cc -Wall -Wextra -Werror -std=gnu11 -DALLOW_DEBUG -I opendbc_repo \
+            migration/tesla_v0112/hybrid_panda_candidate/host_tests/test_hybrid_panda.c \
+            -o "$RUNNER_TEMP/hybrid-host-smoke" -lm
+          "$RUNNER_TEMP/hybrid-host-smoke"
+      - name: Execute actual pinned Tesla safety regression suite
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tesla-tests"
+          "$RUNNER_TEMP/tesla-tests/bin/pip" install --disable-pip-version-check -e ./opendbc_repo 'cffi>=1.16' 'pytest>=8'
+          cd opendbc_repo
+          "$RUNNER_TEMP/tesla-tests/bin/python" -m pytest -q \
+            opendbc/safety/tests/test_tesla.py \
+            opendbc/safety/tests/test_tesla_hw1.py \
+            opendbc/safety/tests/test_tesla_hw23.py \
+            opendbc/safety/tests/test_tesla_hybrid_packet.py
+  upgrade-feature-parity-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+      - name: Compare current production and review source
+        run: |
+          python3 - <<'PY'
+          import ast, json, subprocess
+          from pathlib import Path
+          baseline = 'c62e6423874f37f0afb27773027fd15464489c1f'
+          def old(path):
+            return subprocess.check_output(['git', 'show', baseline + ':' + path], text=True)
+          def method_source(source, method):
+            tree = ast.parse(source)
+            return '\n'.join(ast.get_source_segment(source, n) or '' for n in ast.walk(tree)
+                             if isinstance(n, ast.FunctionDef) and n.name == method)
+          control_old = old('selfdrive/controls/controlsd.py')
+          control_new = Path('openpilot/selfdrive/controls/controlsd.py').read_text()
+          planner_old = old('selfdrive/controls/lib/longitudinal_planner.py')
+          planner_new = Path('openpilot/selfdrive/controls/lib/longitudinal_planner.py').read_text()
+          findings = []
+          checks = [
+            ('Hybrid brake/regen latch', '_xnor_hybrid_brake_last_press_ms', control_old, control_new),
+            ('Hybrid automatic ACC resume', 'TinklaAutoResumeACC', control_old, control_new),
+            ('Dynamic Experimental Control', 'class XnorDynamicExperimentalControl', planner_old, planner_new),
+          ]
+          for name, marker, before, after in checks:
+            findings.append({'feature': name, 'baseline_marker_present': marker in before,
+                             'candidate_marker_present': marker in after,
+                             'source_parity_missing': marker in before and marker not in after})
+          report = {'baseline': baseline, 'candidate': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+                    'scope': 'source marker comparison only, not proof of behavioral equivalence',
+                    'ls2_in_scope': False, 'qcom_rebenchmark_required': False,
+                    'findings': findings, 'vehicle_qualified': False}
+          Path('tesla-upgrade-parity.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tesla-upgrade-parity
+          path: tesla-upgrade-parity.json
+      - name: Do not mistake missing feature parity for a successful release
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('tesla-upgrade-parity.json').read_text())
+          missing = [x['feature'] for x in report['findings'] if x['source_parity_missing']]
+          if missing:
+            raise SystemExit('Upgrade parity not established: ' + ', '.join(missing))
+          print('Marker check passed; independent behavior review still needed')
+          PY
