@@ -97,6 +97,11 @@ def main():
                     outcome="Native desktop compiler and its JIT round-trip tests passed")
       from openpilot.sunnypilot.models.desktop_candidate_runner import inspect_compiled_candidate
       report["inference"] = inspect_compiled_candidate(target, verified["candidate_abi"])
+      # Exercise the same isolated loader used by the native QCOM bench,
+      # against the already-built CPU artifact; no extra compiler run.
+      from xnor_v0112_native_candidate_bench import inspect_local_artifact
+      report["isolated_loader"] = inspect_local_artifact(
+        target, verified["candidate_abi"], "CPU", (1344, 760))
       report["outcome"] = "Native desktop candidate compiled and synthetic recurrent inference passed"
       if args.replay_npz is not None or args.synthetic_replay:
         from openpilot.sunnypilot.models.desktop_paired_replay import load_replay, replay_compiled, make_synthetic_replay
