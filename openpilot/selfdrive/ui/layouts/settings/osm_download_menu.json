@@ -1,0 +1,693 @@
+{
+  "nation": {
+    "AE": {
+      "full_name": "United Arab Emirates"
+    },
+    "AF": {
+      "full_name": "Afghanistan"
+    },
+    "AL": {
+      "full_name": "Albania"
+    },
+    "AM": {
+      "full_name": "Armenia"
+    },
+    "AO": {
+      "full_name": "Angola"
+    },
+    "AQ": {
+      "full_name": "Antarctica"
+    },
+    "AR": {
+      "full_name": "Argentina"
+    },
+    "AT": {
+      "full_name": "Austria"
+    },
+    "AU": {
+      "full_name": "Australia"
+    },
+    "AZ": {
+      "full_name": "Azerbaijan"
+    },
+    "BA": {
+      "full_name": "Bosnia and Herzegovina"
+    },
+    "BD": {
+      "full_name": "Bangladesh"
+    },
+    "BE": {
+      "full_name": "Belgium"
+    },
+    "BF": {
+      "full_name": "Burkina Faso"
+    },
+    "BG": {
+      "full_name": "Bulgaria"
+    },
+    "BI": {
+      "full_name": "Burundi"
+    },
+    "BJ": {
+      "full_name": "Benin"
+    },
+    "BN": {
+      "full_name": "Brunei"
+    },
+    "BO": {
+      "full_name": "Bolivia"
+    },
+    "BR": {
+      "full_name": "Brazil"
+    },
+    "BS": {
+      "full_name": "Bahamas"
+    },
+    "BT": {
+      "full_name": "Bhutan"
+    },
+    "BW": {
+      "full_name": "Botswana"
+    },
+    "BY": {
+      "full_name": "Belarus"
+    },
+    "BZ": {
+      "full_name": "Belize"
+    },
+    "CA": {
+      "full_name": "Canada"
+    },
+    "CD": {
+      "full_name": "Congo (Kinshasa)"
+    },
+    "CF": {
+      "full_name": "Central African Republic"
+    },
+    "CG": {
+      "full_name": "Congo (Brazzaville)"
+    },
+    "CH": {
+      "full_name": "Switzerland"
+    },
+    "CI": {
+      "full_name": "Ivory Coast"
+    },
+    "CL": {
+      "full_name": "Chile"
+    },
+    "CM": {
+      "full_name": "Cameroon"
+    },
+    "CN": {
+      "full_name": "China"
+    },
+    "CO": {
+      "full_name": "Colombia"
+    },
+    "CR": {
+      "full_name": "Costa Rica"
+    },
+    "CU": {
+      "full_name": "Cuba"
+    },
+    "CY": {
+      "full_name": "Cyprus"
+    },
+    "CZ": {
+      "full_name": "Czech Republic"
+    },
+    "DE": {
+      "full_name": "Germany"
+    },
+    "DJ": {
+      "full_name": "Djibouti"
+    },
+    "DK": {
+      "full_name": "Denmark"
+    },
+    "DO": {
+      "full_name": "Dominican Republic"
+    },
+    "DZ": {
+      "full_name": "Algeria"
+    },
+    "EC": {
+      "full_name": "Ecuador"
+    },
+    "EE": {
+      "full_name": "Estonia"
+    },
+    "EG": {
+      "full_name": "Egypt"
+    },
+    "ER": {
+      "full_name": "Eritrea"
+    },
+    "ES": {
+      "full_name": "Spain"
+    },
+    "ET": {
+      "full_name": "Ethiopia"
+    },
+    "FI": {
+      "full_name": "Finland"
+    },
+    "FJ": {
+      "full_name": "Fiji"
+    },
+    "FK": {
+      "full_name": "Falkland Islands"
+    },
+    "FR": {
+      "full_name": "France"
+    },
+    "GA": {
+      "full_name": "Gabon"
+    },
+    "GB": {
+      "full_name": "United Kingdom"
+    },
+    "GE": {
+      "full_name": "Georgia"
+    },
+    "GH": {
+      "full_name": "Ghana"
+    },
+    "GL": {
+      "full_name": "Greenland"
+    },
+    "GM": {
+      "full_name": "Gambia"
+    },
+    "GN": {
+      "full_name": "Guinea"
+    },
+    "GQ": {
+      "full_name": "Equatorial Guinea"
+    },
+    "GR": {
+      "full_name": "Greece"
+    },
+    "GT": {
+      "full_name": "Guatemala"
+    },
+    "GW": {
+      "full_name": "Guinea Bissau"
+    },
+    "GY": {
+      "full_name": "Guyana"
+    },
+    "HN": {
+      "full_name": "Honduras"
+    },
+    "HR": {
+      "full_name": "Croatia"
+    },
+    "HT": {
+      "full_name": "Haiti"
+    },
+    "HU": {
+      "full_name": "Hungary"
+    },
+    "ID": {
+      "full_name": "Indonesia"
+    },
+    "IE": {
+      "full_name": "Ireland"
+    },
+    "IL": {
+      "full_name": "Israel"
+    },
+    "IN": {
+      "full_name": "India"
+    },
+    "IQ": {
+      "full_name": "Iraq"
+    },
+    "IR": {
+      "full_name": "Iran"
+    },
+    "IS": {
+      "full_name": "Iceland"
+    },
+    "IT": {
+      "full_name": "Italy"
+    },
+    "JM": {
+      "full_name": "Jamaica"
+    },
+    "JO": {
+      "full_name": "Jordan"
+    },
+    "JP": {
+      "full_name": "Japan"
+    },
+    "KE": {
+      "full_name": "Kenya"
+    },
+    "KG": {
+      "full_name": "Kyrgyzstan"
+    },
+    "KH": {
+      "full_name": "Cambodia"
+    },
+    "KP": {
+      "full_name": "North Korea"
+    },
+    "KR": {
+      "full_name": "South Korea"
+    },
+    "KW": {
+      "full_name": "Kuwait"
+    },
+    "KZ": {
+      "full_name": "Kazakhstan"
+    },
+    "LA": {
+      "full_name": "Laos"
+    },
+    "LB": {
+      "full_name": "Lebanon"
+    },
+    "LK": {
+      "full_name": "Sri Lanka"
+    },
+    "LR": {
+      "full_name": "Liberia"
+    },
+    "LS": {
+      "full_name": "Lesotho"
+    },
+    "LT": {
+      "full_name": "Lithuania"
+    },
+    "LU": {
+      "full_name": "Luxembourg"
+    },
+    "LV": {
+      "full_name": "Latvia"
+    },
+    "LY": {
+      "full_name": "Libya"
+    },
+    "MA": {
+      "full_name": "Morocco"
+    },
+    "MD": {
+      "full_name": "Moldova"
+    },
+    "ME": {
+      "full_name": "Montenegro"
+    },
+    "MG": {
+      "full_name": "Madagascar"
+    },
+    "MK": {
+      "full_name": "Macedonia"
+    },
+    "ML": {
+      "full_name": "Mali"
+    },
+    "MM": {
+      "full_name": "Myanmar"
+    },
+    "MN": {
+      "full_name": "Mongolia"
+    },
+    "MR": {
+      "full_name": "Mauritania"
+    },
+    "MW": {
+      "full_name": "Malawi"
+    },
+    "MX": {
+      "full_name": "Mexico"
+    },
+    "MY": {
+      "full_name": "Malaysia"
+    },
+    "MZ": {
+      "full_name": "Mozambique"
+    },
+    "NA": {
+      "full_name": "Namibia"
+    },
+    "NC": {
+      "full_name": "New Caledonia"
+    },
+    "NE": {
+      "full_name": "Niger"
+    },
+    "NG": {
+      "full_name": "Nigeria"
+    },
+    "NI": {
+      "full_name": "Nicaragua"
+    },
+    "NL": {
+      "full_name": "Netherlands"
+    },
+    "NO": {
+      "full_name": "Norway"
+    },
+    "NP": {
+      "full_name": "Nepal"
+    },
+    "NZ": {
+      "full_name": "New Zealand"
+    },
+    "OM": {
+      "full_name": "Oman"
+    },
+    "PA": {
+      "full_name": "Panama"
+    },
+    "PE": {
+      "full_name": "Peru"
+    },
+    "PG": {
+      "full_name": "Papua New Guinea"
+    },
+    "PH": {
+      "full_name": "Philippines"
+    },
+    "PK": {
+      "full_name": "Pakistan"
+    },
+    "PL": {
+      "full_name": "Poland"
+    },
+    "PR": {
+      "full_name": "Puerto Rico"
+    },
+    "PS": {
+      "full_name": "West Bank"
+    },
+    "PT": {
+      "full_name": "Portugal"
+    },
+    "PY": {
+      "full_name": "Paraguay"
+    },
+    "QA": {
+      "full_name": "Qatar"
+    },
+    "RO": {
+      "full_name": "Romania"
+    },
+    "RS": {
+      "full_name": "Serbia"
+    },
+    "RU": {
+      "full_name": "Russia"
+    },
+    "RW": {
+      "full_name": "Rwanda"
+    },
+    "SA": {
+      "full_name": "Saudi Arabia"
+    },
+    "SB": {
+      "full_name": "Solomon Islands"
+    },
+    "SD": {
+      "full_name": "Sudan"
+    },
+    "SE": {
+      "full_name": "Sweden"
+    },
+    "SI": {
+      "full_name": "Slovenia"
+    },
+    "SK": {
+      "full_name": "Slovakia"
+    },
+    "SL": {
+      "full_name": "Sierra Leone"
+    },
+    "SN": {
+      "full_name": "Senegal"
+    },
+    "SO": {
+      "full_name": "Somalia"
+    },
+    "SR": {
+      "full_name": "Suriname"
+    },
+    "SS": {
+      "full_name": "South Sudan"
+    },
+    "SV": {
+      "full_name": "El Salvador"
+    },
+    "SY": {
+      "full_name": "Syria"
+    },
+    "SZ": {
+      "full_name": "Swaziland"
+    },
+    "TD": {
+      "full_name": "Chad"
+    },
+    "TF": {
+      "full_name": "French Southern Territories"
+    },
+    "TG": {
+      "full_name": "Togo"
+    },
+    "TH": {
+      "full_name": "Thailand"
+    },
+    "TJ": {
+      "full_name": "Tajikistan"
+    },
+    "TL": {
+      "full_name": "East Timor"
+    },
+    "TM": {
+      "full_name": "Turkmenistan"
+    },
+    "TN": {
+      "full_name": "Tunisia"
+    },
+    "TR": {
+      "full_name": "Turkey"
+    },
+    "TT": {
+      "full_name": "Trinidad and Tobago"
+    },
+    "TW": {
+      "full_name": "Taiwan"
+    },
+    "TZ": {
+      "full_name": "Tanzania"
+    },
+    "UA": {
+      "full_name": "Ukraine"
+    },
+    "UG": {
+      "full_name": "Uganda"
+    },
+    "US": {
+      "full_name": "United States"
+    },
+    "UY": {
+      "full_name": "Uruguay"
+    },
+    "UZ": {
+      "full_name": "Uzbekistan"
+    },
+    "VE": {
+      "full_name": "Venezuela"
+    },
+    "VN": {
+      "full_name": "Vietnam"
+    },
+    "VU": {
+      "full_name": "Vanuatu"
+    },
+    "YE": {
+      "full_name": "Yemen"
+    },
+    "ZA": {
+      "full_name": "South Africa"
+    },
+    "ZM": {
+      "full_name": "Zambia"
+    },
+    "ZW": {
+      "full_name": "Zimbabwe"
+    }
+  },
+  "us_state": {
+    "AK": {
+      "full_name": "Alaska"
+    },
+    "AL": {
+      "full_name": "Alabama"
+    },
+    "AR": {
+      "full_name": "Arkansas"
+    },
+    "AS": {
+      "full_name": "American Samoa"
+    },
+    "AZ": {
+      "full_name": "Arizona"
+    },
+    "CA": {
+      "full_name": "California"
+    },
+    "CO": {
+      "full_name": "Colorado"
+    },
+    "CT": {
+      "full_name": "Connecticut"
+    },
+    "DC": {
+      "full_name": "District of Columbia"
+    },
+    "DE": {
+      "full_name": "Delaware"
+    },
+    "FL": {
+      "full_name": "Florida"
+    },
+    "GA": {
+      "full_name": "Georgia"
+    },
+    "GM": {
+      "full_name": "Guam"
+    },
+    "HI": {
+      "full_name": "Hawaii"
+    },
+    "IA": {
+      "full_name": "Iowa"
+    },
+    "ID": {
+      "full_name": "Idaho"
+    },
+    "IL": {
+      "full_name": "Illinois"
+    },
+    "IN": {
+      "full_name": "Indiana"
+    },
+    "KS": {
+      "full_name": "Kansas"
+    },
+    "KY": {
+      "full_name": "Kentucky"
+    },
+    "LA": {
+      "full_name": "Louisiana"
+    },
+    "MA": {
+      "full_name": "Massachusetts"
+    },
+    "MD": {
+      "full_name": "Maryland"
+    },
+    "ME": {
+      "full_name": "Maine"
+    },
+    "MI": {
+      "full_name": "Michigan"
+    },
+    "MN": {
+      "full_name": "Minnesota"
+    },
+    "MO": {
+      "full_name": "Missouri"
+    },
+    "MP": {
+      "full_name": "Northern Mariana Islands"
+    },
+    "MS": {
+      "full_name": "Mississippi"
+    },
+    "MT": {
+      "full_name": "Montana"
+    },
+    "NC": {
+      "full_name": "North Carolina"
+    },
+    "ND": {
+      "full_name": "North Dakota"
+    },
+    "NE": {
+      "full_name": "Nebraska"
+    },
+    "NH": {
+      "full_name": "New Hampshire"
+    },
+    "NJ": {
+      "full_name": "New Jersey"
+    },
+    "NM": {
+      "full_name": "New Mexico"
+    },
+    "NV": {
+      "full_name": "Nevada"
+    },
+    "NY": {
+      "full_name": "New York"
+    },
+    "OH": {
+      "full_name": "Ohio"
+    },
+    "OK": {
+      "full_name": "Oklahoma"
+    },
+    "OR": {
+      "full_name": "Oregon"
+    },
+    "PA": {
+      "full_name": "Pennsylvania"
+    },
+    "PR": {
+      "full_name": "Puerto Rico"
+    },
+    "RI": {
+      "full_name": "Rhode Island"
+    },
+    "SC": {
+      "full_name": "South Carolina"
+    },
+    "SD": {
+      "full_name": "South Dakota"
+    },
+    "TN": {
+      "full_name": "Tennessee"
+    },
+    "TX": {
+      "full_name": "Texas"
+    },
+    "UT": {
+      "full_name": "Utah"
+    },
+    "VA": {
+      "full_name": "Virginia"
+    },
+    "VI": {
+      "full_name": "Virgin Islands"
+    },
+    "VT": {
+      "full_name": "Vermont"
+    },
+    "WA": {
+      "full_name": "Washington"
+    },
+    "WI": {
+      "full_name": "Wisconsin"
+    },
+    "WV": {
+      "full_name": "West Virginia"
+    },
+    "WY": {
+      "full_name": "Wyoming"
+    }
+  }
+}

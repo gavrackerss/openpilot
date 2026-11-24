@@ -58,6 +58,11 @@ def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
+
+def tesla_v275_shadow(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return bool(started and getattr(CP, "brand", "") == "tesla" and os.path.isfile("/data/V275_Shadow/ENABLED"))
+
+
 def livestream(started: bool, params: Params, CP: car.CarParams) -> bool:
   return params.get_bool("IsLiveStreaming")
 
@@ -91,6 +96,7 @@ procs = [
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
   PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run),
   PythonProcess("soundd", "openpilot.selfdrive.ui.soundd", driverview),
+  PythonProcess("v275shadowd", "openpilot.selfdrive.v275_shadow_manager", tesla_v275_shadow),
   PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", only_onroad),
   NativeProcess("_pandad", "openpilot/selfdrive/pandad", ["./pandad"], always_run, enabled=False),
   PythonProcess("calibrationd", "openpilot.selfdrive.locationd.calibrationd", only_onroad),
