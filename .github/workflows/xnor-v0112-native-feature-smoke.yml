@@ -1,0 +1,64 @@
+name: XNOR 0.11.2 native desktop model and UI smoke
+
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+    paths:
+      - 'openpilot/sunnypilot/models/**'
+      - 'openpilot/selfdrive/modeld/**'
+      - 'openpilot/selfdrive/ui/**'
+      - 'tools/xnor_v0112_native_feature_smoke.py'
+      - '.github/workflows/xnor-v0112-native-feature-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-desktop-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CI: '1'
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: lfs.fetchexclude
+      GIT_CONFIG_VALUE_0: openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Initialise pinned native dependencies
+        run: |
+          git submodule update --init opendbc_repo panda
+          git submodule update --init --recursive msgq_repo rednose_repo teleoprtc_repo tinygrad_repo
+      - name: Install desktop build and virtual display dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev xvfb xauth libgl1-mesa-dri libglx-mesa0
+          ./tools/setup_dependencies.sh
+          git lfs pull --exclude='openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx'
+      - name: Compile native XNOR stock model and desktop runtime
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          .venv/bin/scons --minimal -j2
+      - name: Inspect real compiled stock model envelope and metadata
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          export PYTHONPATH="$PWD:$PWD/tinygrad_repo"
+          DEV=CPU:LLVM .venv/bin/python tools/xnor_v0112_native_feature_smoke.py stock
+      - name: Render original sign artwork with native fonts under Xvfb
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          export PYTHONPATH="$PWD:$PWD/tinygrad_repo"
+          xvfb-run -a -s '-screen 0 1920x1080x24' .venv/bin/python tools/xnor_v0112_native_feature_smoke.py ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xnor-v0112-speed-sign-preview
+          path: speed-sign-preview.png
+          if-no-files-found: error
+      - name: Report qualification boundary
+        run: |
+          echo 'Desktop stock bundle and noninteractive visual preview only.'
+          echo 'No model substitution, manager, cruise commands, CAN, Panda flash or vehicle control.'
