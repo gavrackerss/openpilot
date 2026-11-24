@@ -45,7 +45,13 @@ def verify_artifacts(selected: object, root: Path) -> ArtifactAudit:
   seen: dict[str, str] = {}
   for model in selected["models"]:
     for artifact in (model["artifact"], model.get("metadata")):
-      if not artifact or not artifact.get("fileName"):
+      if artifact is None or artifact == {}:
+        continue
+      if not isinstance(artifact, dict):
+        issues.append("Invalid artifact descriptor")
+        continue
+      if not artifact.get("fileName"):
+        issues.append("Missing artifact filename")
         continue
       name = artifact["fileName"]
       path = root / name
