@@ -46,7 +46,7 @@ def inspect_compiled_candidate(path: Path, expected_abi: dict) -> dict:
     durations = []
     previous_features = None
     feature_changes = 0
-    for i in range(12):
+    for _i in range(12):
       # Distinct synthetic frames, not actual driving or camera capture.
       frame = Tensor(rng.integers(0, 256, nv12_size, dtype=np.uint8), device=Device.DEFAULT).realize()
       wide = Tensor(rng.integers(0, 256, nv12_size, dtype=np.uint8), device=Device.DEFAULT).realize()

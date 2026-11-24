@@ -39,11 +39,20 @@ def verify_artifacts(selected: object, root: Path) -> ArtifactAudit:
   catalog = audit_bundle(selected)
   if catalog.metadata_issues:
     return ArtifactAudit(catalog.requested_name, catalog.metadata_issues, 0, 0)
+  if not isinstance(selected, dict):
+    return ArtifactAudit(catalog.requested_name, ("Invalid selected bundle",), 0, 0)
+  models = selected.get("models")
+  if not isinstance(models, list):
+    return ArtifactAudit(catalog.requested_name, ("Invalid model list",), 0, 0)
+
   root = Path(root)
   issues: list[str] = []
   files = total = 0
   seen: dict[str, str] = {}
-  for model in selected["models"]:
+  for model in models:
+    if not isinstance(model, dict):
+      issues.append("Invalid model descriptor")
+      continue
     for artifact in (model["artifact"], model.get("metadata")):
       if artifact is None or artifact == {}:
         continue

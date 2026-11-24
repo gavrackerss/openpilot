@@ -10,7 +10,7 @@ from datetime import datetime
 import re
 
 import requests
-from requests.exceptions import (SSLError, RequestException, HTTPError)
+from requests.exceptions import RequestException
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.models.helpers import is_bundle_version_compatible
@@ -152,7 +152,7 @@ class ModelFetcher:
     self._last_clock_log_mono = -1e9
 
   def _wall_clock_valid(self) -> bool:
-    now = time.time()
+    now = time.time_ns() / 1_000_000_000
     return self.MIN_VALID_UNIX_TIME <= now <= self.MAX_VALID_UNIX_TIME
 
   def _consume_force_refresh(self) -> bool:

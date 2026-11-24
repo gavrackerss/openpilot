@@ -6,6 +6,7 @@ import wave
 
 from openpilot.cereal import log, messaging
 from openpilot.common.basedir import BASEDIR
+from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.utils import retry
@@ -31,6 +32,18 @@ if HARDWARE.get_device_type() == "tizi":
   VOLUME_BASE = 10
 
 AudibleAlert = log.SelfdriveState.AudibleAlert
+
+_XNOR_START_STOP_ALERTS = (AudibleAlert.engage, AudibleAlert.disengage)
+_XNOR_PROMPT_ALERTS = (AudibleAlert.prompt, AudibleAlert.promptRepeat, AudibleAlert.promptDistracted)
+
+
+def apply_xnor_sound_preferences(alert, mute_start_stop: bool, mute_prompts: bool):
+  """Mute only optional chimes; never suppress warning/refuse/critical alerts."""
+  if mute_start_stop and alert in _XNOR_START_STOP_ALERTS:
+    return AudibleAlert.none
+  if mute_prompts and alert in _XNOR_PROMPT_ALERTS:
+    return AudibleAlert.none
+  return alert
 
 
 sound_list: dict[int, tuple[str, int | None, float]] = {
@@ -61,6 +74,10 @@ def check_selfdrive_timeout_alert(sm):
 
 class Soundd:
   def __init__(self):
+    self.params = Params()
+    self._xnor_pref_refresh = 0.0
+    self._xnor_mute_start_stop = False
+    self._xnor_mute_prompts = False
     self.load_sounds()
 
     self.current_alert = AudibleAlert.none
@@ -140,9 +157,27 @@ class Soundd:
       self.current_alert = new_alert
       self.current_sound_frame = 0
 
+  def _refresh_xnor_sound_preferences(self):
+    now = time.monotonic()
+    if now - self._xnor_pref_refresh < 0.5:
+      return
+    self._xnor_pref_refresh = now
+    try:
+      self._xnor_mute_start_stop = self.params.get_bool("TinklaDisableStartStopSounds")
+      self._xnor_mute_prompts = self.params.get_bool("TinklaDisablePromptSounds")
+    except Exception:
+      # Sound preferences are optional; warnings must continue normally on any read failure.
+      self._xnor_mute_start_stop = False
+      self._xnor_mute_prompts = False
+
   def get_audible_alert(self, sm):
+    self._refresh_xnor_sound_preferences()
     if sm.updated['selfdriveState']:
-      new_alert = sm['selfdriveState'].alertSound.raw
+      new_alert = apply_xnor_sound_preferences(
+        sm['selfdriveState'].alertSound.raw,
+        self._xnor_mute_start_stop,
+        self._xnor_mute_prompts,
+      )
       self.update_alert(new_alert)
     elif check_selfdrive_timeout_alert(sm):
       self.update_alert(AudibleAlert.warningImmediate)

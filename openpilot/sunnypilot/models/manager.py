@@ -28,8 +28,8 @@ class ModelManagerSP:
     self.model_fetcher = ModelFetcher(self.params)
     self.pm = messaging.PubMaster(["modelManagerSP"])
     self.available_models: list[custom.ModelManagerSP.ModelBundle] = []
-    self.selected_bundle: custom.ModelManagerSP.ModelBundle = None
-    self.active_bundle: custom.ModelManagerSP.ModelBundle = get_active_bundle(self.params)
+    self.selected_bundle: custom.ModelManagerSP.ModelBundle | None = None
+    self.active_bundle: custom.ModelManagerSP.ModelBundle | None = get_active_bundle(self.params)
     self._chunk_size = 128 * 1000  # 128 KB chunks
     self._download_start_times: dict[str, float] = {}  # Track start time per model
 
@@ -69,7 +69,7 @@ class ModelManagerSP:
         total_size = int(response.headers.get("content-length", 0))
         bytes_downloaded = 0
 
-        with open(path, 'wb') as f:
+        with open(path, 'wb') as f:  # noqa: ASYNC230
           async for chunk in response.content.iter_chunked(self._chunk_size):  # type: bytes
             f.write(chunk)
             bytes_downloaded += len(chunk)
@@ -124,7 +124,7 @@ class ModelManagerSP:
           try:
             async with session.get(chunk_url) as response:
               response.raise_for_status()
-              with open(temp_path, 'wb') as stream:
+              with open(temp_path, 'wb') as stream:  # noqa: ASYNC230
                 async for block in response.content.iter_chunked(self._chunk_size):
                   if self.params.get("ModelManager_DownloadIndex") is None:
                     raise RuntimeError("Model download cancelled")
@@ -141,7 +141,7 @@ class ModelManagerSP:
               raise ValueError(f"Model chunk {i+1}/{num_chunks} SHA-256 mismatch")
             os.replace(temp_path, chunk_path)
           finally:
-            if os.path.exists(temp_path):
+            if os.path.exists(temp_path):  # noqa: ASYNC240
               os.remove(temp_path)
     finally:
       self._download_start_times.pop(artifact.fileName, None)
@@ -151,10 +151,10 @@ class ModelManagerSP:
       for i, chunk in enumerate(chunks):
         if not await verify_file(get_chunk_name(base_path, i, num_chunks), chunk.sha256):
           raise ValueError(f"Model chunk {i+1}/{num_chunks} failed verification")
-    with open(manifest_path + ".partial", 'w', encoding='utf-8') as f:
+    with open(manifest_path + ".partial", 'w', encoding='utf-8') as f:  # noqa: ASYNC230
       f.write(str(num_chunks))
     os.replace(manifest_path + ".partial", manifest_path)
-    if os.path.isfile(base_path):
+    if os.path.isfile(base_path):  # noqa: ASYNC240
       os.remove(base_path)
 
   async def _process_artifact(self, artifact, destination_path: str) -> None:
@@ -197,12 +197,13 @@ class ModelManagerSP:
     except Exception as e:
       cloudlog.error(f"Error downloading {filename}: {str(e)}")
       for f in [full_path] + [p for p in (os.path.join(destination_path, f) for f in os.listdir(destination_path)) if filename in p]:
-        if os.path.isfile(f):
+        if os.path.isfile(f):  # noqa: ASYNC240
           os.remove(f)
       artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.failed
       artifact.downloadProgress.eta = 0
       self._sync_artifact_progress(artifact)
-      self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.failed
+      if self.selected_bundle is not None:
+        self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.failed
       self._report_status()
       self._download_start_times.pop(artifact.fileName, None)
       raise
@@ -254,7 +255,8 @@ class ModelManagerSP:
       self.selected_bundle = None
 
     except Exception:
-      self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.failed
+      if self.selected_bundle is not None:
+        self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.failed
       raise
 
     finally:

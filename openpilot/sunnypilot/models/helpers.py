@@ -10,6 +10,7 @@ requested bundle and a diagnostic explanation available for repair.
 """
 
 import hashlib
+import json
 import os
 import pickle
 from pathlib import Path
@@ -165,7 +166,9 @@ def get_active_bundle(params: Params | None = None, raw_bundle_dict: dict | byte
   params = params or Params()
   try:
     raw = raw_bundle_dict if raw_bundle_dict is not None else (params.get('ModelManager_ActiveBundle') or {})
-    if raw and is_bundle_version_compatible(raw):
+    if isinstance(raw, bytes):
+      raw = json.loads(raw.decode("utf-8"))
+    if isinstance(raw, dict) and raw and is_bundle_version_compatible(raw):
       return custom.ModelManagerSP.ModelBundle(**raw)
   except Exception as exc:
     cloudlog.error(f'Unable to parse saved ModelManager_ActiveBundle: {exc}')
@@ -267,7 +270,6 @@ def load_meta_constants(model_metadata: dict):
 def plan_x_idxs_helper(constants, plan, model_output) -> list[float]:
   LINE_T_IDXS = [np.nan] * constants.IDX_N
   LINE_T_IDXS[0] = 0.0
-  plan_x = model_output['plan'][0, :, plan.POSITION][:, 0].tolist()
   for xidx in range(1, constants.IDX_N):
     tidx = 0
     while tidx < constants.IDX_N - 1 and model_output['plan'][0, tidx + 1, plan.POSITION][0] < constants.X_IDXS[xidx]:
