@@ -4,6 +4,9 @@ on:
     branches: ['upgrade/xnor-v0112-xnor-base', 'upgrade/xnor-v0112-hybrid-build-verification']
     paths:
       - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'migration/tesla_v0112/hybrid_dependency_review_pins.json'
+      - 'tools/xnor_v0112_verify_hybrid_review_pins.py'
+      - '.gitmodules'
       - 'tools/xnor_v0112_assemble_hybrid_candidate.py'
       - 'tools/xnor_v0112_scratch_tesla_runtime_probe.py'
       - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
@@ -52,6 +55,20 @@ jobs:
             "$RUNNER_TEMP/xnor-v0112-full-hybrid/XNOR_HYBRID_ASSEMBLY_MANIFEST.json"
           git -C "$RUNNER_TEMP/xnor-v0112-full-hybrid/opendbc_repo" diff --check
           git -C "$RUNNER_TEMP/xnor-v0112-full-hybrid/panda" diff --check
+
+      - name: Verify full patch tree matches committed Hybrid forks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_verify_hybrid_review_pins.py \
+            --panda "$RUNNER_TEMP/xnor-v0112-full-hybrid/panda" \
+            --opendbc "$RUNNER_TEMP/xnor-v0112-full-hybrid/opendbc_repo" \
+            --report "$RUNNER_TEMP/hybrid-review-parity.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-review-source-parity
+          path: ${{ runner.temp }}/hybrid-review-parity.json
+          if-no-files-found: error
 
       - name: Initialize only remaining stock source dependencies
         shell: bash
