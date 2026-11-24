@@ -111,6 +111,8 @@ jobs:
         run: python3 tools/xnor_v0112_planner_differential.py
       - name: Compare native and legacy brake and regen event generation
         run: python3 tools/xnor_v0112_pedal_event_differential.py
+      - name: Compare integrated reference with exact production latch
+        run: python3 tools/xnor_v0112_hybrid_reference_parity.py
       - uses: actions/upload-artifact@v4
         with:
           name: tesla-upgrade-parity
@@ -118,6 +120,7 @@ jobs:
             tesla-upgrade-parity.json
             tesla-planner-differential.json
             tesla-pedal-event-differential.json
+            tesla-hybrid-reference-parity.json
       - name: Do not mistake missing feature parity for a successful release
         run: |
           python3 - <<'PY'
