@@ -11,7 +11,7 @@ from openpilot.cereal import custom
 from openpilot.selfdrive.ui.layouts.settings.xnor_panel import XnorPanel
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.models.requested_model import CHOICES, REQUEST_KEY, requested_label, requested_ref, save_request
-from openpilot.system.hardware.hw import Paths
+from openpilot.sunnypilot.models.paths import model_root
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import DialogResult
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
@@ -135,7 +135,7 @@ class ModelsLayout(XnorPanel):
 
   @staticmethod
   def _cache_size() -> str:
-    root = Paths.model_root()
+    root = model_root()
     try:
       total = sum(
         os.path.getsize(os.path.join(base, name))
