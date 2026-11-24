@@ -41,7 +41,7 @@ jobs:
         run: |
           export PATH="$PWD/.venv/bin:$PATH"
           .venv/bin/scons --minimal -j2
-      - name: Inspect real compiled stock model envelope and metadata
+      - name: Run real compiled stock model on synthetic frames and export metadata
         run: |
           export PATH="$PWD/.venv/bin:$PATH"
           export PYTHONPATH="$PWD:$PWD/tinygrad_repo"
@@ -56,7 +56,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: xnor-v0112-speed-sign-preview
-          path: speed-sign-preview.png
+          path: |
+            speed-sign-preview.png
+            native-stock-abi.json
           if-no-files-found: error
       - name: Report qualification boundary
         run: |
