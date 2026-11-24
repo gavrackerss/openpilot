@@ -269,7 +269,7 @@ class OSMLayout(XnorPanel):
 
   def _download_status(self) -> str:
     if self._cancel_pending:
-      return "Cancelling" if self._is_downloading() else "Cancelled"
+      return "Canceling" if self._is_downloading() else "Cancelled"
     if self._tmp_files > 0:
       return f"Downloading / Updating ({self._format_bytes(self._tmp_bytes)})"
     if self._request_pending:
