@@ -270,7 +270,6 @@ def load_meta_constants(model_metadata: dict):
 def plan_x_idxs_helper(constants, plan, model_output) -> list[float]:
   LINE_T_IDXS = [np.nan] * constants.IDX_N
   LINE_T_IDXS[0] = 0.0
-  plan_x = model_output['plan'][0, :, plan.POSITION][:, 0].tolist()
   for xidx in range(1, constants.IDX_N):
     tidx = 0
     while tidx < constants.IDX_N - 1 and model_output['plan'][0, tidx + 1, plan.POSITION][0] < constants.X_IDXS[xidx]:
