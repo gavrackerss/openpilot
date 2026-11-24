@@ -50,10 +50,14 @@ class RequestedModelTests(unittest.TestCase):
     self.assertEqual(requested_ref("another-model", {"ref": OPM10V3}), "another-model")
     self.assertEqual(requested_label("another-model", None), "Other saved model")
 
-  def test_persistent_parameter_and_native_runner_isolation(self):
+  def test_persistent_parameter_and_native_runner_selection(self):
     self.assertIn('{"XNORRequestedModelRef", {PERSISTENT, STRING}}',
                   (ROOT / "openpilot/common/params_keys.h").read_text())
-    self.assertNotIn(REQUEST_KEY, (ROOT / "openpilot/selfdrive/modeld/modeld.py").read_text())
+    modeld = (ROOT / "openpilot/selfdrive/modeld/modeld.py").read_text()
+    self.assertIn("selection_from_params(params, backend", modeld)
+    self.assertIn("load_verified_bundle(native_selection)", modeld)
+    from openpilot.sunnypilot.models.native_selection import APPROVED_NATIVE_ARTIFACTS
+    self.assertEqual(APPROVED_NATIVE_ARTIFACTS, {}, "New approvals require independent qualification")
 
 
 if __name__ == "__main__":
