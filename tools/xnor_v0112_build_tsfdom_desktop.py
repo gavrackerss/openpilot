@@ -48,7 +48,9 @@ def main():
   parser = argparse.ArgumentParser()
   parser.add_argument("--source-checkout", type=Path, required=True)
   parser.add_argument("--report", type=Path, default=Path("tsfdom-native-build.json"))
-  parser.add_argument("--replay-npz", type=Path, help="Optional paired recorded NV12 model inputs")
+  replay = parser.add_mutually_exclusive_group()
+  replay.add_argument("--replay-npz", type=Path, help="Optional paired recorded NV12 model inputs")
+  replay.add_argument("--synthetic-replay", action="store_true", help="Exercise both models with a deterministic synthetic fixture")
   parser.add_argument("--replay-report", type=Path, default=Path("tsfdom-paired-replay.json"))
   args = parser.parse_args()
   source = args.source_checkout.resolve()
@@ -96,9 +98,13 @@ def main():
       from openpilot.sunnypilot.models.desktop_candidate_runner import inspect_compiled_candidate
       report["inference"] = inspect_compiled_candidate(target, verified["candidate_abi"])
       report["outcome"] = "Native desktop candidate compiled and synthetic recurrent inference passed"
-      if args.replay_npz is not None:
-        from openpilot.sunnypilot.models.desktop_paired_replay import load_replay, replay_compiled
-        camera, arrays = load_replay(args.replay_npz)
+      if args.replay_npz is not None or args.synthetic_replay:
+        from openpilot.sunnypilot.models.desktop_paired_replay import load_replay, replay_compiled, make_synthetic_replay
+        replay_path = args.replay_npz
+        if args.synthetic_replay:
+          replay_path = temp / "synthetic.npz"
+          make_synthetic_replay(replay_path)
+        camera, arrays = load_replay(replay_path)
         stock_target = temp / "stock.pkl"
         subprocess.run([sys.executable, str(COMPILER),
                         "--model-size", "512x256",
@@ -110,10 +116,12 @@ def main():
         candidate_rows = replay_compiled(target, verified["candidate_abi"], camera, arrays)
         args.replay_report.write_text(json.dumps({
           "camera_size": camera, "frames": len(stock_rows),
+          "synthetic_only": args.synthetic_replay,
           "stock": stock_rows, "tsfdom": candidate_rows,
           "action_semantics_verified": False, "vehicle_qualified": False,
         }, indent=2) + "\n")
         report["paired_replay_frames"] = len(stock_rows)
+        report["paired_replay_synthetic"] = args.synthetic_replay
   except Exception as exc:
     report["error"] = str(exc)
     raise
