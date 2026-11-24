@@ -2,7 +2,9 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.widgets.list_view import toggle_item, text_item
+from openpilot.system.ui.widgets.list_view import toggle_item, text_item, button_item
+from openpilot.system.ui.widgets.option_dialog import MultiOptionDialog
+from openpilot.sunnypilot.models.requested_model import CHOICES, REQUEST_KEY, requested_label, requested_ref, save_request
 from openpilot.selfdrive.ui.onroad.manual_speed_limit_preview import SpeedSignPreviewRow
 from openpilot.sunnypilot.models.catalog_guard import audit_bundle
 from openpilot.system.ui.widgets.scroller_tici import Scroller
@@ -93,12 +95,15 @@ class DeveloperLayout(Widget):
     self._on_enable_ui_debug(self._params.get_bool("ShowDebugInfo"))
 
     # Migration diagnostics: show requested selection separately from native runtime.
-    # This page is deliberately read-only and hidden whenever offroad is unconfirmed.
+    # Runtime diagnostics are read-only. The preference selector is offroad-only.
     self._saved_model_item = text_item("Saved SunnyPilot model", "Not inspected")
     self._native_model_item = text_item("Model runtime", "Native only",
                                         description="Custom model execution is not qualified on this port.")
+    self._requested_model_item = button_item("Requested model", "SELECT",
+        description="Save a model preference only. This does not load a model or change driving behavior.",
+        callback=self._on_requested_model, enabled=self._migration_offroad)
     self._speed_sign_preview = SpeedSignPreviewRow()
-    self._migration_items = (self._saved_model_item, self._native_model_item, self._speed_sign_preview)
+    self._migration_items = (self._saved_model_item, self._requested_model_item, self._native_model_item, self._speed_sign_preview)
     for item in self._migration_items:
       item.set_visible(self._migration_offroad)
     self._scroller = Scroller([
@@ -122,9 +127,11 @@ class DeveloperLayout(Widget):
   def _refresh_migration_items(self):
     if not self._migration_offroad():
       self._saved_model_item.action_item.set_text("Not inspected")
+      self._requested_model_item.action_item.set_value("")
       return
     try:
       saved = self._params.get("ModelManager_ActiveBundle")
+      self._requested_model_item.action_item.set_value(requested_label(self._params.get(REQUEST_KEY), saved))
       report = audit_bundle(saved)
       name = report.requested_name or ("No saved selection" if saved is None else "Invalid selection")
       # TextAction displays plain text; strip newlines/control characters and bound length.
@@ -135,6 +142,24 @@ class DeveloperLayout(Widget):
         "Catalogue metadata requires review.") + " This does not confirm the selected model is running.")
     except (ValueError, TypeError, OSError):
       self._saved_model_item.action_item.set_text("Unavailable")
+
+  def _on_requested_model(self):
+    if not self._migration_offroad():
+      return
+    legacy = self._params.get("ModelManager_ActiveBundle")
+    current_ref = requested_ref(self._params.get(REQUEST_KEY), legacy)
+    labels = {f"{choice.label} - {choice.status}": choice.ref for choice in CHOICES}
+    current = next((label for label, ref in labels.items() if ref == current_ref), "")
+
+    def confirmed(result):
+      if result == DialogResult.CONFIRM and self._migration_offroad():
+        selected = labels.get(dialog.selection)
+        if selected is not None:
+          save_request(self._params, selected, confirmed_offroad=self._migration_offroad())
+        self._refresh_migration_items()
+
+    dialog = MultiOptionDialog("Requested model (not activation)", list(labels), current=current, callback=confirmed)
+    gui_app.push_widget(dialog)
 
   def _render(self, rect):
     self._scroller.render(rect)
