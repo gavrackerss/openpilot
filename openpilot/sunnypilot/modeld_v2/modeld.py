@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """SunnyPilot downloaded-model runtime adapted to XNOR openpilot 0.11.2.
 
 Only verified bundles selected by ModelManagerSP reach this process. Stock
