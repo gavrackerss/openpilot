@@ -23,8 +23,11 @@ class SpeedSignDemoRow(ManualSpeedLimitPreview):
     super().set_parent_rect(parent_rect)
     self.set_rect(rl.Rectangle(self.rect.x, self.rect.y, parent_rect.width, 170))
 
-  def hide_event(self):
+  def reset_demo(self):
     self._demo.reset()
+
+  def hide_event(self):
+    self.reset_demo()
     super().hide_event()
 
   def _update_state(self):
