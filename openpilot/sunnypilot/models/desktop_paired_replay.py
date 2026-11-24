@@ -15,6 +15,25 @@ MAX_FRAMES = 256
 MAX_ARCHIVE_BYTES = 2 * 1024**3
 
 
+def make_synthetic_replay(path: Path):
+  """Deterministic fixture for CI, not evidence of driving behavior."""
+  import numpy as np
+  from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+  camera = (1344, 760)
+  nbytes = get_nv12_info(*camera)[3]
+  n = 12
+  rng = np.random.default_rng(20261124)
+  tfm = np.repeat(np.eye(3, dtype=np.float32)[None, :, :], n, axis=0)
+  desire = np.zeros((n, 8), dtype=np.float32)
+  desire[3:6, 1] = 1
+  np.savez(path, camera_size=np.array(camera, dtype=np.int32),
+           road=rng.integers(0, 256, size=(n, nbytes), dtype=np.uint8),
+           wide=rng.integers(0, 256, size=(n, nbytes), dtype=np.uint8),
+           road_tfm=tfm, wide_tfm=tfm.copy(), desire_pulse=desire,
+           traffic_convention=np.repeat(np.array([[1, 0]], dtype=np.float32), n, axis=0),
+           action_t=np.repeat(np.array([[.2, .3]], dtype=np.float32), n, axis=0))
+
+
 def load_replay(path: Path):
   import numpy as np
   path = Path(path)
