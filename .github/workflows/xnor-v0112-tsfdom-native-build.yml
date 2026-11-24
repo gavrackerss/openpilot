@@ -7,6 +7,7 @@ on:
       - 'tools/xnor_v0112_build_tsfdom_desktop.py'
       - 'openpilot/sunnypilot/models/native_abi.py'
       - 'openpilot/sunnypilot/models/desktop_candidate_runner.py'
+      - 'openpilot/sunnypilot/models/desktop_paired_replay.py'
       - 'migration/sunnypilot_legacy/tsfdom_native_abi_report.json'
       - '.github/workflows/xnor-v0112-tsfdom-native-build.yml'
   workflow_dispatch:
@@ -52,7 +53,7 @@ jobs:
         run: |
           export PATH="$PWD/.venv/bin:$PATH"
           export PYTHONPATH="$PWD:$PWD/tinygrad_repo"
-          .venv/bin/python tools/xnor_v0112_build_tsfdom_desktop.py --source-checkout ../upstream-tsfdom
+          .venv/bin/python tools/xnor_v0112_build_tsfdom_desktop.py --source-checkout ../upstream-tsfdom --synthetic-replay
       - name: Publish explicit compilation outcome
         if: always()
         working-directory: xnor
@@ -80,5 +81,7 @@ jobs:
         if: always()
         with:
           name: tsfdom-native-build-report
-          path: xnor/tsfdom-native-build.json
+          path: |
+            xnor/tsfdom-native-build.json
+            xnor/tsfdom-paired-replay.json
           if-no-files-found: warn
