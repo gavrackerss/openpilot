@@ -4,6 +4,8 @@ on:
     branches: ['upgrade/xnor-v0112-xnor-base']
     paths:
       - 'tools/xnor_v0112_opm10v3_reference.py'
+      - 'tools/xnor_v0112_opm10v3_camera.py'
+      - 'openpilot/sunnypilot/models/desktop_paired_replay.py'
       - '.github/workflows/xnor-v0112-opm10v3-reference.yml'
   workflow_dispatch:
 permissions:
@@ -36,12 +38,14 @@ jobs:
         run: python -m pip install 'numpy==2.2.6' 'onnxruntime==1.22.1'
       - name: Run recurrent split inference against original parser
         working-directory: xnor
-        run: python tools/xnor_v0112_opm10v3_reference.py --source-checkout ../upstream
+        run: python tools/xnor_v0112_opm10v3_reference.py --source-checkout ../upstream --synthetic-nv12
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: opm10v3-reference-report
-          path: xnor/opm10v3-reference.json
+          path: |
+            xnor/opm10v3-reference.json
+            xnor/opm10v3-paired-replay.json
           if-no-files-found: error
       - name: Qualification boundary
         run: echo 'CPU synthetic reference only. No AGNOS runtime, CAN, cruise commands or vehicle control.'
