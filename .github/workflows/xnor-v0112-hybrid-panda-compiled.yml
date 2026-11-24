@@ -7,6 +7,9 @@ on:
       - 'upgrade/xnor-v0112-hybrid-build-verification'
     paths:
       - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'migration/tesla_v0112/hybrid_dependency_review_pins.json'
+      - 'tools/xnor_v0112_verify_hybrid_review_pins.py'
+      - '.gitmodules'
       - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
       - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
       - 'tests/test_xnor_v0112_full_hybrid_panda.py'
@@ -58,6 +61,20 @@ jobs:
           grep -q 'fwd_msg = tesla_hybrid_dispatch_fwd_msg' "$RUNNER_TEMP/opendbc-hybrid/opendbc/safety/modes/tesla_legacy.h"
           grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/bxcan.h"
           grep -q 'safety_fwd_hook_pkt' "$RUNNER_TEMP/panda-hybrid/board/drivers/fdcan.h"
+
+      - name: Verify full patch tree matches committed Hybrid forks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_verify_hybrid_review_pins.py \
+            --panda "$RUNNER_TEMP/panda-hybrid" \
+            --opendbc "$RUNNER_TEMP/opendbc-hybrid" \
+            --report "$RUNNER_TEMP/hybrid-review-parity.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-review-source-parity
+          path: ${{ runner.temp }}/hybrid-review-parity.json
+          if-no-files-found: error
 
       - name: Compile full Panda-opendbc safety dispatcher with warnings as errors
         shell: bash
