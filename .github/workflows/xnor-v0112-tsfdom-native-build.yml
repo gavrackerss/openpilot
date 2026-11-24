@@ -49,6 +49,28 @@ jobs:
           export PATH="$PWD/.venv/bin:$PATH"
           export PYTHONPATH="$PWD:$PWD/tinygrad_repo"
           .venv/bin/python tools/xnor_v0112_build_tsfdom_desktop.py --source-checkout ../upstream-tsfdom
+      - name: Publish explicit compilation outcome
+        if: always()
+        working-directory: xnor
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path("tsfdom-native-build.json")
+          if not p.is_file():
+            print("::warning::No candidate report was produced")
+          else:
+            r = json.loads(p.read_text())
+            compiled = r.get("compiled") is True
+            outcome = r.get("outcome", r.get("error", "Unknown"))
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("## TSFDOM candidate result\n\n")
+              f.write(f"- Compiled: **{compiled}**\n")
+              f.write(f"- Outcome: {outcome}\n")
+              f.write("- Vehicle qualified: **False**\n")
+            if not compiled:
+              print("::warning::TSFDOM was NOT compiled: " + outcome)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
