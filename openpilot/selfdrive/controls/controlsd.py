@@ -112,7 +112,7 @@ class Controls:
                    (not standstill or self.CP.steerAtStandstill)
     # V207 independent Tesla Hybrid longitudinal latch. A physical brake press
     # cancels LONG only and never drops lateral. V234 optionally restores Unity's
-    # Auto Resume ACC behaviour in Experimental mode: after the brake/regen path
+    # Auto Resume ACC behavior in Experimental mode: after the brake/regen path
     # is fully released, wait one second, then allow OP longitudinal to re-arm.
     # Physical MAIN/RES remains an immediate manual re-arm path in every mode.
     hybrid_brake_latch = (self.CP.brand == 'tesla' and bool(self.CP.pcmCruise)
@@ -181,20 +181,22 @@ class Controls:
     if self.CP.brand == 'tesla' and self._xnor_long_diag_count % 100 == 0:
       overrides = ','.join(str(getattr(e, 'name', 'override')) for e in overriding_events) or 'none'
       buttons = ','.join(f'{str(be.type)}:{int(bool(be.pressed))}' for be in CS.buttonEvents) or 'none'
-      cloudlog.info(f'[XNOR_V219_LONG_GATE] ccEnabled={int(bool(CC.enabled))} '
-                    f'selfdriveActive={int(bool(self.sm["selfdriveState"].active))} '
-                    f'latActive={int(bool(CC.latActive))} longActive={int(bool(CC.longActive))} '
-                    f'pcmCruise={int(bool(self.CP.pcmCruise))} '
-                    f'cruiseAvailable={int(bool(CS.cruiseState.available))} '
-                    f'cruiseLatch={int(bool(CS.cruiseState.enabled))} buttons={buttons} '
-                    f'brake={int(bool(CS.brakePressed))} regen={int(bool(CS.regenBraking))} '
-                    f'gas={int(bool(CS.gasPressed))} brakeLatch={int(self._xnor_hybrid_brake_long_cancelled)} '
-                    f'autoResume={int(bool(self._xnor_auto_resume_acc))} exp={int(bool(self._xnor_experimental_mode))} '
-                    f'override={overrides} planner_a={float(long_plan.aTarget):.3f} '
-                    f'planner_stop={int(bool(long_plan.shouldStop))} '
-                    f'model_a={float(model_v2.action.desiredAcceleration):.3f} '
-                    f'model_stop={int(bool(model_v2.action.shouldStop))} '
-                    f'ego={float(CS.vEgo):.3f}')
+      cloudlog.info(''.join((
+        f'[XNOR_V219_LONG_GATE] ccEnabled={int(bool(CC.enabled))} ',
+        f'selfdriveActive={int(bool(self.sm["selfdriveState"].active))} ',
+        f'latActive={int(bool(CC.latActive))} longActive={int(bool(CC.longActive))} ',
+        f'pcmCruise={int(bool(self.CP.pcmCruise))} ',
+        f'cruiseAvailable={int(bool(CS.cruiseState.available))} ',
+        f'cruiseLatch={int(bool(CS.cruiseState.enabled))} buttons={buttons} ',
+        f'brake={int(bool(CS.brakePressed))} regen={int(bool(CS.regenBraking))} ',
+        f'gas={int(bool(CS.gasPressed))} brakeLatch={int(self._xnor_hybrid_brake_long_cancelled)} ',
+        f'autoResume={int(bool(self._xnor_auto_resume_acc))} exp={int(bool(self._xnor_experimental_mode))} ',
+        f'override={overrides} planner_a={float(long_plan.aTarget):.3f} ',
+        f'planner_stop={int(bool(long_plan.shouldStop))} ',
+        f'model_a={float(model_v2.action.desiredAcceleration):.3f} ',
+        f'model_stop={int(bool(model_v2.action.shouldStop))} ',
+        f'ego={float(CS.vEgo):.3f}',
+      )))
 
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
