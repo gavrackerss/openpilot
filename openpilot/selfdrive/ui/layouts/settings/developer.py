@@ -2,7 +2,9 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.widgets.list_view import toggle_item
+from openpilot.system.ui.widgets.list_view import toggle_item, text_item
+from openpilot.selfdrive.ui.onroad.manual_speed_limit_preview import SpeedSignPreviewRow
+from openpilot.sunnypilot.models.catalog_guard import audit_bundle
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
 from openpilot.system.ui.lib.application import gui_app
@@ -90,6 +92,15 @@ class DeveloperLayout(Widget):
     )
     self._on_enable_ui_debug(self._params.get_bool("ShowDebugInfo"))
 
+    # Migration diagnostics: show requested selection separately from native runtime.
+    # This page is deliberately read-only and hidden whenever offroad is unconfirmed.
+    self._saved_model_item = text_item("Saved SunnyPilot model", "Not inspected")
+    self._native_model_item = text_item("Model runtime", "Native only",
+                                        description="Custom model execution is not qualified on this port.")
+    self._speed_sign_preview = SpeedSignPreviewRow()
+    self._migration_items = (self._saved_model_item, self._native_model_item, self._speed_sign_preview)
+    for item in self._migration_items:
+      item.set_visible(self._migration_offroad)
     self._scroller = Scroller([
       self._adb_toggle,
       self._ssh_toggle,
@@ -99,10 +110,31 @@ class DeveloperLayout(Widget):
       self._lat_maneuver_toggle,
       self._alpha_long_toggle,
       self._ui_debug_toggle,
+      *self._migration_items,
     ], line_separator=True, spacing=0)
 
     # Toggles should be not available to change in onroad state
     ui_state.add_offroad_transition_callback(self._update_toggles)
+
+  def _migration_offroad(self):
+    return bool(ui_state.is_offroad() and self._params.get_bool("IsOffroad"))
+
+  def _refresh_migration_items(self):
+    if not self._migration_offroad():
+      self._saved_model_item.action_item.set_text("Not inspected")
+      return
+    try:
+      saved = self._params.get("ModelManager_ActiveBundle")
+      report = audit_bundle(saved)
+      name = report.requested_name or ("No saved selection" if saved is None else "Invalid selection")
+      # TextAction displays plain text; strip newlines/control characters and bound length.
+      name = " ".join(name.split())[:60]
+      self._saved_model_item.action_item.set_text(name)
+      self._saved_model_item.set_description(
+        "Saved selection retained. " + ("Catalogue metadata checks passed." if not report.metadata_issues else
+        "Catalogue metadata requires review.") + " This does not confirm the selected model is running.")
+    except (ValueError, TypeError, OSError):
+      self._saved_model_item.action_item.set_text("Unavailable")
 
   def _render(self, rect):
     self._scroller.render(rect)
@@ -114,6 +146,7 @@ class DeveloperLayout(Widget):
 
   def _update_toggles(self):
     ui_state.update_params()
+    self._refresh_migration_items()
 
     # Hide non-release toggles on release builds
     # TODO: we can do an onroad cycle, but alpha long toggle requires a deinit function to re-enable radar and not fault
