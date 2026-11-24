@@ -20,6 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.car.tesla_longitudinal_shadow import LongitudinalShadow
 
 REPLAY = "REPLAY" in os.environ
 
@@ -155,6 +156,14 @@ class Car:
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
 
+    # XNOR V220 passive Hybrid longitudinal observer. It never publishes CAN and
+    # never changes CarControl, safety state, or authority. Explicitly opt-in.
+    self._xnor_v220_shadow = LongitudinalShadow() if (
+      getattr(self.CP, "brand", "") == "tesla"
+      and os.path.exists("/data/xnor_enable_long_owner_shadow_bench")
+      and not os.path.exists("/data/xnor_disable_long_owner_shadow_bench")
+    ) else None
+
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
@@ -164,6 +173,13 @@ class Car:
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
 
+    if self._xnor_v220_shadow is not None:
+      try:
+        self._xnor_v220_shadow.observe_rx(can_list)
+      except Exception:
+        cloudlog.exception("XNOR V220 passive observer RX failed; disabling observer")
+        self._xnor_v220_shadow = None
+
     # Update carState from CAN
     CS = self.CI.update(can_list)
 
@@ -171,6 +187,13 @@ class Car:
     RD: structs.RadarDataT | None = self.RI.update(can_list)
 
     self.sm.update(0)
+
+    if self._xnor_v220_shadow is not None and self.sm.updated["pandaStates"]:
+      try:
+        self._xnor_v220_shadow.observe_pandas(self.sm["pandaStates"])
+      except Exception:
+        cloudlog.exception("XNOR V220 passive observer panda-state read failed; disabling observer")
+        self._xnor_v220_shadow = None
 
     can_rcv_valid = len(can_strs) > 0
 
@@ -236,6 +259,25 @@ class Car:
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
+
+      if self._xnor_v220_shadow is not None:
+        try:
+          self._xnor_v220_shadow.observe_tx(
+            can_sends,
+            enabled=bool(CC.enabled),
+            long_active=bool(CC.longActive),
+            requested_accel=float(CC.actuators.accel),
+            native_cruise=str(getattr(self.CI.CS, "stock_cruise_state", "UNKNOWN")),
+            a_ego=float(CS.aEgo),
+            v_ego=float(CS.vEgo),
+          )
+          owner_line = self._xnor_v220_shadow.flush_if_due(now_nanos)
+          if owner_line is not None:
+            cloudlog.info(owner_line)
+        except Exception:
+          cloudlog.exception("XNOR V220 passive observer TX failed; disabling observer")
+          self._xnor_v220_shadow = None
+
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC

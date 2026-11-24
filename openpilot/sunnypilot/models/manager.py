@@ -28,8 +28,8 @@ class ModelManagerSP:
     self.model_fetcher = ModelFetcher(self.params)
     self.pm = messaging.PubMaster(["modelManagerSP"])
     self.available_models: list[custom.ModelManagerSP.ModelBundle] = []
-    self.selected_bundle: custom.ModelManagerSP.ModelBundle = None
-    self.active_bundle: custom.ModelManagerSP.ModelBundle = get_active_bundle(self.params)
+    self.selected_bundle: custom.ModelManagerSP.ModelBundle | None = None
+    self.active_bundle: custom.ModelManagerSP.ModelBundle | None = get_active_bundle(self.params)
     self._chunk_size = 128 * 1000  # 128 KB chunks
     self._download_start_times: dict[str, float] = {}  # Track start time per model
 
@@ -254,7 +254,8 @@ class ModelManagerSP:
       self.selected_bundle = None
 
     except Exception:
-      self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.failed
+      if self.selected_bundle is not None:
+        self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.failed
       raise
 
     finally:

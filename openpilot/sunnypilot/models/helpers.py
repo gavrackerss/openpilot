@@ -10,6 +10,7 @@ requested bundle and a diagnostic explanation available for repair.
 """
 
 import hashlib
+import json
 import os
 import pickle
 from pathlib import Path
@@ -165,7 +166,9 @@ def get_active_bundle(params: Params | None = None, raw_bundle_dict: dict | byte
   params = params or Params()
   try:
     raw = raw_bundle_dict if raw_bundle_dict is not None else (params.get('ModelManager_ActiveBundle') or {})
-    if raw and is_bundle_version_compatible(raw):
+    if isinstance(raw, bytes):
+      raw = json.loads(raw.decode("utf-8"))
+    if isinstance(raw, dict) and raw and is_bundle_version_compatible(raw):
       return custom.ModelManagerSP.ModelBundle(**raw)
   except Exception as exc:
     cloudlog.error(f'Unable to parse saved ModelManager_ActiveBundle: {exc}')

@@ -46,7 +46,7 @@ class ManualSpeedLimitPreview(Widget):
             for i in range(5)]
 
   def _draw_centered(self, text: str, font, size: float, rect: rl.Rectangle, color):
-    dims = measure_text_cached(font, text, size, 0)
+    dims = measure_text_cached(font, text, max(1, int(round(size))), 0)
     pos = rl.Vector2(rect.x + (rect.width - dims.x) / 2,
                      rect.y + (rect.height - dims.y) / 2)
     rl.draw_text_ex(font, text, rl.Vector2(pos.x + 2, pos.y + 2), size, 0, SHADOW)
@@ -56,11 +56,11 @@ class ManualSpeedLimitPreview(Widget):
     # Fit black speed numerals inside the circular white face, not the touch box.
     # Keep numerals approximately the same physical size as the previous UI while expanding the rings.
     font_size = radius * 1.22
-    dims = measure_text_cached(self._font, speed, font_size, 0)
+    dims = measure_text_cached(self._font, speed, max(1, int(round(font_size))), 0)
     # Leave visible white clearance between digits and the red ring.
     if dims.x > radius * 1.28:
       font_size *= (radius * 1.28) / dims.x
-      dims = measure_text_cached(self._font, speed, font_size, 0)
+      dims = measure_text_cached(self._font, speed, max(1, int(round(font_size))), 0)
     pos = rl.Vector2(center.x - dims.x / 2, center.y - dims.y / 2)
     rl.draw_text_ex(self._font, speed, pos, font_size, 0, SIGN_BLACK)
 

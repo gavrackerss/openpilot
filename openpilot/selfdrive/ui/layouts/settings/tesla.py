@@ -5,18 +5,32 @@ No writes to vehicle-control parameters or messaging publishers.
 """
 from openpilot.selfdrive.ui.layouts.settings.xnor_panel import XnorPanel
 from openpilot.selfdrive.ui.onroad.manual_speed_limit_demo import SpeedSignDemoRow
-from openpilot.system.ui.widgets.list_view import text_item
+from openpilot.system.ui.widgets.list_view import text_item, toggle_item
 
 
 class TeslaLayout(XnorPanel):
   def __init__(self):
     super().__init__()
     self._rows = []
+    self._mute_start_stop = toggle_item(
+      "Mute Engage/Disengage Sounds",
+      description="Suppresses only the optional engage/disengage chimes. Safety warnings remain audible.",
+      initial_state=self._params.get_bool("TinklaDisableStartStopSounds"),
+      callback=lambda state: self._params.put_bool("TinklaDisableStartStopSounds", state, block=True),
+    )
+    self._mute_prompts = toggle_item(
+      "Mute Prompt Sounds",
+      description="Suppresses prompt/prompt-repeat/distracted chimes only. Refuse and warning/critical alerts remain audible.",
+      initial_state=self._params.get_bool("TinklaDisablePromptSounds"),
+      callback=lambda state: self._params.put_bool("TinklaDisablePromptSounds", state, block=True),
+    )
     rows = [
       text_item("Hybrid runtime", "Native pedal disengage",
                 description="Brake inhibition ported. Independent lateral engagement and auto-resume are not active in this revision."),
       text_item("Manual speed presets", "Offroad preview",
                 description="40 / 50 / 60 / NSL / cancel. This preview does not control cruise."),
+      self._mute_start_stop,
+      self._mute_prompts,
     ]
     self._demo = SpeedSignDemoRow(self.is_offroad, self._offset)
     rows.append(self._demo)
@@ -55,6 +69,8 @@ class TeslaLayout(XnorPanel):
             self._params.get_bool("IsMetric"))
 
   def refresh(self):
+    self._mute_start_stop.action_item.set_state(self._params.get_bool("TinklaDisableStartStopSounds"))
+    self._mute_prompts.action_item.set_state(self._params.get_bool("TinklaDisablePromptSounds"))
     for item, key, boolean in self._rows:
       try:
         value = self._params.get(key, return_default=True)
