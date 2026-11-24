@@ -1,0 +1,33 @@
+name: XNOR 0.11.2 real SunnyPilot candidate inspection
+
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+    paths:
+      - 'migration/sunnypilot_legacy/v23_candidate_pins.json'
+      - 'tools/xnor_v0112_inspect_real_sunnypilot.py'
+      - 'openpilot/sunnypilot/models/native_envelope.py'
+      - '.github/workflows/xnor-v0112-sunnypilot-candidates.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-real-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify real OPM10V3 and TSFDOM downloads and inspect framing
+        run: python3 tools/xnor_v0112_inspect_real_sunnypilot.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sunnypilot-candidate-report
+          path: sunnypilot-candidate-report.json
+          if-no-files-found: error
