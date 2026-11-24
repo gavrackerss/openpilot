@@ -1,0 +1,91 @@
+{
+  "source": "https://github.com/sunnypilot/sunnypilot-models/blob/gh-pages/docs/driving_models_v23.json",
+  "catalog_blob_sha": "6d1c024ab776d61bf5794d784687514dcee65b84",
+  "tinygrad_ref": "fe5d3169ba4f41d0947ad174925f413cbea9d056",
+  "bundles": [
+    {
+      "short_name": "OPM10V3",
+      "display_name": "OP Model 10 V3 (April 19, 2026)",
+      "is_20hz": true,
+      "is_big": false,
+      "ref": "7d4c295c27bc3f72727c49ec73b98e45745b588d",
+      "environment": "development",
+      "runner": "tinygrad",
+      "index": 65,
+      "minimum_selector_version": "20",
+      "generation": "12",
+      "build_time": "2026-10-02T10:05:51Z",
+      "overrides": {
+        "folder": "2026 World Models",
+        "lat": ".0",
+        "long": ".3"
+      },
+      "models": [
+        {
+          "type": "chunked",
+          "artifact": {
+            "file_name": "driving_op_model_10_v3_april_19_2026_tinygrad.pkl",
+            "download_uri": {
+              "url": "https://huggingface.co/datasets/sunnypilot/sunnypilot_models_v1/resolve/main/models/recompiled42/model-OP%20Model%2010%20V3%20%28April%2019%2C%202026%29-140/driving_op_model_10_v3_april_19_2026_tinygrad.pkl",
+              "sha256": "df76a9dd0e87cebdc8fc80cd18b71ab191ed7d79cefaf43a1f95f8c820513d62"
+            },
+            "chunks": [
+              {
+                "file_name": "driving_op_model_10_v3_april_19_2026_tinygrad.pkl.chunk01of02",
+                "sha256": "22cd31e54f13c10498bb3b13cdc60141592710fe6fb1006a23f4998bdd717a57"
+              },
+              {
+                "file_name": "driving_op_model_10_v3_april_19_2026_tinygrad.pkl.chunk02of02",
+                "sha256": "9a741b61d925f959993f7bd064fdb2fc25c8f1ea0c3e0a02e60053a500a55d42"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "short_name": "TSFDOM",
+      "display_name": "Terrible Super Fantastic Do Over Model (August 15, 2026)",
+      "is_20hz": true,
+      "is_big": false,
+      "ref": "0394d7284cfc229f772ee4fa73ff724ba8245110",
+      "environment": "development",
+      "runner": "tinygrad",
+      "index": 76,
+      "minimum_selector_version": "20",
+      "generation": "12",
+      "build_time": "2026-10-09T21:32:04Z",
+      "overrides": {
+        "folder": "2026 Deep RL Models",
+        "lat": ".1",
+        "long": ".3"
+      },
+      "models": [
+        {
+          "type": "chunked",
+          "artifact": {
+            "file_name": "driving_terrible_super_fantastic_do_over_model_august_15_2026_tinygrad.pkl",
+            "download_uri": {
+              "url": "https://huggingface.co/datasets/sunnypilot/sunnypilot_models_v1/resolve/main/models/recompiled42/model-Terrible%20Super%20Fantastic%20Do%20Over%20Model%20%28August%2015%2C%202026%29-840/driving_terrible_super_fantastic_do_over_model_august_15_2026_tinygrad.pkl",
+              "sha256": "58ea71022a77bd587b17f348fcf6d7387bfc7ae714115314c3386ffdd621518c"
+            },
+            "chunks": [
+              {
+                "file_name": "driving_terrible_super_fantastic_do_over_model_august_15_2026_tinygrad.pkl.chunk01of03",
+                "sha256": "765ea1975749c260027553ccb691c87d2f0a124595a766d3417008be5a2bb4f6"
+              },
+              {
+                "file_name": "driving_terrible_super_fantastic_do_over_model_august_15_2026_tinygrad.pkl.chunk02of03",
+                "sha256": "16b36ca7a75c4e868b528ea47619a9cb576fd138969d41764c839ab1264697fa"
+              },
+              {
+                "file_name": "driving_terrible_super_fantastic_do_over_model_august_15_2026_tinygrad.pkl.chunk03of03",
+                "sha256": "3ed6d0d9e267b9afdc6eb0d3d5ada85b69df25007d786f9f5011166846cd4153"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+name: XNOR 0.11.2 full feature offline integration gate
+
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+    paths:
+      - 'openpilot/sunnypilot/**'
+      - 'migration/jetlink_xnor_v0112/**'
+      - 'migration/installed_24d304b/**'
+      - 'openpilot/selfdrive/modeld/**'
+      - 'openpilot/selfdrive/ui/**'
+      - 'openpilot/common/params_keys.h'
+      - 'tests/test_xnor_v0112*'
+      - 'tools/xnor_v0112*'
+      - '.github/workflows/xnor-v0112-feature-integration.yml'
+  pull_request:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-feature-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate feature sources and prevent premature authority
+        run: |
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          files = [
+            Path('openpilot/sunnypilot/models/catalog_guard.py'),
+            Path('migration/jetlink_xnor_v0112/native_contract.py'),
+            Path('tools/xnor_v0112_longitudinal_migration_audit.py'),
+            Path('openpilot/sunnypilot/models/artifact_audit.py'),
+            Path('openpilot/sunnypilot/models/native_envelope.py'),
+            Path('openpilot/selfdrive/ui/onroad/manual_speed_limit_preview.py'),
+          ]
+          for p in files:
+            assert p.is_file(), f'Missing integration source: {p}'
+            ast.parse(p.read_text(), filename=str(p))
+          jetlink = files[1].read_text()
+          assert 'def assert_authority_disabled()' in jetlink
+          assert 'raise RuntimeError(' in jetlink.split('def assert_authority_disabled()',1)[1]
+          catalog = files[0].read_text()
+          assert 'effective_runner: str = "stock"' in catalog
+          assert 'ready_for_runtime: bool = False' in catalog
+          print('Source and fail-closed staging gates PASS')
+          PY
+      - name: Initialise exact pinned Panda and opendbc sources for source-dependent contracts
+        run: |
+          git submodule update --init opendbc_repo panda
+          test -f opendbc_repo/opendbc/car/tesla/values.py
+          test -f panda/board/drivers/bxcan.h
+      - name: Run existing migration contracts (including pinned-source checks)
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+          tests = sorted(pathlib.Path('tests').glob('test_xnor_v0112*.py'))
+          assert tests, 'No XNOR v0.11.2 tests found'
+          # Run each script directly: these source-only contracts are authored
+          # as standalone unittest scripts, not as a vehicle test harness.
+          excluded = ('hybrid_scratch_assemble', 'full_hybrid_panda',
+                      'tesla_vehicle_contract')
+          selected = [p for p in tests if not any(x in p.name for x in excluded)]
+          assert selected, 'No eligible source contracts found'
+          for p in selected:
+            print('RUN', p, flush=True)
+            subprocess.run([sys.executable, str(p), '-v'], check=True)
+          PY
+      - name: Verify archived installed longitudinal source identity
+        run: |
+          python3 tools/xnor_v0112_longitudinal_migration_audit.py
+      - name: Report scope
+        run: |
+          echo 'Offline feature-source contracts only.'
+          echo 'No remote LS2 joining, active model replacement, sendcan, Panda flash or vehicle control.'
+          echo 'Real CAN replay, model artifact hashes, output semantics and runtime activation remain separate gates.'

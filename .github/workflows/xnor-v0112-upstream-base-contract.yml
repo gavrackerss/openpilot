@@ -1,0 +1,81 @@
+name: XNOR 0.11.2 base port - static contracts
+
+on:
+  push:
+    branches:
+      - 'upgrade/xnor-v0112-xnor-base'
+    paths:
+      - 'openpilot/cereal/**'
+      - 'openpilot/common/params_keys.h'
+      - 'openpilot/selfdrive/modeld/**'
+      - 'openpilot/system/manager/process_config.py'
+      - 'migration/**'
+      - 'openpilot/sunnypilot/**'
+      - 'tests/test_xnor_v0112_base_contract.py'
+      - 'tests/test_xnor_v0112_jetlink_contract.py'
+      - 'tests/test_xnor_v0112_sunnypilot_port.py'
+      - 'tests/test_xnor_v0112_model_selection_status.py'
+      - 'tests/test_xnor_v0112_longitudinal_migration.py'
+      - 'tests/test_xnor_v0112_tesla_hybrid_long_owner.py'
+      - 'tools/xnor_v0112_longitudinal_migration_audit.py'
+      - 'tools/xnor_v0112_model_selection_status.py'
+      - 'tools/xnor_v0112_tesla_panda_preflight.py'
+      - 'tools/xnor_v0112_export_tesla_opendbc_patch.py'
+      - 'tests/test_xnor_v0112_tesla_panda_overlay.py'
+      - 'tests/test_xnor_v0112_tesla_passive_patch.py'
+      - '.github/workflows/xnor-v0112-upstream-base-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staging-only:
+    name: XNOR native 0.11.2 preservation checks (not vehicle tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Check Python syntax
+        run: python3 -m py_compile tests/test_xnor_v0112_base_contract.py
+      - name: Verify native ABI, Cereal wire IDs and parameter contracts
+        run: python3 tests/test_xnor_v0112_base_contract.py -v
+      - name: Verify XNOR-native Jetlink ABI and the passive Pixel response contract
+        run: |
+          python3 -m py_compile migration/jetlink_xnor_v0112/native_contract.py tests/test_xnor_v0112_jetlink_contract.py
+          python3 tests/test_xnor_v0112_jetlink_contract.py -v
+      - name: Check staged native SunnyPilot manager imports and disabled process
+        run: |
+          python3 tests/test_xnor_v0112_sunnypilot_port.py -v
+          python3 -m compileall -q openpilot/sunnypilot/models
+      - name: Functional workstation tests for stock-only SunnyPilot catalog reporting
+        run: |
+          python3 tests/test_xnor_v0112_model_selection_status.py -v
+          python3 -m py_compile tools/xnor_v0112_model_selection_status.py
+      - name: Check exact installed 24d304b Tesla control and DEC-free migration baseline
+        run: |
+          python3 tools/xnor_v0112_longitudinal_migration_audit.py
+          python3 tests/test_xnor_v0112_longitudinal_migration.py -v
+      - name: Replay isolated Tesla longitudinal brake ownership latch (no vehicle I/O)
+        run: |
+          python3 -m py_compile migration/tesla_v0112/hybrid_long_owner.py
+          python3 tests/test_xnor_v0112_tesla_hybrid_long_owner.py -v
+      - name: Confirm pinned XNOR Panda and opendbc commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git ls-tree HEAD opendbc_repo | awk '{print $3}')" = "3f86206a13c3181f0224e8f1424b836592e2b2d2"
+          test "$(git ls-tree HEAD panda | awk '{print $3}')" = "fa83a40ad799c827ab9cbda4560cf3426531ceff"
+
+      - name: Initialise exact pinned opendbc for isolated Tesla tests
+        run: git submodule update --init opendbc_repo
+      - name: Check Tesla HW2 Panda AEB safety, native DBC and additive opendbc review patch
+        run: |
+          python3 -m py_compile tools/xnor_v0112_tesla_panda_preflight.py tools/xnor_v0112_export_tesla_opendbc_patch.py migration/tesla_v0112/di_state_layout.py migration/tesla_v0112/opendbc_overlay/safety/tests/test_xnor_tesla_hw23_negative.py
+          python3 tools/xnor_v0112_tesla_panda_preflight.py
+          python3 tests/test_xnor_v0112_tesla_panda_overlay.py -v
+          python3 tests/test_xnor_v0112_tesla_passive_patch.py -v
+
+# These are source-only checks. They do not compile capnp, build Panda safety,
+# replay recordings or qualify Tesla longitudinal control.

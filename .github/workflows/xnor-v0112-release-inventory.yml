@@ -1,0 +1,42 @@
+name: XNOR 0.11.2 release inventory (not an approval)
+
+on:
+  push:
+    branches: ['upgrade/xnor-v0112-xnor-base']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          lfs: false
+      - name: Record exact checkout and dependency pins
+        run: |
+          python3 tools/xnor_v0112_release_inventory.py > xnor-release-inventory.json
+          cat xnor-release-inventory.json
+      - name: Summarize remaining release blockers
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          r = json.loads(Path("xnor-release-inventory.json").read_text())
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write("## Production promotion: NOT APPROVED\n\n")
+            f.write("Commit: `" + r["source_commit"] + "`\n\n")
+            for blocker in r["blockers"]:
+              f.write("- " + blocker + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xnor-release-inventory
+          path: xnor-release-inventory.json
+          if-no-files-found: error
+      - name: Confirm no installation or promotion action
+        run: echo 'Inventory only. No merge, release publication, firmware flash or device install.'

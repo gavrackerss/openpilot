@@ -1,0 +1,74 @@
+name: XNOR 0.11.2 pinned dependency review build (desktop only)
+on:
+  push:
+    branches: ['review/xnor-v0112-pinned-desktop']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pinned-desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: '1'
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: lfs.fetchexclude
+      GIT_CONFIG_VALUE_0: openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Verify immutable Hybrid gitlinks and full dependency trees
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = 'review/xnor-v0112-pinned-desktop'
+          git submodule update --init opendbc_repo panda
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          spec = json.loads(Path('migration/tesla_v0112/hybrid_dependency_review_pins.json').read_text())
+          assert spec['exact_review_revision_ci_verified'] is True
+          for name, dep in spec['dependencies'].items():
+            def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+            assert git('rev-parse', f'HEAD:{name}') == dep['review_commit']
+            assert git('-C', name, 'rev-parse', 'HEAD') == dep['review_commit']
+            assert git('-C', name, 'rev-parse', 'HEAD^{tree}') == dep['review_tree']
+          print('Exact verified Hybrid dependency commits and trees present.')
+          PY
+          git submodule update --init --recursive msgq_repo rednose_repo teleoprtc_repo tinygrad_repo
+      - name: Install desktop build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev xvfb xauth libgl1-mesa-dri libglx-mesa0
+          ./tools/setup_dependencies.sh
+          git lfs pull --exclude='openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx'
+      - name: Build exact pinned review checkout
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          .venv/bin/scons --minimal -j2
+      - name: Non-actuating Tesla runtime construction
+        run: |
+          printf '{"vehicle_authority_qualified":false,"scope":"desktop CI review only"}\n' > XNOR_HYBRID_ASSEMBLY_MANIFEST.json
+          .venv/bin/python tools/xnor_v0112_scratch_tesla_runtime_probe.py
+      - name: Stock inference and interactive UI desktop smoke
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          export PYTHONPATH="$PWD:$PWD/tinygrad_repo"
+          DEV=CPU:LLVM .venv/bin/python tools/xnor_v0112_native_feature_smoke.py stock
+          xvfb-run -a -s '-screen 0 1920x1080x24' .venv/bin/python tools/xnor_v0112_native_feature_smoke.py ui
+      - name: Verify original gitlinks still match
+        run: |
+          git diff --exit-code -- panda opendbc_repo
+          git submodule status panda opendbc_repo
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinned-desktop-review
+          path: |
+            native-stock-abi.json
+            speed-sign-preview.png
+          if-no-files-found: error
+      - name: Qualification boundary
+        run: echo 'Review build only. No vehicle install, release publication, flash or CAN transmission.'
