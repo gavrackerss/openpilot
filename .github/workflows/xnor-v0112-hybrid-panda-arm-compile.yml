@@ -5,6 +5,9 @@ on:
     branches: ['upgrade/xnor-v0112-xnor-base', 'upgrade/xnor-v0112-hybrid-build-verification']
     paths:
       - 'migration/tesla_v0112/hybrid_panda_candidate/**'
+      - 'migration/tesla_v0112/hybrid_dependency_review_pins.json'
+      - 'tools/xnor_v0112_verify_hybrid_review_pins.py'
+      - '.gitmodules'
       - 'tools/xnor_v0112_full_hybrid_panda_preflight.py'
       - 'tools/xnor_v0112_export_full_hybrid_panda_patch.py'
       - '.github/workflows/xnor-v0112-hybrid-panda-arm-compile.yml'
@@ -51,6 +54,20 @@ jobs:
           grep -q 'int safety_fwd_hook_pkt(int bus_num, CANPacket_t \*to_fwd)' "$RUNNER_TEMP/tesla-opendbc/opendbc/safety/safety.h"
           grep -q 'safety_fwd_hook_pkt(bus_number, &to_send)' "$RUNNER_TEMP/tesla-panda/board/drivers/bxcan.h"
           grep -q 'safety_fwd_hook_pkt(bus_number, &to_send)' "$RUNNER_TEMP/tesla-panda/board/drivers/fdcan.h"
+      - name: Verify full patch tree matches committed Hybrid forks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/xnor_v0112_verify_hybrid_review_pins.py \
+            --panda "$RUNNER_TEMP/tesla-panda" \
+            --opendbc "$RUNNER_TEMP/tesla-opendbc" \
+            --report "$RUNNER_TEMP/hybrid-review-parity.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-review-source-parity
+          path: ${{ runner.temp }}/hybrid-review-parity.json
+          if-no-files-found: error
+
       - name: Install host SCons and ARM compiler
         shell: bash
         run: |
