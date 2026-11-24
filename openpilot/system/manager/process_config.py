@@ -121,6 +121,8 @@ procs = [
   PythonProcess("modem", "openpilot.common.hardware.comma.modem", always_run, enabled=COMMA_HARDWARE),
   PythonProcess("tombstoned", "openpilot.system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "openpilot.system.updated.updated", only_offroad, enabled=not PC),
+  # Offroad-only catalogue/download manager. No custom model runner is started onroad.
+  PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad),
   PythonProcess("uploader", "openpilot.system.loggerd.uploader", always_run),
 
   # debug procs
