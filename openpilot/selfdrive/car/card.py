@@ -21,6 +21,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.tesla_longitudinal_shadow import LongitudinalShadow
+from openpilot.selfdrive.car.tesla_can_tap import TeslaCanTap, ARM_FILE as TESLA_CAN_TAP_ARM_FILE
 
 REPLAY = "REPLAY" in os.environ
 
@@ -163,6 +164,9 @@ class Car:
       and os.path.exists("/data/xnor_enable_long_owner_shadow_bench")
       and not os.path.exists("/data/xnor_disable_long_owner_shadow_bench")
     ) else None
+    self._xnor_can_tap = TeslaCanTap() if (
+      getattr(self.CP, "brand", "") == "tesla" and os.path.exists(TESLA_CAN_TAP_ARM_FILE)
+    ) else None
 
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
@@ -172,6 +176,14 @@ class Car:
 
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
+
+    if self._xnor_can_tap is not None:
+      try:
+        self._xnor_can_tap.rx(can_list)
+      except Exception:
+        cloudlog.exception("XNOR V230 passive CAN capture RX failed; disabling capture")
+        self._xnor_can_tap.stop()
+        self._xnor_can_tap = None
 
     if self._xnor_v220_shadow is not None:
       try:
@@ -260,6 +272,19 @@ class Car:
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
 
+      if self._xnor_can_tap is not None:
+        try:
+          self._xnor_can_tap.tx(can_sends, now_nanos)
+          self._xnor_can_tap.state(
+            self.CP, CS, CC, self.sm["pandaStates"],
+            raw_di=str(getattr(self.CI.CS, "stock_cruise_state", "UNKNOWN")),
+            nanos=now_nanos,
+          )
+        except Exception:
+          cloudlog.exception("XNOR V230 passive CAN capture TX/state failed; disabling capture")
+          self._xnor_can_tap.stop()
+          self._xnor_can_tap = None
+
       if self._xnor_v220_shadow is not None:
         try:
           self._xnor_v220_shadow.observe_tx(
@@ -312,6 +337,8 @@ class Car:
     finally:
       e.set()
       t.join()
+      if self._xnor_can_tap is not None:
+        self._xnor_can_tap.stop()
 
 
 def main():
