@@ -6,6 +6,8 @@ on:
     paths:
       - 'tools/xnor_v0112_build_tsfdom_desktop.py'
       - 'openpilot/sunnypilot/models/native_abi.py'
+      - 'openpilot/sunnypilot/models/desktop_candidate_runner.py'
+      - 'migration/sunnypilot_legacy/tsfdom_native_abi_report.json'
       - '.github/workflows/xnor-v0112-tsfdom-native-build.yml'
   workflow_dispatch:
 
@@ -43,7 +45,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev
           ./tools/setup_dependencies.sh
-      - name: Compare real ONNX ABI and compile compatible candidate
+      - name: Compile pinned TSFDOM and run desktop recurrent inference
+        env:
+          DEV: 'CPU:LLVM'
         working-directory: xnor
         run: |
           export PATH="$PWD/.venv/bin:$PATH"
@@ -67,6 +71,7 @@ jobs:
               f.write("## TSFDOM candidate result\n\n")
               f.write(f"- Compiled: **{compiled}**\n")
               f.write(f"- Outcome: {outcome}\n")
+              f.write(f"- Synthetic inference passed: **{bool(r.get('inference'))}**\n")
               f.write("- Vehicle qualified: **False**\n")
             if not compiled:
               print("::warning::TSFDOM was NOT compiled: " + outcome)
