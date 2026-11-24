@@ -30,7 +30,9 @@ from openpilot.selfdrive.modeld.compile_modeld import make_input_queues, WARP_IN
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
 from openpilot.common.file_chunker import open_file_chunked
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
-from openpilot.selfdrive.modeld.helpers import usbgpu_present, usbgpu_compiled, modeld_pkl_path, get_tg_input_devices, load_oob
+from openpilot.selfdrive.modeld.helpers import usbgpu_present, usbgpu_compiled, modeld_pkl_path, get_tg_input_devices, load_oob, MODELS_DIR
+from openpilot.sunnypilot.models.native_selection import selection_from_params, load_verified_bundle
+from openpilot.sunnypilot.models.requested_model import STOCK
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -137,10 +139,15 @@ class FrameMeta:
 class ModelState:
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
-  def __init__(self, cam_w: int, cam_h: int, usbgpu: bool):
+  def __init__(self, cam_w: int, cam_h: int, usbgpu: bool, *, native_selection=None):
     input_devices = get_tg_input_devices(PROCESS_NAME, usbgpu)
     self.WARP_DEV, self.QUEUE_DEV = input_devices['WARP_DEV'], input_devices['QUEUE_DEV']
-    jits = load_oob(open_file_chunked(modeld_pkl_path(usbgpu)))
+    if native_selection is not None and native_selection.effective != STOCK:
+      if usbgpu or self.QUEUE_DEV != 'QCOM':
+        raise ValueError('Requested native artifact requires local QCOM')
+      jits = load_verified_bundle(native_selection)
+    else:
+      jits = load_oob(open_file_chunked(modeld_pkl_path(usbgpu)))
     metadata = jits['metadata']
     self.input_shapes = metadata['input_shapes']
     self.vision_input_names = [k for k in self.input_shapes if 'img' in k]
@@ -264,7 +271,27 @@ def main(demo=False):
     model = big_model
     params.put_bool("UsbGpuActive", model is not None)
 
-  small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False) if model is None or USBGPU else None
+  small_model = None
+  if model is None or USBGPU:
+    # The established Chestnut path is unchanged. For the local native runner,
+    # resolve the persistent model choice at startup, never during driving.
+    selection = None
+    if not USBGPU:
+      try:
+        backend = get_tg_input_devices(PROCESS_NAME, False)['QUEUE_DEV']
+        selection = selection_from_params(params, backend, MODELS_DIR / 'xnor_native')
+        cloudlog.info("native model request: %s, selection: %s, reason: %s",
+                      selection.requested, selection.effective, selection.reason)
+      except Exception:
+        cloudlog.exception("native model preference unavailable; using stock")
+    try:
+      small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False,
+                               native_selection=selection)
+    except Exception:
+      if selection is None or selection.effective == STOCK:
+        raise
+      cloudlog.exception("approved native model load failed; using stock")
+      small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False)
   if model is None:
     model = small_model
   params.put_bool("UsbGpuLoading", False)
