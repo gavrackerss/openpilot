@@ -38,3 +38,24 @@ jobs:
       - name: Compile Python surfaces
         run: |
           python3 -m py_compile             openpilot/system/manager/process_config.py             openpilot/sunnypilot/modeld_v2/runtime_helpers.py             openpilot/sunnypilot/modeld_v2/modeld.py             openpilot/sunnypilot/modeld_v2/parse_model_outputs.py             openpilot/sunnypilot/modeld_v2/parse_model_outputs_split.py             openpilot/selfdrive/ui/layouts/settings/models.py             openpilot/selfdrive/ui/layouts/settings/osm.py             openpilot/selfdrive/ui/ui_state.py             openpilot/selfdrive/ui/onroad/manual_speed_limit.py
+
+
+  linux-integration:
+    name: Linux lint + build + unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install headless GLES runtime
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgles2 libegl1
+      - name: Set up openpilot
+        run: ./tools/op.sh setup
+      - name: Static analysis
+        run: scripts/lint/lint.sh
+      - name: Build openpilot
+        run: scons
+      - name: Run unit tests
+        env:
+          RAYLIB_BACKEND: headless
+        run: tools/op.sh test
