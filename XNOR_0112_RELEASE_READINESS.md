@@ -23,14 +23,32 @@ to the current branch head:
 - Real TSFDOM source metadata inspected (not compiled in this particular run):
   https://github.com/gavrackerss/openpilot/actions/runs/45364367675
 
-The latest TSFDOM desktop build was reported completed by the user; its exact
-run, logs and results have not independently been recorded here.
+## Latest independently checked results
+
+- Exact committed Hybrid dependency trees verified and built:
+  [F4/H7](https://github.com/gavrackerss/openpilot/actions/runs/45404285671),
+  [compiled Tesla regressions](https://github.com/gavrackerss/openpilot/actions/runs/45404276370)
+  (308 passed, 133 skipped, three subtests passed),
+  [full scratch desktop build](https://github.com/gavrackerss/openpilot/actions/runs/45404266825).
+- Immutable pinned review branch commit `ace8f1bb16e66410b759ab1cbf6745588f966a4b`:
+  [full desktop build and runtime construction](https://github.com/gavrackerss/openpilot/actions/runs/45409569794).
+  Native stock synthetic inference, actual Params persistence and offroad sign interaction also passed.
+- [TSFDOM native compile and paired replay](https://github.com/gavrackerss/openpilot/actions/runs/45409289945):
+  both camera resolutions, recurrent state, 12 shared synthetic NV12 pairs.
+- [OPM10V3 split graph and NV12 reference](https://github.com/gavrackerss/openpilot/actions/runs/45414068079):
+  12 synthetic pairs, 11 recurrent feature changes, NumPy reference warp self-test.
+  Pixel-level equivalence with the original accelerated warp, hardware latency
+  and raw action semantics are not established.
+
+The verified Hybrid dependency revisions are pinned in the separate
+`review/xnor-v0112-pinned-desktop` branch, not in production. No build
+above establishes safe operation on an actual vehicle.
 
 ## Required before promotion
 
 - [ ] Final release revision and exact Panda/opendbc/tinygrad commits pinned,
   including the actual reviewed Hybrid source changes in deployable dependencies
-  (the current live gitlinks still point at stock pins).
+  (the staging source branch keeps its original pins; the separate desktop review branch uses the verified Hybrid pins).
 - [ ] Fresh full desktop build, ARM F4/H7 builds, schema and regression tests
   on the exact candidate and submodule revisions.
 - [ ] Actual TSFDOM compilation/inference CI logs reviewed, native device

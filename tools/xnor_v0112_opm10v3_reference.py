@@ -18,6 +18,7 @@ import pickle
 import subprocess
 import sys
 import time
+import tempfile
 
 REF = "7d4c295c27bc3f72727c49ec73b98e45745b588d"
 FILES = {
@@ -90,9 +91,13 @@ def main():
   p = argparse.ArgumentParser()
   p.add_argument("--source-checkout", type=Path, required=True)
   p.add_argument("--report", type=Path, default=Path("opm10v3-reference.json"))
+  replay = p.add_mutually_exclusive_group()
+  replay.add_argument("--replay-npz", type=Path)
+  replay.add_argument("--synthetic-nv12", action="store_true")
+  p.add_argument("--predictions", type=Path, default=Path("opm10v3-paired-replay.json"))
   args = p.parse_args()
   root = args.source_checkout.resolve()
-  report = {"model": "OPM10V3", "ref": REF, "synthetic_only": True,
+  report = {"model": "OPM10V3", "ref": REF, "synthetic_only": args.replay_npz is None,
             "runtime": "ONNX Runtime CPU reference", "vehicle_qualified": False,
             "inference_passed": False}
   try:
@@ -106,6 +111,26 @@ def main():
     from openpilot.selfdrive.modeld.parse_model_outputs import Parser
     assert Path(sys.modules[Parser.__module__].__file__).resolve() == (root / PARSER).resolve()
     parser = Parser()
+    replay_arrays = None
+    camera_history = None
+    if args.replay_npz is not None or args.synthetic_nv12:
+      from xnor_v0112_opm10v3_camera import CameraHistory, self_test
+      from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+      self_test()
+      loader_path = Path(__file__).resolve().parents[1] / "openpilot/sunnypilot/models/desktop_paired_replay.py"
+      loader_spec = importlib.util.spec_from_file_location("paired_replay_loader", loader_path)
+      loader = importlib.util.module_from_spec(loader_spec)
+      loader_spec.loader.exec_module(loader)
+      if args.synthetic_nv12:
+        with tempfile.TemporaryDirectory(prefix="opm10v3-nv12-") as temp:
+          fixture = Path(temp) / "fixture.npz"
+          loader.make_synthetic_replay(fixture)
+          camera, replay_arrays = loader.load_replay(fixture)
+      else:
+        camera, replay_arrays = loader.load_replay(args.replay_npz)
+      camera_history = CameraHistory(camera, get_nv12_info(*camera))
+      report["camera_size"] = camera
+      report["camera_warp_reference"] = "NumPy, upstream nearest-neighbor clip and five-frame queue"
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 2
     opts.inter_op_num_threads = 1
@@ -129,13 +154,19 @@ def main():
     changes = 0
     rng = np.random.default_rng(20261124)
     frames = []
+    predictions = []
+    prev_desire = np.zeros(8, dtype=np.float32)
     dtype_map = {"tensor(uint8)": np.uint8, "tensor(float)": np.float32, "tensor(float16)": np.float16}
-    for i in range(12):
+    for i in range(len(replay_arrays["road"]) if replay_arrays is not None else 12):
       start = time.perf_counter()
       vision_input = {}
+      prepared = camera_history.update(replay_arrays["road"][i], replay_arrays["wide"][i],
+                                       replay_arrays["road_tfm"][i], replay_arrays["wide_tfm"][i]) if camera_history else None
       for item in sessions["vision"].get_inputs():
         dtype = dtype_map[item.type]
-        vision_input[item.name] = rng.integers(0, 256, size=shapes["vision"][item.name], dtype=np.uint8).astype(dtype)
+        image = prepared[item.name] if prepared is not None else rng.integers(0, 256, size=shapes["vision"][item.name], dtype=np.uint8)
+        assert image.shape == shapes["vision"][item.name]
+        vision_input[item.name] = image.astype(dtype, copy=False)
       v, v_shape = run_session(sessions["vision"], vision_input, slices["vision"])
       v = parser.parse_vision_outputs(v)
       features = v["hidden_state"].reshape(1, 1, 512)
@@ -146,11 +177,19 @@ def main():
       history[:, -1:] = features
       desires[:, :-1] = desires[:, 1:].copy()
       desires[:, -1:] = 0
-      if i == 3:
-        desires[0, -1, 1] = 1
+      if replay_arrays is not None:
+        desire = replay_arrays["desire_pulse"][i].copy()
+        desire[0] = 0
+        desires[0, -1] = np.where(desire - prev_desire > .99, desire, 0)
+        prev_desire[:] = desire
+        convention = replay_arrays["traffic_convention"][i][None, :]
+      else:
+        if i == 3:
+          desires[0, -1, 1] = 1
+        convention = np.array([[1, 0]], dtype=np.float32)
       policy_input = {"features_buffer": history[:, 3::4].copy(),
                       "desire_pulse": desires.reshape(1, -1, 4, 8).max(axis=2),
-                      "traffic_convention": np.array([[1, 0]], dtype=np.float32)}
+                      "traffic_convention": convention}
       results = {}
       for head, parse in (("on_policy", parser.parse_policy_outputs), ("off_policy", parser.parse_off_policy_outputs)):
         cast = {x.name: policy_input[x.name].astype(dtype_map[x.type], copy=False) for x in sessions[head].get_inputs()}
@@ -166,7 +205,17 @@ def main():
       assert merged["lead"].shape == (1, 3, 6, 4)
       assert all(np.all(np.isfinite(a)) for a in merged.values())
       frames.append({"frame": i, "inference_ms": (time.perf_counter() - start) * 1000.})
-    assert changes > 0
+      if replay_arrays is not None:
+        predictions.append({"frame": i, "plan": merged["plan"][0].tolist(),
+                            "lead": merged["lead"][0].tolist(),
+                            "lead_prob": merged["lead_prob"][0].tolist(), "raw_action": None})
+    if args.replay_npz is None:
+      assert changes > 0
+    if replay_arrays is not None:
+      args.predictions.write_text(json.dumps({"camera_size": camera, "frames": len(predictions),
+        "opm10v3": predictions, "synthetic_only": args.synthetic_nv12,
+        "vehicle_qualified": False}, indent=2) + "\n")
+      report["paired_replay_frames"] = len(predictions)
     report.update(inference_passed=True, frames=frames, feature_changes=changes,
                   action_semantics_verified=False, camera_warp_verified=False)
   except Exception as exc:
