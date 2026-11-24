@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
   sys.path.insert(0, str(ROOT))
 
 from openpilot.sunnypilot.models.catalog_guard import audit_bundle
+from openpilot.sunnypilot.models.artifact_audit import verify_artifacts
 
 
 def read_selection(offline_json: Path | None):
@@ -43,6 +44,7 @@ def main(argv=None) -> int:
   parser = argparse.ArgumentParser(description="Read-only native 0.11.2 SunnyPilot selection audit")
   parser.add_argument("--offline-json", type=Path,
                       help="Inspect an exported JSON bundle without opening Params")
+  parser.add_argument('--artifact-root', type=Path, help='Verify saved artifact bytes in this directory without deserialising')
   args = parser.parse_args(argv)
   try:
     selected = read_selection(args.offline_json)
@@ -54,6 +56,9 @@ def main(argv=None) -> int:
       "custom_model_authority": False,
       "notice": "Metadata-only inspection; stock native modeld remains active",
     })
+    if args.artifact_root is not None:
+      output['artifact_audit'] = asdict(verify_artifacts(selected, args.artifact_root))
+      output['notice'] = 'Artifact integrity inspection; native ABI unverified; stock remains active'
     print(json.dumps(output, indent=2, sort_keys=True))
     return 0
   except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
