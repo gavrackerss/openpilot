@@ -40,6 +40,23 @@ to the current branch head:
   Pixel-level equivalence with the original accelerated warp, hardware latency
   and raw action semantics are not established.
 
+- Consolidated pinned desktop review: [cd50b28 build](https://github.com/gavrackerss/openpilot/actions/runs/45414559559).
+- Native startup selector and fallback tests: [offline gate](https://github.com/gavrackerss/openpilot/actions/runs/45419642661);
+  [stock native runtime/UI smoke](https://github.com/gavrackerss/openpilot/actions/runs/45419642116).
+- Updated isolated loader and dependencies: [TSFDOM desktop](https://github.com/gavrackerss/openpilot/actions/runs/45420642269).
+
+## Target hardware evidence
+
+The user supplied a successful QCOM bench report on 2026-11-24 using
+the exact native compiler and tinygrad revision. Both camera warp JIT
+compiles and round trips passed; the 126440436-byte artifact loaded and
+three synthetic camera pairs ran. Warm frame times were 32.215 and
+33.193 ms. See `migration/sunnypilot_legacy/tsfdom_qcom_bench_evidence.json`
+for exact hashes and reported scope. The artifact has not been independently
+retrieved or reviewed. This closes the short QCOM execution milestone,
+not the action-semantics, actual driving regression or release approval gates.
+The production approval registry remains empty.
+
 The verified Hybrid dependency revisions are pinned in the separate
 `review/xnor-v0112-pinned-desktop` branch, not in production. No build
 above establishes safe operation on an actual vehicle.
@@ -51,9 +68,9 @@ above establishes safe operation on an actual vehicle.
   (the staging source branch keeps its original pins; the separate desktop review branch uses the verified Hybrid pins).
 - [ ] Fresh full desktop build, ARM F4/H7 builds, schema and regression tests
   on the exact candidate and submodule revisions.
-- [ ] Actual TSFDOM compilation/inference CI logs reviewed, native device
-  backend and timing validated; supported alternative model selection verified
-  across process restart and offroad/onroad transitions without false UI status.
+- [x] TSFDOM desktop compile and short QCOM execution, as recorded above.
+- [ ] Native action semantics and recorded behavior regression; approved model
+  selection across restarts with truthful effective-runtime status.
 - [ ] Real recorded Tesla HW2 CAN replay, brake/gas/regen override, physical
   stalk and AEB forwarding, dual-Panda topology and handback independently
   reviewed.
@@ -72,7 +89,9 @@ above establishes safe operation on an actual vehicle.
 
 ## Current UI scope
 
-The settings page provides a persistent requested model preference separately
+Native modeld now reads the persistent preference at startup; unqualified,
+missing or failed candidate artifacts fall back to stock. The settings page
+provides a persistent requested model preference separately
 from the effective native runtime and a non-actuating V279 demonstration.
 The speed signs use memory-only selections and display the configured
 offset, not a CAN-confirmed Tesla set speed. NSL is labelled 70 mph for the
