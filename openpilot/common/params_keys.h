@@ -168,6 +168,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TinklaUseTeslaRadarUpsideDown", {PERSISTENT, BOOL, "0"}},
     {"PedalEnabled", {PERSISTENT, BOOL, "0"}},
     {"ModelManager_ActiveBundle", {PERSISTENT, JSON}},
+    {"XNORRequestedModelRef", {PERSISTENT, STRING}},
     {"ModelManager_ClearCache", {CLEAR_ON_MANAGER_START, BOOL}},
     {"ModelManager_DownloadIndex", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT}},
     {"ModelManager_Favs", {PERSISTENT, STRING}},
