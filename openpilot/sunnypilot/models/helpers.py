@@ -8,6 +8,7 @@ health-check cache. Model validation must NEVER remove this parameter. An
 invalid/unavailable artifact selects the stock *runtime* while keeping the
 requested bundle and a diagnostic explanation available for repair.
 """
+from __future__ import annotations
 
 import hashlib
 import json
