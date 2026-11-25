@@ -65,7 +65,7 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn('"XNORManualSpeedLimitMph"', params)
 
 
-  def test_v229_prime_is_preengagement_and_v231_auto_sync_cannot_raise_set(self):
+  def test_v229_prime_is_preengagement_and_v231_sync_matches_0111(self):
     ctrl = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
 
     prime_start = ctrl.index("def _v229_stopgo_long(")
@@ -74,19 +74,19 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn("op_enabled = bool(CC.enabled)", prime)
     self.assertIn('mode = "priming"', prime)
     self.assertIn("preengage_prime=", prime)
-    # Priming is the final disengaged branch; it must not be guarded by CC.enabled.
+    # 0.11.1 parity: priming is the final disengaged branch and does not require OP engagement.
     self.assertIn('else:\n      mode = "priming"', prime)
 
     sync_start = ctrl.index("if (not manual_active) and bool(self._v229_owner_now)")
     sync_end = ctrl.index("elif bool(self._v229_owner_now):", sync_start)
     sync = ctrl[sync_start:sync_end]
-    self.assertIn("blocked_upward_auto", sync)
+    # 0.11.1 V231 was bidirectional. Correct the target source rather than masking UP pulses.
+    self.assertIn("BTN_UP2", sync)
+    self.assertIn("BTN_UP1", sync)
     self.assertIn("BTN_DOWN2", sync)
     self.assertIn("BTN_DOWN1", sync)
-    self.assertNotIn("BTN_UP2", sync)
-    self.assertNotIn("BTN_UP1", sync)
+    self.assertNotIn("blocked_upward_auto", sync)
 
-    # Explicit manual V279 remains bidirectional.
     manual_start = ctrl.index("def _v279_manual_cruise_sync")
     manual_end = ctrl.index("def _speed_limit_sync", manual_start)
     manual = ctrl[manual_start:manual_end]
@@ -94,6 +94,63 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn("BTN_UP1", manual)
     self.assertIn("BTN_DOWN2", manual)
     self.assertIn("BTN_DOWN1", manual)
+
+  def test_0111_hybrid_vcruise_and_legacy_di_contracts_are_restored(self):
+    cruise = (ROOT / "openpilot/selfdrive/car/cruise.py").read_text()
+    state = (ROOT / "opendbc_repo/opendbc/car/tesla/carstate.py").read_text()
+    dbc = (ROOT / "opendbc_repo/opendbc/dbc/tesla_can.dbc").read_text()
+    interface = (ROOT / "opendbc_repo/opendbc/car/tesla/interface.py").read_text()
+
+    for marker in (
+      "self.xnor_hybrid_op_longitudinal = bool(",
+      'CP.brand == "tesla"',
+      "CP.openpilotLongitudinalControl",
+      "CP.pcmCruise",
+      "if not self.CP.pcmCruise or self.xnor_hybrid_op_longitudinal:",
+      "if self.CP.pcmCruise and not self.xnor_hybrid_op_longitudinal:",
+    ):
+      self.assertIn(marker, cruise)
+
+    for marker in (
+      'di_state.get("XNOR_DI_cruiseSetLegacy"',
+      'di_state.get("XNOR_DI_digitalSpeedLegacy"',
+      "_cruise_set_scale",
+      "abs((2.0 * a) - b)",
+      "abs((2.0 * a) - v_u)",
+    ):
+      self.assertIn(marker, state)
+
+    self.assertIn('SG_ XNOR_DI_digitalSpeedLegacy : 32|8@1+ (1,0)', dbc)
+    self.assertIn('SG_ XNOR_DI_cruiseSetLegacy : 48|8@1+ (1,0)', dbc)
+
+    self.assertIn('p.get_bool("TinklaIgnoreStockAeb")', interface)
+    self.assertIn("ret.deprecated.vEgoStopping = 0.1", interface)
+    self.assertIn("ret.deprecated.vEgoStarting = 0.1", interface)
+    self.assertIn("ret.deprecated.stoppingDecelRate = 0.3", interface)
+
+  def test_0111_dec_release_and_stopping_behavior_are_restored(self):
+    planner = (ROOT / "openpilot/selfdrive/controls/lib/longitudinal_planner.py").read_text()
+    longcontrol = (ROOT / "openpilot/selfdrive/controls/lib/longcontrol.py").read_text()
+
+    for marker in (
+      "class XnorDynamicExperimentalControl:",
+      "_DEC_ENTER_URGENCY = 0.24",
+      "_DEC_EXIT_URGENCY = 0.12",
+      "model_should_stop",
+      "cruise_recovery",
+      "XNOR_V230_DEC",
+      "_RELEASE_BOOST_FLOOR_MS2 = 0.45",
+      "XNOR_V232_RELEASE",
+      "def _xnor_mpc_should_stop(",
+      'getattr(deprecated, "vEgoStopping"',
+      "v_target_1sec",
+      "_xnor_v220_diag",
+    ):
+      self.assertIn(marker, planner)
+
+    self.assertIn("_xnor_stopping_decel_rate", longcontrol)
+    self.assertIn('getattr(deprecated, "stoppingDecelRate"', longcontrol)
+    self.assertIn("output_accel -= self._xnor_stopping_decel_rate * DT_CTRL", longcontrol)
 
 
 if __name__ == "__main__":
