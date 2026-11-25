@@ -1,7 +1,7 @@
 import math
 from enum import StrEnum, auto
 
-from openpilot.cereal import messaging
+from openpilot.cereal import log, messaging
 from opendbc.car.structs import car
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.locationd.helpers import Pose
@@ -11,6 +11,17 @@ from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 
 MIN_EXCESSIVE_ACTUATION_COUNT = int(0.25 / DT_CTRL)
 MIN_LATERAL_ENGAGE_BUFFER = int(1 / DT_CTRL)
+
+
+def hybrid_lane_change_steer_handover(CP, CS, model_v2) -> bool:
+  """True while Hybrid intentionally does not give OP lane-change steering authority."""
+  lane_change_active = model_v2.meta.laneChangeState != log.LaneChangeState.off
+  return bool(
+    CP.brand == "tesla"
+    and CP.pcmCruise
+    and lane_change_active
+    and (CS.stockLkas or not CS.teslaAlcHandoverReady)
+  )
 
 
 class ExcessiveActuationType(StrEnum):
