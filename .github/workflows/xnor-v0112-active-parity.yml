@@ -47,3 +47,24 @@ jobs:
           # the test phase directly rather than test.sh's unrelated coverage gate.
           source setup.sh
           python -m unittest discover -s opendbc/safety/tests
+
+
+  linux-integration:
+    name: Tesla fix Linux lint + build + unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install headless GLES runtime
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgles2 libegl1
+      - name: Set up openpilot
+        run: ./tools/op.sh setup
+      - name: Static analysis
+        run: scripts/lint/lint.sh
+      - name: Build openpilot
+        run: scons
+      - name: Run unit tests
+        env:
+          RAYLIB_BACKEND: headless
+        run: tools/op.sh test
