@@ -1047,7 +1047,10 @@ def bench(args):
     hello=peer.hello(usb_link=not args.allow_other_network)
     meta['ls2_stage_diagnostics_supported']=bool(hello.get('ls2_stage_diagnostics'))
     if args.fetch_stage_report and not meta['ls2_stage_diagnostics_supported']:
-      raise RuntimeError('Stage tracing unavailable in this Android Jetlink app. Install the signed V0.5 diagnostics APK first; original V5.4 still works without --fetch-stage-report.')
+      raise RuntimeError(
+        'Stage tracing unavailable in this Android Jetlink app. Install the signed V0.5 diagnostics APK first; '
+        'original V5.4 still works without --fetch-stage-report.'
+      )
     meta['ping_rtt_ms']=pct(peer.ping_samples(args.pings))
     meta['udp_advertised']=bool(hello.get('frame_port') and hello.get('frame_token'))
     if args.transport=='udp':
@@ -1400,7 +1403,12 @@ def bench(args):
                              'capture_to_reply_is_separate':True},
              'phone_stage_trace_available':bool(stage_report),
              'phone_stage_timing_ms':stage_metrics,
-             'phone_stage_trace_note':'Phone *_us durations are converted into ms here; phone and comma monotonic clock epochs are not aligned. Reassembly begins on the first accepted UDP packet in userspace, not the kernel receive timestamp. Timings are observational only.', 'inference_verified':not errors and counts['frames']>0,
+             'phone_stage_trace_note': (
+               'Phone *_us durations are converted into ms here; phone and comma monotonic clock epochs are not aligned. '
+               'Reassembly begins on the first accepted UDP packet in userspace, not the kernel receive timestamp. '
+               'Timings are observational only.'
+             ),
+             'inference_verified': not errors and counts['frames'] > 0,
              'controls_affected':False,
              'data_interpretation':'Independent passive on-road shadow only' if args.onroad_shadow else 'Independent parked-only shadow probe',
              'timing_ms':{k:pct([r[k] for r in records if r[k] is not None])
@@ -1445,7 +1453,10 @@ def bench(args):
         'authority_enabled': False,
         'full_numerical_parity_verified': False,
         'phone_only_20hz_is_not_connected_20hz': True,
-        'note': '50 ms complete path excludes upstream camerad buffering; capture-to-reply includes it. Pipelined throughput is separate from single-frame latency.',
+        'note': (
+          '50 ms complete path excludes upstream camerad buffering; capture-to-reply includes it. '
+          'Pipelined throughput is separate from single-frame latency.'
+        ),
       }
     (output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     print(json.dumps({'output':str(output),'counts':counts,'errors':errors,'timing_ms':summary['timing_ms']},indent=2),flush=True)
@@ -1456,7 +1467,10 @@ def parse_args(argv=None):
   p=argparse.ArgumentParser(description=__doc__)
   p.add_argument('--model', choices=('ls2', 'ctm'), default='ls2',
                  help='Pinned phone source model: LS2 (default) or Cinque Terre Original (2026-09-04)')
-  p.add_argument('--mode',choices=('synthetic','camera'),default='synthetic',help='camera: real NV12 frames, 2 cameras; synthetic: full-size Jetlink LS2 tensors')
+  p.add_argument(
+    '--mode', choices=('synthetic', 'camera'), default='synthetic',
+    help='camera: real NV12 frames, 2 cameras; synthetic: full-size Jetlink LS2 tensors'
+  )
   p.add_argument('--onroad-shadow',action='store_true',
                  help='PASSIVE observation only: allow real on-road camera frames, never publish predictions or control anything')
   p.add_argument('--compare-local',action='store_true',
