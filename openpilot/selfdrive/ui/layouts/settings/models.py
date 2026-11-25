@@ -1,9 +1,8 @@
 """XNOR model settings.
 
-Restores the old offroad SunnyPilot catalogue/download workflow while keeping
-0.11.2 onroad model execution separate. Downloading a bundle does not make it
-the running driving model; the native requested-model selector remains the
-explicit runtime preference surface.
+Restores the SunnyPilot catalogue/download workflow and the verified Tinygrad
+on-road runner. Stock modeld remains the fail-closed fallback for missing,
+corrupt or unsupported bundles.
 """
 import os
 
@@ -24,23 +23,23 @@ class ModelsLayout(XnorPanel):
     super().__init__()
 
     self._request = button_item(
-      "Requested onroad model", "SELECT",
-      description="Explicit native runtime preference. Unavailable or unqualified models fall back to stock.",
+      "Native artifact experiment", "SELECT",
+      description="Separate native 0.11.2 artifact preference. This does not override an active verified SunnyPilot Tinygrad bundle.",
       callback=self._select_requested, enabled=self.is_offroad,
     )
     self._runtime = text_item(
-      "Onroad model runtime", "Native selection",
-      description="A downloaded bundle is not automatically used by modeld.",
+      "Onroad model runtime", "Stock modeld",
+      description="Verified Tinygrad bundles run through the dedicated SunnyPilot modeld_v2 process. Any runtime/integrity failure falls back to stock.",
     )
 
     self._downloaded = text_item(
-      "Downloaded model bundle", "None",
-      description="Offroad download/cache state retained from the 0.11.1 SunnyPilot manager.",
+      "Active SunnyPilot bundle", "None",
+      description="The downloaded and SHA-256 verified bundle selected for the next on-road session.",
     )
     self._download_status = text_item("Download status", "Manager starting")
     self._download_select = button_item(
       "Download model bundle", "SELECT",
-      description="Downloads and SHA-256 verifies a bundle offroad. This does not start the old onroad tinygrad runner.",
+      description="Downloads and SHA-256 verifies a bundle offroad. A Tinygrad bundle becomes the on-road model after the next transition.",
       callback=self._select_download, enabled=self.is_offroad,
     )
     self._refresh_catalog = button_item(
@@ -87,6 +86,15 @@ class ModelsLayout(XnorPanel):
     else:
       self._downloaded.action_item.set_text("None")
 
+    runtime = "Stock modeld"
+    if isinstance(bundle, dict):
+      runner = bundle.get("runner")
+      runner_text = str(runner).lower()
+      if runner == 1 or "tinygrad" in runner_text:
+        name = bundle.get("internalName") or bundle.get("displayName") or "custom"
+        runtime = f"SunnyPilot Tinygrad — {str(name)[:45]}"
+    self._runtime.action_item.set_text(runtime)
+
     self._download_status.action_item.set_text(self._manager_status())
     self._cache.action_item.set_text(self._cache_size())
 
@@ -106,7 +114,7 @@ class ModelsLayout(XnorPanel):
           save_request(self._params, choice, confirmed_offroad=True)
       self.refresh()
 
-    dialog = MultiOptionDialog("Requested native model", list(labels), current=current, callback=confirmed)
+    dialog = MultiOptionDialog("Native 0.11.2 artifact experiment", list(labels), current=current, callback=confirmed)
     gui_app.push_widget(dialog)
 
   def _manager_status(self) -> str:

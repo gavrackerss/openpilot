@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -u
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+ROOT="$(cd "$DIR/../../.." >/dev/null && pwd)"
+export PYTHONPATH="$ROOT/tinygrad_repo:$ROOT:${PYTHONPATH:-}"
+
+child_pid=""
+stopping=0
+
+child_running() {
+  [ -n "${child_pid:-}" ] || return 1
+  kill -0 "$child_pid" 2>/dev/null || return 1
+  if [ -r "/proc/$child_pid/stat" ]; then
+    local _pid _comm state _rest
+    read -r _pid _comm state _rest < "/proc/$child_pid/stat" || return 1
+    [ "$state" != "Z" ] || return 1
+  fi
+  return 0
+}
+
+shutdown_child() {
+  stopping=1
+  if child_running; then
+    kill -TERM "$child_pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      child_running || break
+      sleep 0.1
+    done
+    child_running && kill -KILL "$child_pid" 2>/dev/null || true
+  fi
+  [ -z "${child_pid:-}" ] || wait "$child_pid" 2>/dev/null || true
+  child_pid=""
+  exit 0
+}
+
+trap shutdown_child INT TERM
+
+python3 "$DIR/modeld.py" "$@" &
+child_pid=$!
+wait "$child_pid"
+rc=$?
+child_pid=""
+trap - INT TERM
+
+if [ "$stopping" -eq 0 ] && [ "$rc" -ne 0 ]; then
+  echo "XNOR_MODEL_SELECTOR: SunnyPilot modeld failed (rc=$rc); preserving selection and using stock modeld for this drive" >&2
+  exec python3 "$ROOT/openpilot/selfdrive/modeld/modeld.py" "$@"
+fi
+exit 0

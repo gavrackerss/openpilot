@@ -1,0 +1,61 @@
+name: XNOR 0.11.2 SunnyPilot + mapd runtime
+
+on:
+  pull_request:
+    branches: [xnor-dev]
+    paths:
+      - 'openpilot/sunnypilot/**'
+      - 'selfdrive/mapd'
+      - 'openpilot/system/manager/process_config.py'
+      - 'openpilot/selfdrive/ui/ui_state.py'
+      - 'openpilot/selfdrive/ui/layouts/settings/models.py'
+      - 'openpilot/selfdrive/ui/layouts/settings/osm.py'
+      - 'openpilot/selfdrive/ui/onroad/manual_speed_limit.py'
+      - 'tests/test_xnor_v0112_sunnypilot_port.py'
+      - 'tests/test_xnor_v0112_mapd_runtime.py'
+      - '.github/workflows/xnor-v0112-sunnypilot-mapd.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Verify executable artifacts
+        run: |
+          test -x selfdrive/mapd
+          test -x openpilot/sunnypilot/modeld_v2/modeld
+          git ls-files -s selfdrive/mapd openpilot/sunnypilot/modeld_v2/modeld
+      - name: Run XNOR runtime contracts
+        run: |
+          python3 tests/test_xnor_v0112_sunnypilot_port.py -v
+          python3 tests/test_xnor_v0112_mapd_runtime.py -v
+      - name: Compile Python surfaces
+        run: |
+          python3 -m py_compile             openpilot/system/manager/process_config.py             openpilot/sunnypilot/modeld_v2/runtime_helpers.py             openpilot/sunnypilot/modeld_v2/modeld.py             openpilot/sunnypilot/modeld_v2/parse_model_outputs.py             openpilot/sunnypilot/modeld_v2/parse_model_outputs_split.py             openpilot/selfdrive/ui/layouts/settings/models.py             openpilot/selfdrive/ui/layouts/settings/osm.py             openpilot/selfdrive/ui/ui_state.py             openpilot/selfdrive/ui/onroad/manual_speed_limit.py
+
+
+  linux-integration:
+    name: Linux lint + build + unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install headless GLES runtime
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libgles2 libegl1
+      - name: Set up openpilot
+        run: ./tools/op.sh setup
+      - name: Static analysis
+        run: scripts/lint/lint.sh
+      - name: Build openpilot
+        run: scons
+      - name: Run unit tests
+        env:
+          RAYLIB_BACKEND: headless
+        run: tools/op.sh test
