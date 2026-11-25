@@ -57,7 +57,7 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("jetlink_authority.attach(", modeld)
     self.assertIn("jetlink_authority.handed_over(model)", modeld)
     self.assertIn("jetlink_authority.remote_active(model)", modeld)
-    self.assertIn("model.frame_drop_ratio = frame_drop_ratio", modeld)
+    self.assertIn('setattr(model, "frame_drop_ratio", frame_drop_ratio)', modeld)
 
     # Stock 0.11.2 action extraction remains a separate function and path.
     self.assertIn("def get_action_from_model(", modeld)
