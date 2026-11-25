@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression guards for the live XNOR 0.11.1 Jetlink/LS2 parity port."""
 from pathlib import Path
+import hashlib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,11 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("5.9.3-r4-native-jetlink-v58-camera-warp", native)
     self.assertIn("JoiningModelState", native)
     self.assertIn("JetlinkModelState", native)
+
+    native_bytes = (ROOT / "openpilot/jetlink_native_authority.py").read_bytes()
+    git_blob = b"blob " + str(len(native_bytes)).encode() + b"\\0" + native_bytes
+    self.assertEqual(hashlib.sha1(git_blob, usedforsecurity=False).hexdigest(),
+                     "41a05abeaba6e84ae728b9d42e7032f5027f413f")
 
   def test_0112_adapter_changes_only_the_resident_small_model_boundary(self):
     authority = (ROOT / "openpilot/jetlink_authority.py").read_text()
