@@ -31,7 +31,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
-from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, get_curvature_from_plan, should_stop, smooth_value
+from openpilot.selfdrive.controls.lib.drive_helpers import curv_from_psis, smooth_value
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.fill_model_msg import fill_driving_model_data, fill_model_msg, fill_pose_msg, PublishState
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser as CurrentParser
@@ -66,6 +66,29 @@ def _find_driving_pkl(bundle) -> str | None:
   return None
 
 
+def _legacy_get_accel_from_plan(speeds, accels, t_idxs, action_t=DT_MDL, v_ego_stopping=0.05):
+  """Final 0.11.1 SunnyPilot action interpolation, isolated from stock 0.11.2."""
+  if len(speeds) == len(t_idxs):
+    v_now = speeds[0]
+    a_now = accels[0]
+    v_target = np.interp(action_t, t_idxs, speeds)
+    a_target = 2 * (v_target - v_now) / action_t - a_now
+    v_target_1sec = np.interp(action_t + 1.0, t_idxs, speeds)
+  else:
+    v_target = 0.0
+    v_target_1sec = 0.0
+    a_target = 0.0
+  stop = v_target < v_ego_stopping and v_target_1sec < v_ego_stopping
+  return float(a_target), bool(stop)
+
+
+def _legacy_get_curvature_from_plan(yaws, yaw_rates, t_idxs, v_ego, action_t):
+  """Final 0.11.1 curvature interpolation (no 0.11.2 MIN_STABLE_DELAY blend)."""
+  psi_target = np.interp(action_t, t_idxs, yaws)
+  psi_rate = yaw_rates[0]
+  return float(curv_from_psis(psi_target, psi_rate, v_ego, action_t))
+
+
 class FrameMeta:
   frame_id = 0
   timestamp_sof = 0
@@ -85,6 +108,7 @@ class SunnyPilotModelState:
       raise RuntimeError("No active SunnyPilot model bundle")
     self.generation = int(self.bundle.generation)
     self.is_20hz = bool(self.bundle.is20hz)
+    self.mlsim = self.generation >= 11
     overrides = {o.key: o.value for o in self.bundle.overrides}
     self.lat_smooth = float(overrides.get("lat", "0") or 0)
     self.long_smooth = float(overrides.get("long", "0") or 0)
@@ -166,10 +190,13 @@ class SunnyPilotModelState:
       self.full_frames[key] = self.blob_cache[cache_key]
 
     desire = inputs[self.desire_key]
+    # Exact final 0.11.1 SunnyPilot semantics: clear the 'none' desire before
+    # edge encoding and do not feed action_t into the local compiled bundle.
+    desire[0] = 0
     self.npy[self.desire_key][:] = np.where(desire - self.prev_desire > .99, desire, 0)
     self.prev_desire[:] = desire
 
-    for key in ("traffic_convention", "lateral_control_params", "action_t"):
+    for key in ("traffic_convention", "lateral_control_params"):
       if key in self.npy and key in inputs:
         self.npy[key][:] = inputs[key]
 
@@ -203,40 +230,42 @@ class SunnyPilotModelState:
     if "desired_curvature" in outputs and "prev_desired_curv" in self.npy:
       buf = self.npy["prev_desired_curv"]
       buf[0, :-1] = buf[0, 1:]
-      buf[0, -1, :] = outputs["desired_curvature"][0, :]
+      buf[0, -1, :] = outputs["desired_curvature"][0, :] if not self.mlsim else 0
     return outputs
 
   def action(self, output: dict[str, np.ndarray], prev: log.ModelDataV2.Action,
              lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
-    if "action" in output:
-      desired_accel = float(output["action"][0, 1])
-      desired_curvature = float(output["action"][0, 0]) / max(1.0, v_ego) ** 2
-    else:
-      plan = output["plan"][0]
-      desired_accel = float(get_accel_from_plan(
-        plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0],
-        self.constants.T_IDXS, action_t=long_action_t))
-      curvature_plan = plan
-      if "planplus" in output and self.planplus_control != 1.0:
-        curvature_plan = plan + (self.planplus_control - 1.0) * output["planplus"][0]
-      if "desired_curvature" in output:
-        desired_curvature = float(output["desired_curvature"][0, 0])
-      else:
-        desired_curvature = float(get_curvature_from_plan(
-          curvature_plan[:, Plan.T_FROM_CURRENT_EULER][:, 2],
-          curvature_plan[:, Plan.ORIENTATION_RATE][:, 2],
-          self.constants.T_IDXS, v_ego, lat_action_t))
-
+    """Final 0.11.1 SunnyPilot action semantics on the 0.11.2 runtime."""
+    plan = output["plan"][0]
+    desired_accel, stop = _legacy_get_accel_from_plan(
+      plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0],
+      self.constants.T_IDXS, action_t=long_action_t,
+    )
     desired_accel = smooth_value(desired_accel, prev.desiredAcceleration, self.long_smooth)
-    if v_ego > self.min_lat_speed:
-      desired_curvature = smooth_value(desired_curvature, prev.desiredCurvature, self.lat_smooth)
+
+    curvature_plan = plan
+    if "planplus" in output and self.planplus_control != 1.0:
+      curvature_plan = plan + (self.planplus_control - 1.0) * output["planplus"][0]
+
+    if not self.mlsim and "desired_curvature" in output:
+      desired_curvature = float(output["desired_curvature"][0, 0])
     else:
-      desired_curvature = prev.desiredCurvature
+      desired_curvature = _legacy_get_curvature_from_plan(
+        curvature_plan[:, Plan.T_FROM_CURRENT_EULER][:, 2],
+        curvature_plan[:, Plan.ORIENTATION_RATE][:, 2],
+        self.constants.T_IDXS, v_ego, lat_action_t,
+      )
+
+    if self.generation >= 10:
+      if v_ego > self.min_lat_speed:
+        desired_curvature = smooth_value(desired_curvature, prev.desiredCurvature, self.lat_smooth)
+      else:
+        desired_curvature = prev.desiredCurvature
 
     return log.ModelDataV2.Action(
       desiredCurvature=float(desired_curvature),
       desiredAcceleration=float(desired_accel),
-      shouldStop=bool(should_stop(v_ego, desired_accel)),
+      shouldStop=bool(stop),
     )
 
 
