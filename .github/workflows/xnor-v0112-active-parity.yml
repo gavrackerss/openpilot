@@ -37,7 +37,7 @@ jobs:
         run: |
           python3 tests/test_xnor_v0112_active_parity.py -v
           python3 tests/test_xnor_v0112_native_pedal_inhibit.py -v
-          python3 tests/test_xnor_v0112_hybrid_steering_alerts.py -v
+          PYTHONPATH="$PWD" python3 tests/test_xnor_v0112_hybrid_steering_alerts.py -v
           python3 -m py_compile \
             openpilot/selfdrive/selfdrived/helpers.py \
             openpilot/selfdrive/selfdrived/selfdrived.py \
