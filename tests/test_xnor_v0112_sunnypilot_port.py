@@ -147,7 +147,7 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertNotIn("_recent_small_model", fetcher)
     self.assertNotIn("datetime.strptime", fetcher)
 
-    self.assertIn('"all compatible standard non-Chestnut SunnyPilot models.', ui)
+    self.assertIn('"Shows all compatible standard non-Chestnut SunnyPilot models.', ui)
     self.assertIn('f"{bundle.internalName} - {bundle.displayName}"', ui)
     self.assertNotIn(" — ", ui)
 
