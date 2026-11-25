@@ -69,6 +69,8 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("def jetlink_ls2_requested(started: bool)", manager)
     self.assertIn('/data/jetlink_xnor/AUTHORITY_ENABLED', manager)
     self.assertIn('/data/jetlink_xnor/LS2_AUTHORITY_QUALIFIED', manager)
+    self.assertIn('/data/jetlink_xnor/CTM_PARKED_TEST_ENABLED', manager)
+    self.assertIn('/data/jetlink_xnor/CTM_AUTHORITY_ENABLED', manager)
     self.assertIn("_XNOR_LS2_SESSION_STARTED", manager)
     self.assertIn("_XNOR_LS2_SESSION_REQUESTED", manager)
     self.assertIn("_jetlink_ls2_markers_present()", manager)
