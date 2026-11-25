@@ -59,12 +59,15 @@ class JetlinkLiveParity(unittest.TestCase):
   def test_ls2_owns_stock_modeld_only_when_both_old_markers_exist(self):
     manager = (ROOT / "openpilot/system/manager/process_config.py").read_text()
 
-    self.assertIn("def jetlink_ls2_requested()", manager)
+    self.assertIn("def jetlink_ls2_requested(started: bool)", manager)
     self.assertIn('/data/jetlink_xnor/AUTHORITY_ENABLED', manager)
     self.assertIn('/data/jetlink_xnor/LS2_AUTHORITY_QUALIFIED', manager)
-    self.assertIn("if jetlink_ls2_requested():", manager)
+    self.assertIn("_XNOR_LS2_SESSION_STARTED", manager)
+    self.assertIn("_XNOR_LS2_SESSION_REQUESTED", manager)
+    self.assertIn("_jetlink_ls2_markers_present()", manager)
+    self.assertIn("if jetlink_ls2_requested(started):", manager)
     self.assertIn("return False", manager)
-    self.assertIn("return jetlink_ls2_requested() or not is_tinygrad_model", manager)
+    self.assertIn("return jetlink_ls2_requested(started) or not is_tinygrad_model", manager)
 
   def test_port_does_not_create_or_auto_arm_authority_markers(self):
     paths = [
