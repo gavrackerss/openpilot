@@ -12,11 +12,7 @@ unit test or successful shadow run does not qualify vehicle-control behavior.
 """
 from __future__ import annotations
 
-from collections import deque
 from pathlib import Path
-from types import SimpleNamespace
-import queue
-import subprocess
 import threading
 import time
 
@@ -213,9 +209,9 @@ class _CameraWarp:
   def __init__(self, main_w: int, main_h: int):
     self.main_w, self.main_h = int(main_w), int(main_h)
     self.output = np.empty((2, 6, *MODEL_HW), dtype=np.uint8)
-    self._calibrations = [None, None]
-    self._maps = [None, None]
-    self._dimensions = [None, None]
+    self._calibrations: list[np.ndarray | None] = [None, None]
+    self._maps: list[np.ndarray | None] = [None, None]
+    self._dimensions: list[tuple[int, int] | None] = [None, None]
 
   def run(self, bufs: dict, transforms: dict):
     from openpilot.jetlink_shadow_bench import warp_indices
@@ -234,16 +230,20 @@ class _CameraWarp:
       if cam_w <= 0 or cam_h <= 0:
         raise ValueError('Invalid modeld camera dimensions')
       dims = (cam_w, cam_h)
-      if self._calibrations[i] is None or self._dimensions[i] != dims or not np.array_equal(self._calibrations[i], matrix):
+      calibration = self._calibrations[i]
+      if calibration is None or self._dimensions[i] != dims or not np.array_equal(calibration, matrix):
         indexes = warp_indices(cam_w, cam_h, MODEL_HW[0] * 2, MODEL_HW[1] * 2, matrix)
         if indexes.size != self.output[i].size or indexes.min() < 0 or indexes.max() >= src.size:
           raise ValueError('Pixel camera warp is outside the source frame')
         self._maps[i] = indexes
         self._calibrations[i] = matrix.copy()
         self._dimensions[i] = dims
-      if self._maps[i].max() >= src.size:
+      indexes = self._maps[i]
+      if indexes is None:
+        raise RuntimeError('Pixel camera warp map was not prepared')
+      if indexes.max() >= src.size:
         raise ValueError('Pixel camera frame size changed during driving')
-      np.take(src, self._maps[i], out=self.output[i].reshape(-1))
+      np.take(src, indexes, out=self.output[i].reshape(-1))
     return self.output
 
 
