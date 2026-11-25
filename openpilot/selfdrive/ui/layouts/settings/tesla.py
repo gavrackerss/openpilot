@@ -29,7 +29,9 @@ class TeslaLayout(XnorPanel):
        "Automatically sets cruise speed to the detected speed limit with an offset.",
        "TinklaAdjustAccWithSpeedLimit", None),
       ("Vision Speed Limit (UK)",
-       "Uses the road camera to recognise UK red-circle 20/30/40/50/60/70 mph signs. Confirmed vision limits can lower speed-limit matching but never raise above the Tesla/map limit. Higher signs only release the vision override.",
+       "Uses the road camera to recognize UK red-circle 20/30/40/50/60/70 mph signs. "
+       "Confirmed vision limits can lower speed-limit matching but never raise above the Tesla/map limit. "
+       "Higher signs only release the vision override.",
        "VisionSpeedLimitDetection", None),
       ("Offset is Percentage",
        "If enabled, offset is a percentage of the speed limit. Otherwise it is an absolute mph/kph offset.",
@@ -61,10 +63,12 @@ class TeslaLayout(XnorPanel):
       ("Autopilot Disabled", "Unity mode: steering assist when Tesla Autopilot is disabled.",
        "TinklaAutopilotDisabled", "TinklaHybridNativeAP"),
       ("Hybrid Native Autopilot",
-       "Experimental: keep native Tesla Autosteer/TACC and IC visuals active while openpilot substitutes only the steering command. Mutually exclusive with Autopilot Disabled; takes effect after restart/next drive.",
+       "Experimental: keep native Tesla Autosteer/TACC and IC visuals active while openpilot substitutes only the steering command. "
+       "Mutually exclusive with Autopilot Disabled; takes effect after restart/next drive.",
        "TinklaHybridNativeAP", "TinklaAutopilotDisabled"),
       ("0x247 Autosteer State Test",
-       "Experimental IC test: while normal xnor Autopilot-Disabled control is engaged, rewrite the native AP 0x247 unknown state field from its standby value to the value observed during genuine Tesla Autosteer. Does not run in Hybrid mode.",
+       "Experimental IC test: while normal xnor Autopilot-Disabled control is engaged, rewrite the native AP 0x247 unknown state field "
+       "from its standby value to the value observed during genuine Tesla Autosteer. Does not run in Hybrid mode.",
        "TinklaAutosteer247Test", None),
       ("Tesla VTB Steering",
        "Virtual Torque Blending: blends light driver steering input into Tesla angle control for smoother handoff. Default off.",
@@ -165,7 +169,7 @@ class TeslaLayout(XnorPanel):
 
   def _set_follow_distance(self, selection: str):
     try:
-      value = float(selection.split()[0])
+      value = float(selection.split(maxsplit=1)[0])
     except (ValueError, IndexError):
       return
     self._params.put("TinklaFollowDistance", f"{max(0.5, min(3.0, value)):.2f}")
@@ -187,7 +191,7 @@ class TeslaLayout(XnorPanel):
 
   def _set_radar_offset(self, selection: str):
     try:
-      value = float(selection.split()[0])
+      value = float(selection.split(maxsplit=1)[0])
     except (ValueError, IndexError):
       return
     self._params.put("TinklaRadarOffset", f"{max(-1.0, min(1.0, value)):+.1f}")
@@ -202,7 +206,7 @@ class TeslaLayout(XnorPanel):
 
   def _set_speed_limit_offset(self, selection: str):
     try:
-      value = float(selection.split()[0])
+      value = float(selection.split(maxsplit=1)[0])
     except (ValueError, IndexError):
       return
     is_metric = self._params.get_bool("IsMetric")
@@ -211,12 +215,12 @@ class TeslaLayout(XnorPanel):
     self._params.put("TinklaSpeedLimitOffset", f"{max(min_v, min(max_v, value)):.1f}")
 
   def _show_alc_delay(self):
-    options = [f"{(x / 2.0):.1f} s" for x in range(0, 21)]
+    options = [f"{(x / 2.0):.1f} s" for x in range(21)]
     self._open_dialog("Auto Lane Change Delay", options, self._alc_delay_text(), self._set_alc_delay)
 
   def _set_alc_delay(self, selection: str):
     try:
-      value = float(selection.split()[0])
+      value = float(selection.split(maxsplit=1)[0])
     except (ValueError, IndexError):
       return
     self._params.put("TinklaAlcDelay", f"{max(0.0, min(10.0, value)):.1f}")
