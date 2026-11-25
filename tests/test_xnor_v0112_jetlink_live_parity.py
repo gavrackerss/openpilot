@@ -31,7 +31,7 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("JetlinkModelState", native)
 
     native_bytes = (ROOT / "openpilot/jetlink_native_authority.py").read_bytes()
-    git_blob = b"blob " + str(len(native_bytes)).encode() + b"\\0" + native_bytes
+    git_blob = b"blob " + str(len(native_bytes)).encode() + b"\0" + native_bytes
     self.assertEqual(hashlib.sha1(git_blob, usedforsecurity=False).hexdigest(),
                      "41a05abeaba6e84ae728b9d42e7032f5027f413f")
 
