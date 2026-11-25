@@ -47,6 +47,7 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("max(2.5, v_ego) ** 2", modeld)
     self.assertIn("v_target_1sec", modeld)
     self.assertIn("smooth_value(float(remote_action[1])", modeld)
+    self.assertIn("lat_delay + DT_MDL, long_delay + DT_MDL, v_ego", modeld)
     self.assertIn("jetlink_authority.attach(", modeld)
     self.assertIn("jetlink_authority.handed_over(model)", modeld)
     self.assertIn("jetlink_authority.remote_active(model)", modeld)
