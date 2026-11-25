@@ -187,7 +187,11 @@ def run_once(verbose: bool = True, forced_host: str | None = None, forced_port: 
       raise ValueError(f'Invalid TCP port {port}')
     candidates = [forced_host] if forced_host else usb_tether_candidates()
     if not candidates:
-      state = {'connected': False, 'reason': 'No USB-tether gateway found; set /data/jetlink_xnor/HOST', 'timestamp_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+      state = {
+        'connected': False,
+        'reason': 'No USB-tether gateway found; set /data/jetlink_xnor/HOST',
+        'timestamp_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+      }
       _status(state)
       if verbose: print(json.dumps(state, indent=2))
       return False
@@ -200,7 +204,13 @@ def run_once(verbose: bool = True, forced_host: str | None = None, forced_port: 
         return True
       except (LinkError, OSError, TimeoutError, ValueError) as e:
         errors.append(f'{host}:{port}: {e}')
-    state = {'connected': False, 'errors': errors, 'candidates': candidates, 'timestamp_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'mode': 'diagnostics-only'}
+    state = {
+      'connected': False,
+      'errors': errors,
+      'candidates': candidates,
+      'timestamp_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+      'mode': 'diagnostics-only',
+    }
     _status(state)
     if verbose: print(json.dumps(state, indent=2))
     return False
