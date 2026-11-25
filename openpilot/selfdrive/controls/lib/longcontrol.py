@@ -42,6 +42,13 @@ class LongControl:
     self.pid = PIDController(0.0, (CP.longitudinalTuning.kiBP, CP.longitudinalTuning.kiV),
                              rate=1 / DT_CTRL)
     self.last_output_accel = 0.0
+    deprecated = getattr(CP, "deprecated", None)
+    configured_stop_rate = float(getattr(deprecated, "stoppingDecelRate", 0.0) or 0.0) if deprecated is not None else 0.0
+    self._xnor_stopping_decel_rate = (
+      configured_stop_rate
+      if CP.brand == "tesla" and CP.openpilotLongitudinalControl and configured_stop_rate > 0.0
+      else 1.0
+    )
 
   def reset(self):
     self.pid.reset()
@@ -61,8 +68,9 @@ class LongControl:
       output_accel = self.last_output_accel
       if output_accel > self.CP.stopAccel:
         output_accel = min(output_accel, 0.0)
-        # TODO: can we just go straight to stopAccel?
-        output_accel -= 1.0 * DT_CTRL  # m/s^2/s while trying to stop
+        # XNOR Tesla compatibility: 0.11.1 used the configured 0.3 m/s^2/s
+        # stopping ramp. Other 0.11.2 cars keep the upstream 1.0 rate.
+        output_accel -= self._xnor_stopping_decel_rate * DT_CTRL
       self.reset()
 
     else:  # LongCtrlState.pid
