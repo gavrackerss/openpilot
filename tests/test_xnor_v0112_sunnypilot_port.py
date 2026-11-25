@@ -53,10 +53,40 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertIn('"lateralDelay"', runtime)
     self.assertIn("open_file_chunked", runtime)
     self.assertIn("fill_driving_model_data", runtime)
-    self.assertIn("should_stop", runtime)
     self.assertNotIn("roadCameraState", runtime)
     self.assertNotIn("liveCalibration", runtime)
     self.assertNotIn("read_file_chunked", runtime)
+
+
+  def test_runtime_preserves_final_0111_action_and_recurrent_semantics(self):
+    runtime = (RUNTIME / "modeld.py").read_text()
+
+    # Final 0.11.1 SunnyPilot did NOT consume a raw action head for vehicle
+    # control. Acceleration and shouldStop came from the plan trajectory.
+    self.assertIn("def _legacy_get_accel_from_plan(", runtime)
+    self.assertIn("v_target_1sec = np.interp(action_t + 1.0", runtime)
+    self.assertIn("v_target < v_ego_stopping and v_target_1sec < v_ego_stopping", runtime)
+    action_start = runtime.index("  def action(")
+    action_end = runtime.index("\n\ndef main(", action_start)
+    action = runtime[action_start:action_end]
+    self.assertIn("_legacy_get_accel_from_plan(", action)
+    self.assertNotIn('output["action"]', action)
+
+    # Final 0.11.1 curvature path predates 0.11.2 MIN_STABLE_DELAY blending.
+    self.assertIn("def _legacy_get_curvature_from_plan(", runtime)
+    self.assertIn("psi_target = np.interp(action_t, t_idxs, yaws)", runtime)
+
+    # Generation >= 11 used MLSIM semantics: recurrent desired curvature is
+    # zeroed and direct desired_curvature output is ignored for action.
+    self.assertIn("self.mlsim = self.generation >= 11", runtime)
+    self.assertIn('outputs["desired_curvature"][0, :] if not self.mlsim else 0', runtime)
+    self.assertIn('if not self.mlsim and "desired_curvature" in output:', runtime)
+
+    # Preserve the final 0.11.1 desire-edge encoding and local input contract.
+    self.assertIn("desire[0] = 0", runtime)
+    self.assertIn('for key in ("traffic_convention", "lateral_control_params"):', runtime)
+    self.assertNotIn('for key in ("traffic_convention", "lateral_control_params", "action_t"):', runtime)
+
 
   def test_manager_enforces_single_modeld_owner(self):
     processes = (ROOT / "openpilot/system/manager/process_config.py").read_text()

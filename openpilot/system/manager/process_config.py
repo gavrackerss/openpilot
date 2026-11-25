@@ -98,7 +98,13 @@ def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 
 def tesla_v275_shadow(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return bool(started and getattr(CP, "brand", "") == "tesla" and os.path.isfile("/data/V275_Shadow/ENABLED"))
+  """0.11.1 V275 contract: passive shadow is mutually exclusive with the live vision-speed-limit path."""
+  try:
+    return bool(started and getattr(CP, "brand", "") == "tesla" and
+                not params.get_bool("VisionSpeedLimitDetection") and
+                os.path.isfile("/data/V275_Shadow/ENABLED"))
+  except Exception:
+    return False
 
 
 def livestream(started: bool, params: Params, CP: car.CarParams) -> bool:

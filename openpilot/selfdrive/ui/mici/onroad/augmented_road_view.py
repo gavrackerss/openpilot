@@ -175,6 +175,10 @@ class AugmentedRoadView(CameraView):
       self._offroad_label.set_text("start the car to\nuse openpilot")
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
+    # Speed-sign taps are owned by ManualSpeedLimitBar. Do not also turn the
+    # same release into the parent on-road click/scroll action.
+    if self._hud_renderer.manual_speed_limit_contains(mouse_pos):
+      return
     # Don't trigger click callback if bookmark was triggered
     if not self._bookmark_icon.interacting():
       super()._handle_mouse_release(mouse_pos)

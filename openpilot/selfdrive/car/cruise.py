@@ -31,6 +31,14 @@ CRUISE_INTERVAL_SIGN = {
 class VCruiseHelper:
   def __init__(self, CP):
     self.CP = CP
+    # XNOR 0.11.1 Hybrid contract: native Tesla PCM owns engagement, while
+    # openpilot retains its independent vCruise target. Do not feed the decoded
+    # Tesla DI SET back into the planner merely because pcmCruise is true.
+    self.xnor_hybrid_op_longitudinal = bool(
+      CP.brand == "tesla"
+      and CP.openpilotLongitudinalControl
+      and CP.pcmCruise
+    )
     self.v_cruise_kph = V_CRUISE_UNSET
     self.v_cruise_cluster_kph = V_CRUISE_UNSET
     self.v_cruise_kph_last = 0
@@ -45,7 +53,7 @@ class VCruiseHelper:
     self.v_cruise_kph_last = self.v_cruise_kph
 
     if CS.cruiseState.available:
-      if not self.CP.pcmCruise:
+      if not self.CP.pcmCruise or self.xnor_hybrid_op_longitudinal:
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_cruise_non_pcm(CS, enabled, is_metric)
         self.v_cruise_cluster_kph = self.v_cruise_kph
@@ -125,7 +133,7 @@ class VCruiseHelper:
 
   def initialize_v_cruise(self, CS, experimental_mode: bool) -> None:
     # initializing is handled by the PCM
-    if self.CP.pcmCruise:
+    if self.CP.pcmCruise and not self.xnor_hybrid_op_longitudinal:
       return
 
     initial = V_CRUISE_INITIAL_EXPERIMENTAL_MODE if experimental_mode else V_CRUISE_INITIAL
