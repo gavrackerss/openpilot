@@ -187,5 +187,65 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn("output_accel -= self._xnor_stopping_decel_rate * DT_CTRL", longcontrol)
 
 
+  def test_0111_post_update_behavior_is_restored_in_0112_lifecycle(self):
+    ctrl = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
+    state = (ROOT / "opendbc_repo/opendbc/car/tesla/carstate.py").read_text()
+
+    # 0.11.1 CarInterface.post_update ran HSO with latActive, actuators and the
+    # CarState frame. 0.11.2 has no post_update hook, so CarController must run
+    # the unchanged state machine before its lateral-authority decision.
+    for marker in (
+      "CS.hso_controller.update_stat(",
+      'bool(getattr(CC, "latActive", False))',
+      'int(getattr(CS, "_param_frame", self.frame))',
+    ):
+      self.assertIn(marker, ctrl)
+
+    # The same 0.11.1 post_update kept the last valid modelV2 lane/path sample
+    # for the legacy IC lane overlay.
+    for marker in (
+      "self.ic_model_data = None",
+      '"lane_probs": tuple(float(v) for v in model_v2.laneLineProbs)',
+      '"position_x": tuple(float(v) for v in model_v2.position.x)',
+      '"position_y": tuple(float(v) for v in model_v2.position.y)',
+    ):
+      self.assertIn(marker, state)
+
+    # Non-Hybrid ALC used a delayed steering nudge after preLaneChange. Hybrid
+    # remains independent, exactly as in 0.11.1.
+    for marker in (
+      "def _apply_legacy_alc_engagement_nudge",
+      "self.hybrid_native_ap",
+      'getattr(self, "alca_need_engagement", False)',
+      "ret.steeringPressed = True",
+      "ret.steeringTorque = 2.0",
+      "ret.steeringTorque = -2.0",
+    ):
+      self.assertIn(marker, state)
+
+  def test_0111_di_prime_and_set_transition_support_are_pinned(self):
+    ctrl = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
+    state = (ROOT / "opendbc_repo/opendbc/car/tesla/carstate.py").read_text()
+    safety = (ROOT / "opendbc_repo/opendbc/safety/modes/tesla_legacy.h").read_text()
+
+    # Paired GTW MITM was enabled in the working 0.11.1 tree. Both halves must
+    # stay together or DI/AP availability changes before OP engagement.
+    self.assertIn("_GTW_TX_AUTOPILOT2_BUS2 = True", ctrl)
+    self.assertIn("#define TESLA_LEGACY_MITM_BLOCK_STOCK_GTW 1", safety)
+
+    # Hold the real legacy DI SET through transient DI state transitions; this
+    # is what prevents a transient decode from becoming a bogus V231 target.
+    self.assertIn('trusted_cruise_set = str(src).startswith(("DI_cruiseSet", "XNOR_DI_cruiseSetLegacy"))', state)
+    self.assertIn("self._last_valid_stock_cruise_set_speed_ms", state)
+    self.assertIn("self._cruise_set_hold_src", state)
+
+    # Pre-engagement V229 priming remains independent of CC.enabled.
+    prime_start = ctrl.index("def _v229_stopgo_long(")
+    prime_end = ctrl.index("def update(", prime_start)
+    prime = ctrl[prime_start:prime_end]
+    self.assertIn('else:\n      mode = "priming"', prime)
+    self.assertIn("set_kph = _V229_ACC_STATE_ON, 0.0".replace("set_kph = ", "acc_state, set_kph = "), prime)
+
+
 if __name__ == "__main__":
   unittest.main(verbosity=2)
