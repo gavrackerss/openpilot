@@ -135,6 +135,23 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertNotIn("from openpilot.sunnypilot.models.requested_model import", ui)
 
 
+  def test_model_selector_exposes_full_compatible_catalogue_with_ascii_labels(self):
+    fetcher = (PKG / "fetcher.py").read_text()
+    ui = (ROOT / "openpilot/selfdrive/ui/layouts/settings/models.py").read_text()
+
+    self.assertIn("def _compatible_small_model(bundle: dict) -> bool:", fetcher)
+    self.assertIn('bundle.get("is_big") is not False', fetcher)
+    self.assertIn('str(bundle.get("runner")) != "tinygrad"', fetcher)
+    self.assertIn('str(bundle.get("generation")) != "12"', fetcher)
+    self.assertIn('return bool(bundle.get("is_20hz"))', fetcher)
+    self.assertNotIn("_recent_small_model", fetcher)
+    self.assertNotIn("datetime.strptime", fetcher)
+
+    self.assertIn('"all compatible standard non-Chestnut SunnyPilot models.', ui)
+    self.assertIn('f"{bundle.internalName} - {bundle.displayName}"', ui)
+    self.assertNotIn(" — ", ui)
+
+
   def test_model_manager_schema_service_exists(self):
     custom = (ROOT / "openpilot/cereal/custom.capnp").read_text()
     services = (ROOT / "openpilot/cereal/services.py").read_text()

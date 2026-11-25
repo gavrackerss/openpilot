@@ -35,7 +35,7 @@ class ModelsLayout(XnorPanel):
     self._download_status = text_item("Download status", "Manager starting")
     self._select = button_item(
       "Select SunnyPilot model", "SELECT",
-      description="Shows recent standard non-Chestnut SunnyPilot models. Downloads are SHA-256 verified before activation.",
+      description="Shows all compatible standard non-Chestnut SunnyPilot models. Downloads are SHA-256 verified before activation.",
       callback=self._select_model, enabled=self.is_offroad,
     )
     self._refresh_catalog = button_item(
@@ -104,7 +104,7 @@ class ModelsLayout(XnorPanel):
       runner_text = str(runner).lower()
       if runner == 1 or "tinygrad" in runner_text:
         name = bundle.get("internalName") or bundle.get("displayName") or "custom"
-        runtime = f"SunnyPilot Tinygrad — {str(name)[:45]}"
+        runtime = f"SunnyPilot Tinygrad - {str(name)[:45]}"
     self._runtime.action_item.set_text(runtime)
 
     self._download_status.action_item.set_text(self._manager_status())
@@ -118,7 +118,7 @@ class ModelsLayout(XnorPanel):
       bundle = manager.selectedBundle
       if not bundle or not bundle.ref:
         count = len(list(manager.availableBundles))
-        return f"Ready — {count} models" if count else "Ready — catalogue loading"
+        return f"Ready - {count} models" if count else "Ready - catalogue loading"
 
       states = {
         custom.ModelManagerSP.DownloadStatus.downloading: "Downloading",
@@ -180,7 +180,7 @@ class ModelsLayout(XnorPanel):
 
     for bundle in bundles:
       label = (
-        f"{bundle.internalName} — {bundle.displayName}"
+        f"{bundle.internalName} - {bundle.displayName}"
         if bundle.displayName and bundle.displayName != bundle.internalName
         else bundle.internalName
       )
