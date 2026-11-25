@@ -75,10 +75,10 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn('mode = "priming"', prime)
     self.assertIn("preengage_prime=", prime)
     # Priming is the final disengaged branch; it must not be guarded by CC.enabled.
-    self.assertIn('else:\\n      mode = "priming"', prime)
+    self.assertIn('else:\n      mode = "priming"', prime)
 
     sync_start = ctrl.index("if (not manual_active) and bool(self._v229_owner_now)")
-    sync_end = ctrl.index("if self.frame % 100 == 0:", sync_start)
+    sync_end = ctrl.index("elif bool(self._v229_owner_now):", sync_start)
     sync = ctrl[sync_start:sync_end]
     self.assertIn("blocked_upward_auto", sync)
     self.assertIn("BTN_DOWN2", sync)
