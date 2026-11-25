@@ -192,6 +192,44 @@ class ActiveParityContract(unittest.TestCase):
 
 
 
+
+  def test_final_0111_tesla_settings_are_live_controls_not_read_only_rows(self):
+    panel = (ROOT / "openpilot/selfdrive/ui/layouts/settings/tesla.py").read_text()
+
+    for key in (
+      "TinklaAdjustAccWithSpeedLimit",
+      "VisionSpeedLimitDetection",
+      "TinklaSpeedLimitUseRelative",
+      "TinklaEnableALC",
+      "TinklaUseTeslaRadarUpsideDown",
+      "TinklaTeslaRadarIgnoreSGUError",
+      "TinklaIgnoreStockAeb",
+      "TinklaAutopilotDisabled",
+      "TinklaHybridNativeAP",
+      "TinklaAutosteer247Test",
+      "XnorTeslaVirtualTorqueBlending",
+      "TinklaDisableStartStopSounds",
+      "TinklaDisablePromptSounds",
+    ):
+      self.assertIn(key, panel)
+    self.assertIn("toggle_item(", panel)
+    self.assertIn('exclusive_key="TinklaHybridNativeAP"', panel)
+    self.assertIn('exclusive_key="TinklaAutopilotDisabled"', panel)
+
+    for key in (
+      "TinklaFollowDistance",
+      "TinklaHandsOnLevel",
+      "TinklaRadarOffset",
+      "TinklaSpeedLimitOffset",
+      "TinklaAlcDelay",
+    ):
+      self.assertIn(key, panel)
+    self.assertIn("MultiOptionDialog", panel)
+
+    self.assertNotIn("Saved preference only", panel)
+    self.assertNotIn("Independent lateral engagement and auto-resume are not active", panel)
+
+
   def test_final_0111_v275_shadow_predicate_is_preserved(self):
     processes = (ROOT / "openpilot/system/manager/process_config.py").read_text()
     start = processes.index("def tesla_v275_shadow(")
