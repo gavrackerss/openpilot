@@ -3,6 +3,7 @@ import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar
+from openpilot.selfdrive.ui.onroad.manual_speed_limit import ManualSpeedLimitBar
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -120,6 +121,7 @@ class HudRenderer(Widget):
 
     self._turn_intent = TurnIntent()
     self._torque_bar = TorqueBar()
+    self._manual_speed_limit_bar = ManualSpeedLimitBar()
 
     self._txt_wheel: rl.Texture = gui_app.texture('icons_mici/wheel.png', 50, 50)
     self._txt_wheel_critical: rl.Texture = gui_app.texture('icons_mici/wheel_critical.png', 50, 50)
@@ -195,6 +197,21 @@ class HudRenderer(Widget):
       self._draw_model_source(rect)
 
     self._draw_steering_wheel(rect)
+
+    # Mici has its own on-road HUD renderer; the standard HUD already renders
+    # this control. Keep the same live V279 speed-sign control available here
+    # so comma devices using the mici path do not silently lose 40/50/60/NSL/X.
+    bar_width = min(760.0, max(520.0, rect.width - 170.0))
+    bar_height = 122.0
+    bar_x = rect.x + (rect.width - bar_width) / 2
+    bar_y = rect.y + rect.height - bar_height - 6
+    self._manual_speed_limit_bar.render(rl.Rectangle(bar_x, bar_y, bar_width, bar_height))
+
+  def manual_speed_limit_contains(self, mouse_pos) -> bool:
+    cp = ui_state.CP
+    if not (ui_state.started and cp is not None and str(getattr(cp, "brand", "")).lower() == "tesla"):
+      return False
+    return rl.check_collision_point_rec(mouse_pos, self._manual_speed_limit_bar.rect)
 
   def _draw_model_source(self, rect: rl.Rectangle) -> None:
     if ui_state.sm.recv_frame['selfdriveState'] < ui_state.started_frame:
