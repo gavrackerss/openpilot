@@ -135,9 +135,19 @@ class NativeXnorJetlinkContracts(unittest.TestCase):
     self.assertIn("REPLY_FLOATS = 2068", old)
     self.assertIn("'action' exists at 2062:2066", old)
 
-  def test_not_hooked_into_modeld_or_manager(self):
+  def test_live_0111_ls2_parity_is_marker_gated_and_staging_contract_stays_passive(self):
     runtime = (ROOT / "openpilot/selfdrive/modeld/modeld.py").read_text()
     manager = (ROOT / "openpilot/system/manager/process_config.py").read_text()
+
+    self.assertIn("jetlink_authority.attach(", runtime)
+    self.assertIn("get_ls2_action_from_model(", runtime)
+    self.assertIn("jetlink_authority.remote_active(model)", runtime)
+    self.assertIn("LS2_AUTHORITY_QUALIFIED", manager)
+    self.assertIn("AUTHORITY_ENABLED", manager)
+    self.assertIn("return jetlink_ls2_requested(started) or not is_tinygrad_model", manager)
+
+    # The earlier read-only compatibility/audit module never becomes an
+    # activation path. Production parity uses the confirmed 0.11.1 adapter.
     self.assertNotIn("jetlink_xnor_v0112", runtime + manager)
 
 

@@ -96,7 +96,7 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertIn('PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", and_(only_onroad, is_stock_model))', processes)
     self.assertIn('NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2"', processes)
     self.assertIn('PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad)', processes)
-    self.assertIn("return not is_tinygrad_model", processes)
+    self.assertIn("return jetlink_ls2_requested(started) or not is_tinygrad_model", processes)
     self.assertIn("COMMA_HARDWARE and _safe_model_runner", processes)
 
   def test_saved_selection_is_verified_and_persistent(self):

@@ -1,0 +1,32 @@
+name: XNOR 0.11.2 Jetlink LS2 parity
+
+on:
+  pull_request:
+    paths:
+      - "jetlink/**"
+      - "openpilot/jetlink_*.py"
+      - "openpilot/selfdrive/modeld/modeld.py"
+      - "openpilot/system/manager/process_config.py"
+      - "tests/test_xnor_v0112_jetlink*.py"
+      - ".github/workflows/xnor-v0112-jetlink-ls2.yml"
+  workflow_dispatch:
+
+jobs:
+  source-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile live adapters
+        run: |
+          python3 -m py_compile \
+            openpilot/jetlink_authority.py \
+            openpilot/jetlink_native_authority.py \
+            openpilot/jetlink_usb_peer.py \
+            openpilot/jetlink_shadow_bench.py \
+            openpilot/jetlink_xnor_probe.py \
+            openpilot/selfdrive/modeld/modeld.py \
+            openpilot/system/manager/process_config.py
+      - name: Run passive compatibility contract
+        run: python3 tests/test_xnor_v0112_jetlink_contract.py -v
+      - name: Run live 0.11.1 parity contract
+        run: python3 tests/test_xnor_v0112_jetlink_live_parity.py -v

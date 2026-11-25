@@ -38,13 +38,50 @@ def _safe_model_runner(started: bool, params: Params) -> int:
     return int(custom.ModelManagerSP.Runner.stock)
 
 
+_XNOR_LS2_SESSION_STARTED = False
+_XNOR_LS2_SESSION_REQUESTED = False
+
+
+def _jetlink_ls2_markers_present() -> bool:
+  return bool(
+    COMMA_HARDWARE
+    and os.path.isfile("/data/jetlink_xnor/AUTHORITY_ENABLED")
+    and os.path.isfile("/data/jetlink_xnor/LS2_AUTHORITY_QUALIFIED")
+    and not os.path.isfile("/data/jetlink_xnor/CTM_PARKED_TEST_ENABLED")
+    and not os.path.isfile("/data/jetlink_xnor/CTM_AUTHORITY_ENABLED")
+  )
+
+
+def jetlink_ls2_requested(started: bool) -> bool:
+  """Latch the final-0.11.1 LS2 choice for one complete on-road session.
+
+  The old path checked the markers when stock modeld started; it could not
+  switch model implementations merely because a marker changed mid-drive.
+  Preserve that boundary while still allowing marker changes while offroad.
+  """
+  global _XNOR_LS2_SESSION_STARTED, _XNOR_LS2_SESSION_REQUESTED
+
+  if started and not _XNOR_LS2_SESSION_STARTED:
+    _XNOR_LS2_SESSION_REQUESTED = _jetlink_ls2_markers_present()
+    _XNOR_LS2_SESSION_STARTED = True
+  elif not started:
+    _XNOR_LS2_SESSION_STARTED = False
+    _XNOR_LS2_SESSION_REQUESTED = False
+    return _jetlink_ls2_markers_present()
+
+  return _XNOR_LS2_SESSION_REQUESTED
+
+
 def is_tinygrad_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  if jetlink_ls2_requested(started):
+    return False
   return COMMA_HARDWARE and _safe_model_runner(started, params) == int(custom.ModelManagerSP.Runner.tinygrad)
 
 
 def is_stock_model(started: bool, params: Params, CP: car.CarParams) -> bool:
-  # SNPE, malformed and future/unknown runner values all fail closed to stock.
-  return not is_tinygrad_model(started, params, CP)
+  # LS2 explicitly requires the resident stock model as its live fallback.
+  # SNPE, malformed and future/unknown runner values also fail closed to stock.
+  return jetlink_ls2_requested(started) or not is_tinygrad_model(started, params, CP)
 
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
