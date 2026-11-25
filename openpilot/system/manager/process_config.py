@@ -38,13 +38,29 @@ def _safe_model_runner(started: bool, params: Params) -> int:
     return int(custom.ModelManagerSP.Runner.stock)
 
 
+def jetlink_ls2_requested() -> bool:
+  """Final 0.11.1 LS2 authority markers select the stock-modeld join path.
+
+  LS2's confirmed fallback was the resident stock QCOM model. Never start the
+  separate SunnyPilot modeld_v2 process at the same time.
+  """
+  return bool(
+    COMMA_HARDWARE
+    and os.path.isfile("/data/jetlink_xnor/AUTHORITY_ENABLED")
+    and os.path.isfile("/data/jetlink_xnor/LS2_AUTHORITY_QUALIFIED")
+  )
+
+
 def is_tinygrad_model(started: bool, params: Params, CP: car.CarParams) -> bool:
+  if jetlink_ls2_requested():
+    return False
   return COMMA_HARDWARE and _safe_model_runner(started, params) == int(custom.ModelManagerSP.Runner.tinygrad)
 
 
 def is_stock_model(started: bool, params: Params, CP: car.CarParams) -> bool:
-  # SNPE, malformed and future/unknown runner values all fail closed to stock.
-  return not is_tinygrad_model(started, params, CP)
+  # LS2 explicitly requires the resident stock model as its live fallback.
+  # SNPE, malformed and future/unknown runner values also fail closed to stock.
+  return jetlink_ls2_requested() or not is_tinygrad_model(started, params, CP)
 
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
