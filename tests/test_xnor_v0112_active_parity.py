@@ -213,8 +213,12 @@ class ActiveParityContract(unittest.TestCase):
     ):
       self.assertIn(key, panel)
     self.assertIn("toggle_item(", panel)
-    self.assertIn('exclusive_key="TinklaHybridNativeAP"', panel)
-    self.assertIn('exclusive_key="TinklaAutopilotDisabled"', panel)
+    # The settings table passes mutual-exclusion keys positionally into _toggle().
+    # Lock both directions of the final 0.11.1 contract without depending on call syntax.
+    self.assertIn('"TinklaAutopilotDisabled", "TinklaHybridNativeAP"', panel)
+    self.assertIn('"TinklaHybridNativeAP", "TinklaAutopilotDisabled"', panel)
+    self.assertIn("if state and exclusive_key is not None:", panel)
+    self.assertIn("self._params.put_bool(exclusive_key, False)", panel)
 
     for key in (
       "TinklaFollowDistance",
