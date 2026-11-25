@@ -96,7 +96,7 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertIn('PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", and_(only_onroad, is_stock_model))', processes)
     self.assertIn('NativeProcess("modeld_tinygrad", "openpilot/sunnypilot/modeld_v2"', processes)
     self.assertIn('PythonProcess("models_manager", "openpilot.sunnypilot.models.manager", only_offroad)', processes)
-    self.assertIn("return not is_tinygrad_model", processes)
+    self.assertIn("return jetlink_ls2_requested() or not is_tinygrad_model", processes)
     self.assertIn("COMMA_HARDWARE and _safe_model_runner", processes)
 
   def test_saved_selection_is_verified_and_persistent(self):
@@ -147,7 +147,7 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertNotIn("_recent_small_model", fetcher)
     self.assertNotIn("datetime.strptime", fetcher)
 
-    self.assertIn('"all compatible standard non-Chestnut SunnyPilot models.', ui)
+    self.assertIn('"Shows all compatible standard non-Chestnut SunnyPilot models.', ui)
     self.assertIn('f"{bundle.internalName} - {bundle.displayName}"', ui)
     self.assertNotIn(" — ", ui)
 
