@@ -128,6 +128,18 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn("ret.deprecated.vEgoStarting = 0.1", interface)
     self.assertIn("ret.deprecated.stoppingDecelRate = 0.3", interface)
 
+  def test_0111_legacy_hud_overlay_wire_behavior_is_restored(self):
+    ctrl = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
+    teslacan = (ROOT / "opendbc_repo/opendbc/car/tesla/teslacan_legacy.py").read_text()
+    safety = (ROOT / "opendbc_repo/opendbc/safety/modes/tesla_legacy.h").read_text()
+
+    self.assertIn("_ALLOW_LEGACY_HUD_WARNING_OVERLAY = True", ctrl)
+    self.assertIn('"DAS_lssState": 4', teslacan)
+    self.assertNotIn('"DAS_csaState": 2', teslacan)
+    # Safety overlay masks/cadence remain the proven 0.11.1 values.
+    self.assertIn("{0x399, 2, 0, 8, 500000U, 0x00F8031FU, 0xFF3FFFF0U", safety)
+    self.assertIn("{0x389, 2, 0, 8, 500000U, 0x00F0FF3CU, 0xFFFF3FFFU", safety)
+
   def test_0111_dec_release_and_stopping_behavior_are_restored(self):
     planner = (ROOT / "openpilot/selfdrive/controls/lib/longitudinal_planner.py").read_text()
     longcontrol = (ROOT / "openpilot/selfdrive/controls/lib/longcontrol.py").read_text()
