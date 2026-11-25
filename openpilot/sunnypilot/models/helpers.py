@@ -233,7 +233,7 @@ def get_active_model_runner(params: Params | None = None, force_check: bool = Fa
   # Re-establish the cleared runner cache after an on-road transition. Do
   # not trust a stale cached tinygrad value for a different selected bundle.
   if stored_cache != runner:
-    params.put('ModelRunnerTypeCache', runner)
+    params.put('ModelRunnerTypeCache', runner, block=True)
   return runner
 
 
