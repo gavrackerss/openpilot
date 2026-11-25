@@ -485,7 +485,10 @@ def main(demo=False):
 
       remote_ls2 = bool(jetlink_modeld and jetlink_authority is not None and jetlink_authority.remote_active(model))
       if remote_ls2:
-        action = get_ls2_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+        # Final 0.11.1 LS2 used +1 frame for the published action while the
+        # model input action_t itself used the +1.5-frame horizon above.
+        action = get_ls2_action_from_model(model_output, prev_action,
+                                           lat_delay + DT_MDL, long_delay + DT_MDL, v_ego)
       else:
         action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       prev_action = action
