@@ -126,9 +126,11 @@ class XnorDynamicExperimentalControl:
     self.reason = reason
     if self.mode != old_mode:
       lead = bool(sm["radarState"].leadOne.present)
-      cloudlog.info(f"[XNOR_V230_DEC] transition={old_mode}->{self.mode} reason={self.reason} "
-                    f"urgency={self.urgency:.3f} endpoint={self.endpoint_x:.1f} expected={self.expected_distance:.1f} "
-                    f"ego_kph={float(sm['carState'].vEgo) * 3.6:.1f} lead={int(lead)}")
+      cloudlog.info(
+        f"[XNOR_V230_DEC] transition={old_mode}->{self.mode} reason={self.reason} "
+        + f"urgency={self.urgency:.3f} endpoint={self.endpoint_x:.1f} expected={self.expected_distance:.1f} "
+        + f"ego_kph={float(sm['carState'].vEgo) * 3.6:.1f} lead={int(lead)}"
+      )
     return self.mode
 
 
@@ -326,8 +328,10 @@ class LongitudinalPlanner:
         and not brake_pressed and not gas_pressed and not force_slow_decel
         and not bool(output_should_stop_mpc) and release_forward and release_room):
       self._xnor_release_boost_frames = int(_RELEASE_BOOST_FRAMES)
-      cloudlog.info(f'[XNOR_V232_RELEASE] edge=1 action=arm dwell={stop_dwell_frames} '
-                    f'ego={v_ego:.2f} model3s_v={model_3s_v:.2f} cruise={v_cruise:.2f}')
+      cloudlog.info(
+        f"[XNOR_V232_RELEASE] edge=1 action=arm dwell={stop_dwell_frames} "
+        + f"ego={v_ego:.2f} model3s_v={model_3s_v:.2f} cruise={v_cruise:.2f}"
+      )
 
     release_cancel = bool(
       bool(output_should_stop_e2e) or bool(output_should_stop_mpc) or lead_present or bool(self.fcw)
@@ -350,24 +354,28 @@ class LongitudinalPlanner:
     if experimental_mode and self._xnor_dec.enabled():
       self._xnor_dec_diag_frames += 1
       if self._xnor_dec_diag_frames % 20 == 0:
-        cloudlog.info(f'[XNOR_V230_DEC] mode={self._xnor_dec.mode} reason={self._xnor_dec.reason} '
-                      f'lead={int(lead_present)} ego={v_ego:.2f} cruiseCap={v_cruise:.2f} '
-                      f'urgency={self._xnor_dec.urgency:.3f} endpoint={self._xnor_dec.endpoint_x:.1f} '
-                      f'expected={self._xnor_dec.expected_distance:.1f} '
-                      f'e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} '
-                      f'cruise_a={float(self.a_cruise):.3f} final_a={float(self.output_a_target):.3f}')
+        cloudlog.info(
+          f"[XNOR_V230_DEC] mode={self._xnor_dec.mode} reason={self._xnor_dec.reason} "
+          + f"lead={int(lead_present)} ego={v_ego:.2f} cruiseCap={v_cruise:.2f} "
+          + f"urgency={self._xnor_dec.urgency:.3f} endpoint={self._xnor_dec.endpoint_x:.1f} "
+          + f"expected={self._xnor_dec.expected_distance:.1f} "
+          + f"e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} "
+          + f"cruise_a={float(self.a_cruise):.3f} final_a={float(self.output_a_target):.3f}"
+        )
 
     if self._xnor_v220_diag:
       self._xnor_v220_diag_frames += 1
       if self._xnor_v220_diag_frames % 20 == 0:
         preview_x = float(np.interp(3.0, T_IDXS_MPC, model_x))
-        cloudlog.info(f'[XNOR_V220_PLANNER_SHADOW] experimental={int(experimental_mode)} '
-                      f'lead={int(lead_present)} ego={v_ego:.2f} cruiseCap={v_cruise:.2f} '
-                      f'model3s_x={preview_x:.2f} model3s_v={model_3s_v:.2f} '
-                      f'e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} '
-                      f'final_a={float(self.output_a_target):.3f} '
-                      f'e2e_stop={int(bool(output_should_stop_e2e))} mpc_stop={int(bool(output_should_stop_mpc))} '
-                      f'final_stop={int(bool(self.output_should_stop))}')
+        cloudlog.info(
+          f"[XNOR_V220_PLANNER_SHADOW] experimental={int(experimental_mode)} "
+          + f"lead={int(lead_present)} ego={v_ego:.2f} cruiseCap={v_cruise:.2f} "
+          + f"model3s_x={preview_x:.2f} model3s_v={model_3s_v:.2f} "
+          + f"e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} "
+          + f"final_a={float(self.output_a_target):.3f} "
+          + f"e2e_stop={int(bool(output_should_stop_e2e))} mpc_stop={int(bool(output_should_stop_mpc))} "
+          + f"final_stop={int(bool(self.output_should_stop))}"
+        )
 
     self.a_desired = float(self.output_a_target)
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
