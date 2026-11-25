@@ -6,6 +6,8 @@ on:
     paths:
       - 'opendbc_repo'
       - 'openpilot/selfdrive/controls/controlsd.py'
+      - 'openpilot/selfdrive/selfdrived/helpers.py'
+      - 'openpilot/selfdrive/selfdrived/selfdrived.py'
       - 'openpilot/selfdrive/controls/lib/longcontrol.py'
       - 'openpilot/selfdrive/controls/lib/longitudinal_planner.py'
       - 'openpilot/selfdrive/car/cruise.py'
@@ -15,6 +17,7 @@ on:
       - 'openpilot/selfdrive/ui/mici/onroad/augmented_road_view.py'
       - 'tests/test_xnor_v0112_active_parity.py'
       - 'tests/test_xnor_v0112_native_pedal_inhibit.py'
+      - 'tests/test_xnor_v0112_hybrid_steering_alerts.py'
       - '.github/workflows/xnor-v0112-active-parity.yml'
   workflow_dispatch:
 
@@ -34,7 +37,10 @@ jobs:
         run: |
           python3 tests/test_xnor_v0112_active_parity.py -v
           python3 tests/test_xnor_v0112_native_pedal_inhibit.py -v
+          python3 tests/test_xnor_v0112_hybrid_steering_alerts.py -v
           python3 -m py_compile \
+            openpilot/selfdrive/selfdrived/helpers.py \
+            openpilot/selfdrive/selfdrived/selfdrived.py \
             openpilot/selfdrive/controls/controlsd.py \
             openpilot/selfdrive/controls/lib/longcontrol.py \
             openpilot/selfdrive/controls/lib/longitudinal_planner.py \
@@ -52,6 +58,7 @@ jobs:
           # extensions do not meet upstream's global 100% gcov threshold, so use
           # the test phase directly rather than test.sh's unrelated coverage gate.
           source setup.sh
+          python -m unittest opendbc.car.tesla.tests.test_tesla
           python -m unittest discover -s opendbc/safety/tests
 
 
