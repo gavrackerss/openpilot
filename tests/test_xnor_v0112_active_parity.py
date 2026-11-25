@@ -140,6 +140,27 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn("{0x399, 2, 0, 8, 500000U, 0x00F8031FU, 0xFF3FFFF0U", safety)
     self.assertIn("{0x389, 2, 0, 8, 500000U, 0x00F0FF3CU, 0xFFFF3FFFU", safety)
 
+  def test_0111_steering_and_fallback_toggle_behavior_is_restored(self):
+    ctrl = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
+    values = (ROOT / "opendbc_repo/opendbc/car/tesla/values.py").read_text()
+    safety = (ROOT / "opendbc_repo/opendbc/safety/modes/tesla_legacy.h").read_text()
+
+    self.assertIn("from opendbc.car.lateral import apply_std_steer_angle_limits", ctrl)
+    self.assertIn("apply_std_steer_angle_limits(", ctrl)
+    self.assertNotIn("apply_steer_angle_limits_vm(", ctrl)
+    self.assertIn("CarControllerParams.ANGLE_LIMITS", ctrl)
+
+    self.assertIn("AngleSteeringLimits(", values)
+    self.assertIn("([0., 5., 15.], [11.5, 11.0, 4.6])", values)
+    self.assertIn("([0., 5., 15.], [11.5, 11.5, 6.2])", values)
+    self.assertIn("_UNITY_2B9_OVERLAY_TEMPLATE = True", ctrl)
+    self.assertIn("_GTW_TX_AUTOPILOT2_BUS2 = True", ctrl)
+
+    # Panda retains the same independent VM safety backstop used in 0.11.1.
+    self.assertIn("steer_angle_cmd_checks_vm", safety)
+    self.assertIn(".steer_ratio = 16.5f", safety)
+    self.assertIn(".wheelbase = 2.96f", safety)
+
   def test_0111_dec_release_and_stopping_behavior_are_restored(self):
     planner = (ROOT / "openpilot/selfdrive/controls/lib/longitudinal_planner.py").read_text()
     longcontrol = (ROOT / "openpilot/selfdrive/controls/lib/longcontrol.py").read_text()
