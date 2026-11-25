@@ -19,7 +19,7 @@ from openpilot.common.gps import get_gps_location_service
 from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
-from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
+from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck, hybrid_lane_change_steer_handover
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -420,7 +420,8 @@ class SelfdriveD:
     recent_steer_pressed = (self.sm.frame - self.last_steering_pressed_frame)*DT_CTRL < 2.0
     controlstate = self.sm['controlsState']
     lac = getattr(controlstate.lateralControlState, controlstate.lateralControlState.which())
-    if lac.active and not recent_steer_pressed and not self.CP.notCar:
+    hybrid_alc_handover = hybrid_lane_change_steer_handover(self.CP, CS, self.sm['modelV2'])
+    if lac.active and not recent_steer_pressed and not hybrid_alc_handover and not self.CP.notCar:
       clipped_speed = max(CS.vEgo, 0.3)
       actual_lateral_accel = controlstate.curvature * (clipped_speed**2)
       desired_lateral_accel = self.sm['modelV2'].action.desiredCurvature * (clipped_speed**2)
