@@ -6,7 +6,7 @@ on:
     paths:
       - 'opendbc_repo'
       - 'openpilot/selfdrive/controls/controlsd.py'
-      - 'openpilot/selfdrive/selfdrived/helpers.py'
+      - 'openpilot/selfdrive/selfdrived/hybrid_alerts.py'
       - 'openpilot/selfdrive/selfdrived/selfdrived.py'
       - 'openpilot/selfdrive/controls/lib/longcontrol.py'
       - 'openpilot/selfdrive/controls/lib/longitudinal_planner.py'
@@ -39,7 +39,7 @@ jobs:
           python3 tests/test_xnor_v0112_native_pedal_inhibit.py -v
           PYTHONPATH="$PWD" python3 tests/test_xnor_v0112_hybrid_steering_alerts.py -v
           python3 -m py_compile \
-            openpilot/selfdrive/selfdrived/helpers.py \
+            openpilot/selfdrive/selfdrived/hybrid_alerts.py \
             openpilot/selfdrive/selfdrived/selfdrived.py \
             openpilot/selfdrive/controls/controlsd.py \
             openpilot/selfdrive/controls/lib/longcontrol.py \
