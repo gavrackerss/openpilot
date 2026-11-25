@@ -71,6 +71,34 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
                                 shouldStop=bool(stop))
 
 
+def get_ls2_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
+                              lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+  """Exact final-0.11.1 XNOR LS2 direct-action semantics.
+
+  This is intentionally separate from 0.11.2's stock action path so restoring
+  Jetlink cannot change the local stock model's behavior.
+  """
+  plan = model_output["plan"][0]
+  remote_action = np.asarray(model_output.get("action", ()), dtype=np.float32).reshape(-1)
+  if remote_action.size < 2 or not np.isfinite(remote_action[:2]).all():
+    raise ValueError("Jetlink LS2 action head invalid")
+
+  speeds = plan[:, Plan.VELOCITY][:, 0]
+  if len(speeds) == len(ModelConstants.T_IDXS):
+    v_target = np.interp(long_action_t, ModelConstants.T_IDXS, speeds)
+    v_target_1sec = np.interp(long_action_t + 1.0, ModelConstants.T_IDXS, speeds)
+  else:
+    v_target = 0.0
+    v_target_1sec = 0.0
+  stop = v_target < 0.05 and v_target_1sec < 0.05
+
+  desired_accel = smooth_value(float(remote_action[1]), prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
+  desired_curvature = float(remote_action[0]) / max(2.5, v_ego) ** 2
+  return log.ModelDataV2.Action(desiredCurvature=desired_curvature,
+                                desiredAcceleration=float(desired_accel),
+                                shouldStop=bool(stop))
+
+
 class ChestnutState:
   # only modeld can access chestnut
   def __init__(self, pm: PubMaster, big: bool):
@@ -294,6 +322,24 @@ def main(demo=False):
       small_model = ModelState(vipc_client_main.width, vipc_client_main.height, False)
   if model is None:
     model = small_model
+
+  # Final 0.11.1 XNOR Jetlink/LS2 parity. This path is marker-gated inside
+  # jetlink_authority and only wraps the resident stock QCOM model. Chestnut
+  # and the separate SunnyPilot modeld_v2 process are never touched.
+  jetlink_modeld = False
+  jetlink_authority = None
+  if not USBGPU:
+    try:
+      from openpilot import jetlink_authority as _jetlink_authority
+      joined = _jetlink_authority.attach(model, vipc_client_main.width, vipc_client_main.height, runner="stock")
+      jetlink_modeld = joined is not model
+      model = joined
+      jetlink_authority = _jetlink_authority
+      if jetlink_modeld:
+        cloudlog.warning("XNOR LS2 Jetlink joiner armed; local stock model remains resident fallback")
+    except Exception:
+      cloudlog.exception("XNOR LS2 Jetlink attach failed; retaining local stock model")
+
   params.put_bool("UsbGpuLoading", False)
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
@@ -412,7 +458,12 @@ def main(demo=False):
 
     mt1 = time.perf_counter()
     try:
+      if jetlink_modeld:
+        model.frame_drop_ratio = frame_drop_ratio
       model_output = model.run(bufs, transforms, inputs)
+      if jetlink_modeld and jetlink_authority is not None and jetlink_authority.handed_over(model):
+        run_count = 0
+        frame_dropped_filter.x = 0.
     except Exception:
       if not params.get_bool("UsbGpuActive"):
         raise
@@ -432,12 +483,16 @@ def main(demo=False):
       drivingdata_send = messaging.new_message('drivingModelData')
       posenet_send = messaging.new_message('cameraOdometry')
 
-      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      remote_ls2 = bool(jetlink_modeld and jetlink_authority is not None and jetlink_authority.remote_active(model))
+      if remote_ls2:
+        action = get_ls2_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      else:
+        action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, extrinsics_calibration_seen)
-      modelv2_send.modelV2.big = model.usbgpu
+      modelv2_send.modelV2.big = bool((USBGPU and getattr(model, "usbgpu", False)) or remote_ls2)
 
       desire_state = modelv2_send.modelV2.meta.desireState
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
