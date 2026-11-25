@@ -55,7 +55,45 @@ class ActiveParityContract(unittest.TestCase):
     self.assertNotIn("CANPacker", ui)
     self.assertIn("ManualSpeedLimitBar", hud)
     self.assertIn("self._manual_speed_limit_bar.render", hud)
+
+    mici_hud = (ROOT / "openpilot/selfdrive/ui/mici/onroad/hud_renderer.py").read_text()
+    mici_road = (ROOT / "openpilot/selfdrive/ui/mici/onroad/augmented_road_view.py").read_text()
+    self.assertIn("ManualSpeedLimitBar", mici_hud)
+    self.assertIn("self._manual_speed_limit_bar.render", mici_hud)
+    self.assertIn("manual_speed_limit_contains", mici_hud)
+    self.assertIn("manual_speed_limit_contains(mouse_pos)", mici_road)
     self.assertIn('"XNORManualSpeedLimitMph"', params)
+
+
+  def test_v229_prime_is_preengagement_and_v231_auto_sync_cannot_raise_set(self):
+    ctrl = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
+
+    prime_start = ctrl.index("def _v229_stopgo_long(")
+    prime_end = ctrl.index("def update(", prime_start)
+    prime = ctrl[prime_start:prime_end]
+    self.assertIn("op_enabled = bool(CC.enabled)", prime)
+    self.assertIn('mode = "priming"', prime)
+    self.assertIn("preengage_prime=", prime)
+    # Priming is the final disengaged branch; it must not be guarded by CC.enabled.
+    self.assertIn('else:\\n      mode = "priming"', prime)
+
+    sync_start = ctrl.index("if (not manual_active) and bool(self._v229_owner_now)")
+    sync_end = ctrl.index("if self.frame % 100 == 0:", sync_start)
+    sync = ctrl[sync_start:sync_end]
+    self.assertIn("blocked_upward_auto", sync)
+    self.assertIn("BTN_DOWN2", sync)
+    self.assertIn("BTN_DOWN1", sync)
+    self.assertNotIn("BTN_UP2", sync)
+    self.assertNotIn("BTN_UP1", sync)
+
+    # Explicit manual V279 remains bidirectional.
+    manual_start = ctrl.index("def _v279_manual_cruise_sync")
+    manual_end = ctrl.index("def _speed_limit_sync", manual_start)
+    manual = ctrl[manual_start:manual_end]
+    self.assertIn("BTN_UP2", manual)
+    self.assertIn("BTN_UP1", manual)
+    self.assertIn("BTN_DOWN2", manual)
+    self.assertIn("BTN_DOWN1", manual)
 
 
 if __name__ == "__main__":
