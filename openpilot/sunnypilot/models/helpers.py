@@ -8,6 +8,7 @@ health-check cache. Model validation must NEVER remove this parameter. An
 invalid/unavailable artifact selects the stock *runtime* while keeping the
 requested bundle and a diagnostic explanation available for repair.
 """
+from __future__ import annotations
 
 import hashlib
 import json
@@ -162,7 +163,7 @@ def _bundle_needs_reset(active_bundle: custom.ModelManagerSP.ModelBundle, availa
   return not _bundle_is_valid_locally(active_bundle)
 
 
-def get_active_bundle(params: Params | None = None, raw_bundle_dict: dict | bytes | None = None) -> 'custom.ModelManagerSP.ModelBundle | None':
+def get_active_bundle(params: Params | None = None, raw_bundle_dict: dict | bytes | None = None) -> custom.ModelManagerSP.ModelBundle | None:
   params = params or Params()
   try:
     raw = raw_bundle_dict if raw_bundle_dict is not None else (params.get('ModelManager_ActiveBundle') or {})
