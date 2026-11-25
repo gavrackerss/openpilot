@@ -6,6 +6,9 @@ on:
     paths:
       - 'opendbc_repo'
       - 'openpilot/selfdrive/controls/controlsd.py'
+      - 'openpilot/selfdrive/controls/lib/longcontrol.py'
+      - 'openpilot/selfdrive/controls/lib/longitudinal_planner.py'
+      - 'openpilot/selfdrive/car/cruise.py'
       - 'openpilot/selfdrive/ui/onroad/hud_renderer.py'
       - 'openpilot/selfdrive/ui/onroad/manual_speed_limit.py'
       - 'openpilot/selfdrive/ui/mici/onroad/hud_renderer.py'
@@ -33,6 +36,9 @@ jobs:
           python3 tests/test_xnor_v0112_native_pedal_inhibit.py -v
           python3 -m py_compile \
             openpilot/selfdrive/controls/controlsd.py \
+            openpilot/selfdrive/controls/lib/longcontrol.py \
+            openpilot/selfdrive/controls/lib/longitudinal_planner.py \
+            openpilot/selfdrive/car/cruise.py \
             openpilot/selfdrive/ui/onroad/manual_speed_limit.py \
             openpilot/selfdrive/ui/onroad/hud_renderer.py \
             openpilot/selfdrive/ui/mici/onroad/hud_renderer.py \
