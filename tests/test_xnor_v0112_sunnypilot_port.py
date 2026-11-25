@@ -109,6 +109,22 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertNotIn("params.remove('ModelManager_ActiveBundle')", helpers)
     self.assertNotIn('params.remove("ModelManager_ActiveBundle")', helpers)
 
+  def test_model_selector_uses_live_catalogue_not_migration_experiment(self):
+    ui = (ROOT / "openpilot/selfdrive/ui/layouts/settings/models.py").read_text()
+
+    self.assertIn("from openpilot.sunnypilot.models.fetcher import ModelFetcher", ui)
+    self.assertIn("def _available_bundles(self):", ui)
+    self.assertIn("manager.availableBundles", ui)
+    self.assertIn("ModelFetcher(self._params).get_available_bundles()", ui)
+    self.assertIn('"Select SunnyPilot model"', ui)
+    self.assertIn('"CD210 / XNOR Default"', ui)
+    self.assertIn('"ModelManager_LastSyncTime_v23"', ui)
+
+    self.assertNotIn("Native artifact experiment", ui)
+    self.assertNotIn("Compatibility runner required", ui)
+    self.assertNotIn("from openpilot.sunnypilot.models.requested_model import", ui)
+
+
   def test_model_manager_schema_service_exists(self):
     custom = (ROOT / "openpilot/cereal/custom.capnp").read_text()
     services = (ROOT / "openpilot/cereal/services.py").read_text()
