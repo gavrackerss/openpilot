@@ -156,39 +156,39 @@ class _Progress:
 
 
 class _Small:
-  """Map existing split-model run(...,prepare_only) onto Zoompilot's model."""
+  """Adapt XNOR's resident local model to Zoompilot's joining contract.
+
+  The confirmed 0.11.1 runner used run(..., prepare_only). XNOR 0.11.2's
+  stock ModelState uses run(bufs, transforms, inputs). Keep the Jetlink
+  joining API unchanged and adapt only this local-model call boundary.
+  """
+
   def __init__(self, model, *, normalize_stock_views=False):
-    object.__setattr__(self, '_model', model)
-    # The pickled stock update_imgs TinyJit requires RESHAPE(BUFFER) queue
-    # arguments. After the first real warp, ModelState.run() stores the
-    # returned NOOP(BUFFER) tensors. The next local frame (including a
-    # remote-to-local fallback) then raises a TinyJit input-info mismatch.
-    # Save the ORIGINAL view layout, not its original buffer allocation.
-    object.__setattr__(self, '_queue_view_templates',
-                       {name: tensor.uop for name, tensor in model.img_queues.items()}
-                       if normalize_stock_views else {})
+    object.__setattr__(self, "_model", model)
+    object.__setattr__(
+      self,
+      "_v0112",
+      hasattr(model, "input_queues") and hasattr(model, "npy") and not hasattr(model, "img_queues"),
+    )
+    # Retain the final 0.11.1 queue-view repair for old-model regression tests
+    # and legacy tooling. Native 0.11.2 does not use img_queues.
+    object.__setattr__(
+      self,
+      "_queue_view_templates",
+      {name: tensor.uop for name, tensor in model.img_queues.items()}
+      if normalize_stock_views and not self._v0112 else {},
+    )
 
   def _normalize_img_queue_views(self):
-    # Restore only the UOp VIEW, wrapping the NEW, already-realized buffer.
-    # No Tensor.assign(), allocation, GPU memory copy, or JIT reset occurs.
-    # This runs after a successful local inference or prepare-only update,
-    # before a subsequent invocation of the precompiled image-warp TinyJit.
     for name, view in self._queue_view_templates.items():
       tensor = self._model.img_queues[name]
       if tuple(tensor.shape) != tuple(view.shape) or tensor.dtype != view.dtype:
-        raise RuntimeError(f'Stock local image queue changed shape/dtype: {name}')
-      # On this Tinygrad version RESHAPE has TWO source UOps:
-      # the underlying image queue buffer and the symbolic shape descriptor.
-      # The latter must be preserved to match update_imgs' captured TinyJit
-      # expected_input_info (RESHAPE(NOOP, VCONST)).
-      if view.op.name != 'RESHAPE' or len(view.src) != 2:
-        raise RuntimeError(f'Unexpected stock TinyJit queue view: {name} {view.op} ({len(view.src)} sources)')
+        raise RuntimeError(f"Stock local image queue changed shape/dtype: {name}")
+      if view.op.name != "RESHAPE" or len(view.src) != 2:
+        raise RuntimeError(f"Unexpected stock TinyJit queue view: {name} {view.op} ({len(view.src)} sources)")
       original_buffer = tensor.uop.base
       if original_buffer.buffer is None or not original_buffer.buffer.is_initialized():
-        raise RuntimeError(f'Uninitialized image queue buffer: {name}')
-      # Keep the NEW realized GPU allocation and its contents, but restore
-      # the original RESHAPE operation and its identical shape descriptor.
-      # Do not mutate original_buffer or invoke Tensor.assign/realize here.
+        raise RuntimeError(f"Uninitialized image queue buffer: {name}")
       tensor.uop = view.replace(src=(original_buffer, view.src[1]))
 
   def __getattr__(self, name):
@@ -198,8 +198,11 @@ class _Small:
     setattr(self._model, name, value)
 
   def run(self, bufs, transforms, inputs, after_enqueue=None):
-    value = self._model.run(bufs, transforms, inputs, False)
-    self._normalize_img_queue_views()
+    if self._v0112:
+      value = self._model.run(bufs, transforms, inputs)
+    else:
+      value = self._model.run(bufs, transforms, inputs, False)
+      self._normalize_img_queue_views()
     if after_enqueue is not None:
       after_enqueue()
     return value
@@ -310,7 +313,7 @@ class _Control:
   def in_control() -> bool:
     # Zoompilot never swaps while engaged or while control state is stale.
     try:
-      import cereal.messaging as messaging
+      from openpilot.cereal import messaging
       sm = _Control.sm
       if sm is None:
         _Control.sm = sm = messaging.SubMaster(['carState', 'carControl', 'selfdriveState'])
@@ -324,25 +327,37 @@ class _Control:
 
 
 def _reset_small(small):
-  """Zero the local model's existing history without invalidating TinyJit inputs.
+  """Zero the resident local model history in-place before LS2 fallback.
 
-  Stock modeld's update_imgs is a precompiled TinyJit. Tensor.assign(0)
-  rewrites the image queue's UOp (RESHAPE(NOOP) -> NOOP), even when the
-  underlying GPU buffer remains the same. The next warp call then raises
-  JitError: expected_input_info mismatch. Copying zero bytes into the
-  ALREADY-ALLOCATED QCOM buffer leaves its UOp, shape and identity intact.
-
-  QCOMAllocator._copyin synchronizes the GPU before writing the buffer.
-  This is used only on demotion, not on every model frame.
+  0.11.2 stores recurrent queues in input_queues/npy instead of the final
+  0.11.1 img_queues/numpy_inputs/full_input_queues layout. Do not rebuild the
+  model or replace queue Tensor objects on the realtime fallback frame.
   """
-  for a in small.numpy_inputs.values():
-    a.fill(0)
-  for t in small.img_queues.values():
-    buf = t.uop.base.buffer
+  if hasattr(small, "input_queues") and hasattr(small, "npy"):
+    for array in small.npy.values():
+      array.fill(0)
+    for name in ("img_q", "big_img_q", "feat_q", "desire_q"):
+      tensor = small.input_queues.get(name)
+      if tensor is None:
+        continue
+      buf = tensor.uop.base.buffer
+      if buf is None or not buf.is_initialized():
+        raise RuntimeError(f"Local 0.11.2 history buffer not initialized: {name}")
+      buf.copyin(memoryview(bytearray(buf.nbytes)))
+    small.prev_desire.fill(0)
+    if hasattr(small, "full_frames"):
+      small.full_frames.clear()
+    if hasattr(small, "_blob_cache"):
+      small._blob_cache.clear()
+    return
+
+  # Exact final 0.11.1 reset path.
+  for array in small.numpy_inputs.values():
+    array.fill(0)
+  for tensor in small.img_queues.values():
+    buf = tensor.uop.base.buffer
     if not buf.is_initialized():
-      raise RuntimeError('Local image history GPU buffer not initialized during fallback')
-    # Buffer.copyin writes to the same GPU allocation. Crucially, it does
-    # not mutate the Tensor.uop captured as an argument by update_imgs.
+      raise RuntimeError("Local image history GPU buffer not initialized during fallback")
     buf.copyin(memoryview(bytearray(buf.nbytes)))
   small.full_input_queues.reset()
   small.prev_desire.fill(0)
@@ -366,7 +381,9 @@ def prepare_only(model, bufs, transforms, inputs):
   the remote model is active (it owns the frame in that state).
   """
   small = getattr(model, '_small', None)
-  if small is not None and getattr(model, '_active', None) is small:
+  if small is not None and getattr(model, "_active", None) is small:
+    if getattr(small, "_v0112", False):
+      return small._model.run(bufs, transforms, inputs)
     value = small._model.run(bufs, transforms, inputs, True)
     small._normalize_img_queue_views()
     return value
