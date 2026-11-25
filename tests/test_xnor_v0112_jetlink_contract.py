@@ -144,7 +144,7 @@ class NativeXnorJetlinkContracts(unittest.TestCase):
     self.assertIn("jetlink_authority.remote_active(model)", runtime)
     self.assertIn("LS2_AUTHORITY_QUALIFIED", manager)
     self.assertIn("AUTHORITY_ENABLED", manager)
-    self.assertIn("return jetlink_ls2_requested() or not is_tinygrad_model", manager)
+    self.assertIn("return jetlink_ls2_requested(started) or not is_tinygrad_model", manager)
 
     # The earlier read-only compatibility/audit module never becomes an
     # activation path. Production parity uses the confirmed 0.11.1 adapter.
