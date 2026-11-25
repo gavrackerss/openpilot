@@ -182,6 +182,10 @@ class ActiveParityContract(unittest.TestCase):
     ):
       self.assertIn(marker, planner)
 
+    self.assertIn("mpc_positive = max(0.0, float(output_a_target_mpc))", planner)
+    self.assertIn("release_floor = min(float(_RELEASE_BOOST_FLOOR_MS2), mpc_positive)", planner)
+    self.assertNotIn("release_ceiling = max(0.0, min(float(output_a_target_mpc), float(self.a_cruise)))", planner)
+
     self.assertIn("_xnor_stopping_decel_rate", longcontrol)
     self.assertIn('getattr(deprecated, "stoppingDecelRate"', longcontrol)
     self.assertIn("output_accel -= self._xnor_stopping_decel_rate * DT_CTRL", longcontrol)
