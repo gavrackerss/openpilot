@@ -47,6 +47,8 @@ def _jetlink_ls2_markers_present() -> bool:
     COMMA_HARDWARE
     and os.path.isfile("/data/jetlink_xnor/AUTHORITY_ENABLED")
     and os.path.isfile("/data/jetlink_xnor/LS2_AUTHORITY_QUALIFIED")
+    and not os.path.isfile("/data/jetlink_xnor/CTM_PARKED_TEST_ENABLED")
+    and not os.path.isfile("/data/jetlink_xnor/CTM_AUTHORITY_ENABLED")
   )
 
 
