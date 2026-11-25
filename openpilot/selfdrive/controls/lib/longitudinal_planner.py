@@ -342,9 +342,11 @@ class LongitudinalPlanner:
       if release_cancel:
         self._xnor_release_boost_frames = 0
       else:
-        # Never exceed either 0.11.2 base controller's positive request.
-        release_ceiling = max(0.0, min(float(output_a_target_mpc), float(self.a_cruise)))
-        release_floor = min(float(_RELEASE_BOOST_FLOOR_MS2), release_ceiling)
+        # Exact 0.11.1 V232 behavior: the short release floor is bounded by
+        # MPC's already-computed positive request. The surrounding release gates
+        # still require no lead/FCW/pedal/stop and forward model/cruise room.
+        mpc_positive = max(0.0, float(output_a_target_mpc))
+        release_floor = min(float(_RELEASE_BOOST_FLOOR_MS2), mpc_positive)
         if release_floor > float(output_a_target):
           output_a_target = float(release_floor)
         self._xnor_release_boost_frames -= 1
