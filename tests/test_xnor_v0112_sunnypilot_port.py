@@ -109,6 +109,16 @@ class NativeSunnyPilotPort(unittest.TestCase):
     self.assertNotIn("params.remove('ModelManager_ActiveBundle')", helpers)
     self.assertNotIn('params.remove("ModelManager_ActiveBundle")', helpers)
 
+  def test_sunnypilot_helpers_defer_capnp_annotations(self):
+    helpers = (PKG / "helpers.py").read_text()
+
+    # pycapnp schema modules are not Python runtime types and cannot take part
+    # in PEP 604 unions during module import. Deferred annotations keep the
+    # selector/manager importable on the 0.11.2 Python runtime.
+    self.assertIn("from __future__ import annotations", helpers)
+    compile(helpers, str(PKG / "helpers.py"), "exec")
+
+
   def test_model_selector_uses_live_catalogue_not_migration_experiment(self):
     ui = (ROOT / "openpilot/selfdrive/ui/layouts/settings/models.py").read_text()
 
