@@ -6,9 +6,6 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 import time
-from datetime import datetime
-import re
-
 import requests
 from requests.exceptions import RequestException
 from openpilot.common.params import Params
@@ -203,31 +200,24 @@ class ModelFetcher:
     return False
 
   @staticmethod
-  def _recent_small_model(bundle: dict) -> bool:
-    """Only contemporary standard (non-Chestnut) Gen12 20 Hz models.
+  def _compatible_small_model(bundle: dict) -> bool:
+    """Only standard Qualcomm-class Tinygrad Gen12 20 Hz models.
 
     Do not treat missing is_big as False: fail closed for unknown catalogues.
-    Keep the list naturally open to future entries in this pinned v23 series.
+    The catalogue itself is already version-gated, so no arbitrary release-date
+    cutoff is needed here.
     """
     if bundle.get("is_big") is not False:
       return False
     if str(bundle.get("runner")) != "tinygrad" or str(bundle.get("generation")) != "12":
       return False
-    if not bundle.get("is_20hz"):
-      return False
-    match = re.search(r"\(([A-Za-z]+ \d{1,2}, 2026)\)$", bundle.get("display_name", ""))
-    if match is None:
-      return False
-    try:
-      return datetime.strptime(match.group(1), "%B %d, %Y") >= datetime(2026, 6, 1)
-    except ValueError:
-      return False
+    return bool(bundle.get("is_20hz"))
 
   def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
-    """Compact Qualcomm-class model picker: recent standard models + fallback.
+    """Qualcomm-class model picker: every compatible standard model + fallback.
 
     The downloaded / active legacy bundle is retained and never invalidated
-    just because earlier models have been hidden from the selector.
+    just because it is absent from the current modern catalogue.
     """
     self._consume_force_refresh()
     legacy_data, legacy_expired = self.model_cache.get()
@@ -267,15 +257,15 @@ class ModelFetcher:
     active_legacy = next((b for b in legacy_all if b.ref == active_ref), None)
 
     modern_raw = modern_data.get("bundles", []) if isinstance(modern_data, dict) else []
-    recent_data = {"bundles": [b for b in modern_raw if self._recent_small_model(b)]}
-    recent_models = self.model_parser.parse_models(recent_data)
-    recent_models.sort(key=lambda b: b.index, reverse=True)
+    compatible_data = {"bundles": [b for b in modern_raw if self._compatible_small_model(b)]}
+    compatible_models = self.model_parser.parse_models(compatible_data)
+    compatible_models.sort(key=lambda b: b.index, reverse=True)
 
     result = []
     refs = set()
     # Explicit, stable, high-numbered indices avoid collisions with legacy
     # index values and prevent stale queued downloads selecting wrong models.
-    for bundle in recent_models:
+    for bundle in compatible_models:
       bundle.index = 1000 + bundle.index
       if bundle.ref not in refs:
         result.append(bundle)
