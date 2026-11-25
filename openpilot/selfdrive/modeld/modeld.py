@@ -459,7 +459,7 @@ def main(demo=False):
     mt1 = time.perf_counter()
     try:
       if jetlink_modeld:
-        setattr(model, "frame_drop_ratio", frame_drop_ratio)
+        setattr(model, "frame_drop_ratio", frame_drop_ratio)  # noqa: B010
       model_output = model.run(bufs, transforms, inputs)
       if jetlink_modeld and jetlink_authority is not None and jetlink_authority.handed_over(model):
         run_count = 0
