@@ -29,9 +29,11 @@ class TeslaLayout(XnorPanel):
        "Automatically sets cruise speed to the detected speed limit with an offset.",
        "TinklaAdjustAccWithSpeedLimit", None),
       ("Vision Speed Limit (UK)",
-       "Uses the road camera to recognize UK red-circle 20/30/40/50/60/70 mph signs. "
-       "Confirmed vision limits can lower speed-limit matching but never raise above the Tesla/map limit. "
-       "Higher signs only release the vision override.",
+       " ".join((
+         "Uses the road camera to recognize UK red-circle 20/30/40/50/60/70 mph signs.",
+         "Confirmed vision limits can lower speed-limit matching but never raise above the Tesla/map limit.",
+         "Higher signs only release the vision override.",
+       )),
        "VisionSpeedLimitDetection", None),
       ("Offset is Percentage",
        "If enabled, offset is a percentage of the speed limit. Otherwise it is an absolute mph/kph offset.",
@@ -63,12 +65,16 @@ class TeslaLayout(XnorPanel):
       ("Autopilot Disabled", "Unity mode: steering assist when Tesla Autopilot is disabled.",
        "TinklaAutopilotDisabled", "TinklaHybridNativeAP"),
       ("Hybrid Native Autopilot",
-       "Experimental: keep native Tesla Autosteer/TACC and IC visuals active while openpilot substitutes only the steering command. "
-       "Mutually exclusive with Autopilot Disabled; takes effect after restart/next drive.",
+       " ".join((
+         "Experimental: keep native Tesla Autosteer/TACC and IC visuals active while openpilot substitutes only the steering command.",
+         "Mutually exclusive with Autopilot Disabled; takes effect after restart/next drive.",
+       )),
        "TinklaHybridNativeAP", "TinklaAutopilotDisabled"),
       ("0x247 Autosteer State Test",
-       "Experimental IC test: while normal xnor Autopilot-Disabled control is engaged, rewrite the native AP 0x247 unknown state field "
-       "from its standby value to the value observed during genuine Tesla Autosteer. Does not run in Hybrid mode.",
+       " ".join((
+         "Experimental IC test: while normal xnor Autopilot-Disabled control is engaged, rewrite the native AP 0x247 unknown state field",
+         "from its standby value to the value observed during genuine Tesla Autosteer. Does not run in Hybrid mode.",
+       )),
        "TinklaAutosteer247Test", None),
       ("Tesla VTB Steering",
        "Virtual Torque Blending: blends light driver steering input into Tesla angle control for smoother handoff. Default off.",
