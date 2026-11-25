@@ -191,6 +191,17 @@ class ActiveParityContract(unittest.TestCase):
     self.assertIn("output_accel -= self._xnor_stopping_decel_rate * DT_CTRL", longcontrol)
 
 
+
+  def test_final_0111_v275_shadow_predicate_is_preserved(self):
+    processes = (ROOT / "openpilot/system/manager/process_config.py").read_text()
+    start = processes.index("def tesla_v275_shadow(")
+    end = processes.index("\ndef ", start + 10)
+    predicate = processes[start:end]
+    self.assertIn('getattr(CP, "brand", "") == "tesla"', predicate)
+    self.assertIn('not params.get_bool("VisionSpeedLimitDetection")', predicate)
+    self.assertIn('os.path.isfile("/data/V275_Shadow/ENABLED")', predicate)
+
+
   def test_0111_post_update_behavior_is_restored_in_0112_lifecycle(self):
     ctrl = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
     state = (ROOT / "opendbc_repo/opendbc/car/tesla/carstate.py").read_text()
