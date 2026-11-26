@@ -344,7 +344,7 @@ def _reset_small(small):
         raise RuntimeError(f"Local 0.11.2 history buffer not initialized: {name}")
       # tinygrad at this checkout exposes Buffer.copy_from(), not the older
       # Buffer.copyin() helper. Keep the Tensor object/queue identity intact
-      # and zero the realised storage through Tensor.assign().
+      # and zero the realized storage through Tensor.assign().
       tensor.assign(0).realize()
     small.prev_desire.fill(0)
     if hasattr(small, "full_frames"):
