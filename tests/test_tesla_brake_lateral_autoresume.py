@@ -16,11 +16,18 @@ class TeslaBrakeLateralAutoResume(unittest.TestCase):
     self.assertFalse(tesla_op_long_brake_preserves_lateral("tesla", False))
     self.assertFalse(tesla_op_long_brake_preserves_lateral("toyota", True))
 
-  def test_selfdrived_does_not_turn_tesla_brake_into_full_disengagement(self):
-    source = (ROOT / "openpilot/selfdrive/selfdrived/selfdrived.py").read_text()
-    self.assertIn("tesla_op_long_brake_preserves_lateral(", source)
-    self.assertIn("e.name.raw != EventName.pcmDisable", source)
-    self.assertIn("brake_or_regen and not tesla_brake_long_only", source)
+  def test_brake_and_pcm_drop_do_not_turn_tesla_into_full_disengagement(self):
+    selfdrive = (ROOT / "openpilot/selfdrive/selfdrived/selfdrived.py").read_text()
+    self.assertIn("tesla_op_long_brake_preserves_lateral(", selfdrive)
+    self.assertIn("brake_or_regen and not tesla_brake_long_only", selfdrive)
+
+    car_events = (ROOT / "openpilot/selfdrive/car/car_events.py").read_text()
+    start = car_events.index("# Tesla OP-long separates lateral engagement")
+    block = car_events[start:start + 620]
+    self.assertIn("self.CP.brand == 'tesla'", block)
+    self.assertIn("self.CP.openpilotLongitudinalControl", block)
+    self.assertIn("if not tesla_op_long:", block)
+    self.assertIn("events.add(EventName.pcmDisable)", block)
 
   def test_controlsd_latch_covers_hybrid_and_normal_op_long(self):
     source = (ROOT / "openpilot/selfdrive/controls/controlsd.py").read_text()
