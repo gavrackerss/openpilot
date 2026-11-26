@@ -20,7 +20,7 @@ from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
-from openpilot.selfdrive.selfdrived.hybrid_alerts import hybrid_lane_change_steer_handover
+from openpilot.selfdrive.selfdrived.hybrid_alerts import hybrid_lane_change_steer_handover, tesla_op_long_brake_preserves_lateral
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -238,6 +238,9 @@ class SelfdriveD:
 
     # Add car events, ignore if CAN isn't valid
     if CS.canValid:
+      tesla_brake_long_only = tesla_op_long_brake_preserves_lateral(
+        self.CP.brand, bool(self.CP.openpilotLongitudinalControl)
+      )
       car_events = self.car_events.update(CS, self.CS_prev, self.sm['carControl']).to_msg()
       self.events.add_from_msg(car_events)
 
@@ -247,10 +250,15 @@ class SelfdriveD:
           # body always wants to enable
           self.events.add(EventName.pcmEnable)
 
-      # Disable on rising edge of accelerator or brake. Also disable on brake when speed > 0
-      if (CS.gasPressed and not self.CS_prev.gasPressed and self.disengage_on_accelerator) or \
-        (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) or \
-        (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill)):
+      gas_disengage = CS.gasPressed and not self.CS_prev.gasPressed and self.disengage_on_accelerator
+      brake_or_regen = (
+        (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill))
+        or (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill))
+      )
+      # 0.11.1/Unity Tesla behavior: a physical brake pauses longitudinal but
+      # leaves OP lateral active. This applies to Hybrid and normal OP-long.
+      # Other brands retain upstream pedalPressed behavior unchanged.
+      if gas_disengage or (brake_or_regen and not tesla_brake_long_only):
         self.events.add(EventName.pedalPressed)
 
     # Create events for temperature, disk space, and memory

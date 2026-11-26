@@ -185,6 +185,12 @@ class CarEvents:
       if CS.cruiseState.enabled and not CS_prev.cruiseState.enabled and not CS.blockPcmEnable:
         events.add(EventName.pcmEnable)
       elif not CS.cruiseState.enabled:
-        events.add(EventName.pcmDisable)
+        # Tesla OP-long separates lateral engagement from native TACC. In
+        # Hybrid, braking can drop the native cruise latch to STANDBY while OP
+        # lateral must remain active. Physical CANCEL is still handled above
+        # through buttonCancel and real faults keep their own disable events.
+        tesla_op_long = self.CP.brand == 'tesla' and self.CP.openpilotLongitudinalControl
+        if not tesla_op_long:
+          events.add(EventName.pcmDisable)
 
     return events
