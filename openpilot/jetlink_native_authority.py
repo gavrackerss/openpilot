@@ -185,8 +185,7 @@ class NativeModeldWarp:
     wide = np.ascontiguousarray(big_frame, dtype=np.uint8).reshape(-1)
     if road.size != self._frame_size["img"] or wide.size != self._frame_size["big_img"]:
       raise ValueError(
-        "Recorded NV12 size changed: "
-        f"{road.size}/{wide.size}, expected {self._frame_size['img']}/{self._frame_size['big_img']}"
+        f"Recorded NV12 size changed: {road.size}/{wide.size}, expected {self._frame_size['img']}/{self._frame_size['big_img']}"
       )
     self._run_tensors(
       Tensor(road, device=self._model.WARP_DEV).realize(),
