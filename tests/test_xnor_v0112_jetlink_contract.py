@@ -140,7 +140,8 @@ class NativeXnorJetlinkContracts(unittest.TestCase):
     manager = (ROOT / "openpilot/system/manager/process_config.py").read_text()
 
     self.assertIn("jetlink_authority.attach(", runtime)
-    self.assertIn("get_ls2_action_from_model(", runtime)
+    self.assertNotIn("def get_ls2_action_from_model(", runtime)
+    self.assertIn('action_fn = getattr(model, "get_action_from_model", get_action_from_model)', runtime)
     self.assertIn("jetlink_authority.remote_active(model)", runtime)
     self.assertIn("LS2_AUTHORITY_QUALIFIED", manager)
     self.assertIn("AUTHORITY_ENABLED", manager)
