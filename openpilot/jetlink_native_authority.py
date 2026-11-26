@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""XNOR Jetlink V5.9.3: native JetlinkClient + JetlinkModelState, Pixel protocol-v3.
+"""XNOR Jetlink V5.9.4: native JetlinkClient + JetlinkModelState, Pixel protocol-v3.
 
 The native Jetlink frame lifecycle, hold accounting, parser, and Zoompilot
 joining/demotion logic own timing. This module adds only the Pixel USB-tether
-transport adapter and a verified precompiled driving warp. No vehicle control
-is written here; modeld remains the publisher and stock the fallback.
+transport adapter and an adapter over the resident 0.11.2 modeld camera warp.
+No vehicle control is written here; modeld remains the publisher and the
+resident stock model remains the fallback.
 
-This adapter reuses the established V5.8/V5.9.2 CPU NV12 warp. It requires
-NO separately compiled driving_warp pickle, Tinygrad ABI adapter, or QCOM
-warp builder. The native Zoompilot client, joining and demotion remain.
+Camera preprocessing deliberately stays on the comma and runs the exact
+compiled ModelState.warp used by this checkout, matching Zoompilot/Clarity's
+architecture. The old V5.8 CPU warp_indices implementation is not used for
+authority.
 
-Experimental/offroad qualification only. Do not use as vehicle authority
-without independent live camera/scheduling/fallback validation.
+Experimental integration. Real-road Pixel/reference parity must pass before
+treating a model/runtime combination as qualified vehicle authority.
 """
 from __future__ import annotations
 
