@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runtime contract for restored Tesla Hybrid brake/regen and V234 auto-resume."""
+"""Runtime contract for Tesla OP-long brake/regen and V234 auto-resume."""
 import ast
 from pathlib import Path
 import unittest
@@ -19,26 +19,33 @@ class TestHybridPedalAndAutoResume(unittest.TestCase):
 
   def test_runtime_owns_a_separate_brake_longitudinal_latch(self):
     init = ast.unparse(self.init)
-    self.assertIn("self._xnor_hybrid_brake_long_cancelled = False", init)
-    self.assertIn("self._xnor_hybrid_brake_last_press_ms = 0", init)
+    self.assertIn("self._xnor_tesla_brake_long_cancelled = False", init)
+    self.assertIn("self._xnor_tesla_brake_last_press_ms = 0", init)
     self.assertIn("self.params.get_bool", init)
     self.assertIn("TinklaAutoResumeACC", init)
-    self.assertIn("ExperimentalMode", init)
+    self.assertNotIn("_xnor_experimental_mode", init)
+
+  def test_latch_covers_hybrid_and_normal_tesla_op_long(self):
+    body = ast.unparse(self.state_control)
+    self.assertIn("self.CP.brand == 'tesla'", body)
+    self.assertIn("self.CP.openpilotLongitudinalControl", body)
+    latch_start = body.index("tesla_op_long_brake_latch")
+    latch = body[latch_start:latch_start + 300]
+    self.assertNotIn("pcmCruise", latch)
 
   def test_brake_and_regen_fail_closed_before_rearm(self):
     body = ast.unparse(self.state_control)
     self.assertIn("CS.brakePressed", body)
     self.assertIn("CS.regenBraking", body)
-    self.assertIn("self._xnor_hybrid_brake_long_cancelled = True", body)
+    self.assertIn("self._xnor_tesla_brake_long_cancelled = True", body)
     self.assertIn("not CS.brakePressed", body)
     self.assertIn("not CS.regenBraking", body)
-    self.assertIn("not self._xnor_hybrid_brake_long_cancelled", body)
+    self.assertIn("not self._xnor_tesla_brake_long_cancelled", body)
 
   def test_v234_auto_resume_has_all_original_gates(self):
     body = ast.unparse(self.state_control)
     for required in (
       "self._xnor_auto_resume_acc",
-      "self._xnor_experimental_mode",
       "not CS.gasPressed",
       "accFaulted",
       ">= 1000",
@@ -54,7 +61,7 @@ class TestHybridPedalAndAutoResume(unittest.TestCase):
       if isinstance(n, ast.Assign) and any(isinstance(t, ast.Attribute) and t.attr == "latActive" for t in n.targets)
     )
     lat = ast.unparse(lat_assignment)
-    self.assertNotIn("_xnor_hybrid_brake", lat)
+    self.assertNotIn("_xnor_tesla_brake", lat)
     self.assertNotIn("TinklaAutoResumeACC", lat)
     self.assertIn("CC.latActive", body)
 
