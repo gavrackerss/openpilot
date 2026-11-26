@@ -52,8 +52,9 @@ OUTPUT_SLICES = {
   'lead': (1907, 2051),
   'lead_prob': (2051, 2054),
   'desire_state': (2054, 2062),
-  # 'action' exists at 2062:2066, but the existing stock planner computes
-  # the action from the parsed LS2 plan. Do not guess raw action semantics.
+  # Same four-float direct-action head used by Zoompilot/Clarity modeld.
+  # Stock get_action_from_model consumes [0] lateral and [1] longitudinal.
+  'action': (2062, 2066),
 }
 
 
@@ -107,8 +108,6 @@ def validate_spec(spec: dict) -> None:
   for key, pair in OUTPUT_SLICES.items():
     if tuple(slices.get(key, ())) != pair:
       raise ValueError(f'Pixel output slice mismatch: {key}')
-  if tuple(slices.get('action', ())) != (2062, 2066):
-    raise ValueError('Pixel raw action head changed')
   if tuple(slices.get('hidden_state', ())) != (2066, 18450):
     raise ValueError('Pixel returned hidden state rather than phone-local history')
   if tuple(slices.get('pad', ())) != (18450, 18452):
@@ -345,7 +344,7 @@ def _reset_small(small):
         raise RuntimeError(f"Local 0.11.2 history buffer not initialized: {name}")
       # tinygrad at this checkout exposes Buffer.copy_from(), not the older
       # Buffer.copyin() helper. Keep the Tensor object/queue identity intact
-      # and zero the realised storage through Tensor.assign().
+      # and zero the realized storage through Tensor.assign().
       tensor.assign(0).realize()
     small.prev_desire.fill(0)
     if hasattr(small, "full_frames"):

@@ -71,33 +71,6 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
                                 shouldStop=bool(stop))
 
 
-def get_ls2_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                              lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
-  """Exact final-0.11.1 XNOR LS2 direct-action semantics.
-
-  This is intentionally separate from 0.11.2's stock action path so restoring
-  Jetlink cannot change the local stock model's behavior.
-  """
-  plan = model_output["plan"][0]
-  remote_action = np.asarray(model_output.get("action", ()), dtype=np.float32).reshape(-1)
-  if remote_action.size < 2 or not np.isfinite(remote_action[:2]).all():
-    raise ValueError("Jetlink LS2 action head invalid")
-
-  speeds = plan[:, Plan.VELOCITY][:, 0]
-  if len(speeds) == len(ModelConstants.T_IDXS):
-    v_target = np.interp(long_action_t, ModelConstants.T_IDXS, speeds)
-    v_target_1sec = np.interp(long_action_t + 1.0, ModelConstants.T_IDXS, speeds)
-  else:
-    v_target = 0.0
-    v_target_1sec = 0.0
-  stop = v_target < 0.05 and v_target_1sec < 0.05
-
-  desired_accel = smooth_value(float(remote_action[1]), prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
-  desired_curvature = float(remote_action[0]) / max(2.5, v_ego) ** 2
-  return log.ModelDataV2.Action(desiredCurvature=desired_curvature,
-                                desiredAcceleration=float(desired_accel),
-                                shouldStop=bool(stop))
-
 
 class ChestnutState:
   # only modeld can access chestnut
@@ -484,13 +457,12 @@ def main(demo=False):
       posenet_send = messaging.new_message('cameraOdometry')
 
       remote_ls2 = bool(jetlink_modeld and jetlink_authority is not None and jetlink_authority.remote_active(model))
-      if remote_ls2:
-        # Final 0.11.1 LS2 used +1 frame for the published action while the
-        # model input action_t itself used the +1.5-frame horizon above.
-        action = get_ls2_action_from_model(model_output, prev_action,
-                                           lat_delay + DT_MDL, long_delay + DT_MDL, v_ego)
-      else:
-        action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      # Zoompilot/Clarity model-face contract: after run(), action semantics
+      # follow whichever model produced this output. The remote Jetlink state
+      # exposes stock modeld's get_action_from_model; the resident local model
+      # falls back to this module's function.
+      action_fn = getattr(model, "get_action_from_model", get_action_from_model)
+      action = action_fn(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,

@@ -182,6 +182,15 @@ class LongitudinalPlanner:
     # Restore the 0.11.1 XNOR planner behavior that the 0.11.2 migration dropped.
     self._xnor_dec = XnorDynamicExperimentalControl(CP)
     self._xnor_dec_diag_frames = 0
+    # LS2 parity sessions deliberately bypass XNOR DEC/release shaping so the
+    # large-model output is evaluated through the normal 0.11.2 candidates.
+    # Marker state is session-latched by manager/modeld, so read it once here.
+    try:
+      from openpilot.jetlink_authority import enabled as _ls2_authority_enabled
+      self._xnor_ls2_session = bool(_ls2_authority_enabled())
+    except Exception:
+      self._xnor_ls2_session = False
+    self._xnor_ls2_diag_frames = 0
     self._xnor_release_prev_e2e_stop = False
     self._xnor_release_stop_frames = 0
     self._xnor_release_boost_frames = 0
@@ -284,7 +293,16 @@ class LongitudinalPlanner:
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
     experimental_mode = bool(sm['selfdriveState'].experimentalMode)
-    dec_mode = self._xnor_dec.update(sm, self.fcw, output_should_stop_e2e) if experimental_mode else "acc"
+    ls2_parity_active = bool(self._xnor_ls2_session and sm['modelV2'].big)
+    dec_active = bool(experimental_mode and self._xnor_dec.enabled() and not ls2_parity_active)
+    if dec_active:
+      dec_mode = self._xnor_dec.update(sm, self.fcw, output_should_stop_e2e)
+    else:
+      dec_mode = "blended" if experimental_mode else "acc"
+      if ls2_parity_active:
+        self._xnor_dec.mode = "blended"
+        self._xnor_dec.reason = "ls2_parity_bypass"
+        self._xnor_release_boost_frames = 0
 
     self.a_cruise = get_cruise_accel(experimental_mode, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
@@ -295,7 +313,7 @@ class LongitudinalPlanner:
     # recovery. In blended mode (or when DEC is disabled), E2E participates.
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
-    if experimental_mode and (not self._xnor_dec.enabled() or dec_mode == "blended"):
+    if experimental_mode and (ls2_parity_active or not self._xnor_dec.enabled() or dec_mode == "blended"):
       candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
@@ -304,16 +322,26 @@ class LongitudinalPlanner:
     # V232 release assist from 0.11.1, bounded by BOTH 0.11.2 base candidates.
     model_x, model_v, _ = self.parse_model(sm['modelV2'])
     model_3s_v = float(np.interp(3.0, T_IDXS_MPC, model_v))
-    prev_e2e_stop = bool(self._xnor_release_prev_e2e_stop)
-    stop_dwell_frames = int(self._xnor_release_stop_frames)
-    release_edge = bool(prev_e2e_stop and not bool(output_should_stop_e2e)
-                        and stop_dwell_frames >= int(_RELEASE_STOP_MIN_FRAMES))
-
-    if bool(output_should_stop_e2e):
-      self._xnor_release_stop_frames = min(10000, stop_dwell_frames + 1)
-    else:
+    if ls2_parity_active:
+      # Do not let V232 state accumulate behind the LS2 bypass and then fire
+      # on the first small-model fallback frame.
+      prev_e2e_stop = False
+      stop_dwell_frames = 0
+      release_edge = False
+      self._xnor_release_prev_e2e_stop = False
       self._xnor_release_stop_frames = 0
-    self._xnor_release_prev_e2e_stop = bool(output_should_stop_e2e)
+      self._xnor_release_boost_frames = 0
+    else:
+      prev_e2e_stop = bool(self._xnor_release_prev_e2e_stop)
+      stop_dwell_frames = int(self._xnor_release_stop_frames)
+      release_edge = bool(prev_e2e_stop and not bool(output_should_stop_e2e)
+                          and stop_dwell_frames >= int(_RELEASE_STOP_MIN_FRAMES))
+
+      if bool(output_should_stop_e2e):
+        self._xnor_release_stop_frames = min(10000, stop_dwell_frames + 1)
+      else:
+        self._xnor_release_stop_frames = 0
+      self._xnor_release_prev_e2e_stop = bool(output_should_stop_e2e)
 
     brake_pressed = bool(getattr(sm['carState'], 'brakePressed', False))
     gas_pressed = bool(getattr(sm['carState'], 'gasPressed', False))
@@ -322,7 +350,7 @@ class LongitudinalPlanner:
                                              float(v_ego) + float(_RELEASE_MIN_MODEL_GAIN_MS)))
     release_room = bool(float(v_cruise) >= float(v_ego) + float(_RELEASE_MIN_CRUISE_MARGIN_MS))
 
-    if (release_edge and experimental_mode and self._xnor_dec.enabled()
+    if (release_edge and experimental_mode and self._xnor_dec.enabled() and not ls2_parity_active
         and float(v_ego) <= float(_RELEASE_MAX_EGO_MS)
         and not lead_present and not bool(self.fcw)
         and not brake_pressed and not gas_pressed and not force_slow_decel
@@ -353,7 +381,7 @@ class LongitudinalPlanner:
 
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
 
-    if experimental_mode and self._xnor_dec.enabled():
+    if dec_active:
       self._xnor_dec_diag_frames += 1
       if self._xnor_dec_diag_frames % 20 == 0:
         cloudlog.info(
@@ -361,6 +389,15 @@ class LongitudinalPlanner:
           + f"lead={int(lead_present)} ego={v_ego:.2f} cruiseCap={v_cruise:.2f} "
           + f"urgency={self._xnor_dec.urgency:.3f} endpoint={self._xnor_dec.endpoint_x:.1f} "
           + f"expected={self._xnor_dec.expected_distance:.1f} "
+          + f"e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} "
+          + f"cruise_a={float(self.a_cruise):.3f} final_a={float(self.output_a_target):.3f}"
+        )
+
+    if ls2_parity_active:
+      self._xnor_ls2_diag_frames += 1
+      if self._xnor_ls2_diag_frames % 20 == 0:
+        cloudlog.info(
+          "[XNOR_LS2_PARITY] dec=bypassed release=bypassed "
           + f"e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} "
           + f"cruise_a={float(self.a_cruise):.3f} final_a={float(self.output_a_target):.3f}"
         )

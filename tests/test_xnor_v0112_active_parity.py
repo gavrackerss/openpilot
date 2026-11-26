@@ -34,14 +34,20 @@ class ActiveParityContract(unittest.TestCase):
   def test_v234_runtime_rearm_is_connected(self):
     controls = (ROOT / "openpilot/selfdrive/controls/controlsd.py").read_text()
     for marker in (
-      "_xnor_hybrid_brake_long_cancelled",
-      "_xnor_hybrid_brake_last_press_ms",
+      "_xnor_tesla_brake_long_cancelled",
+      "_xnor_tesla_brake_last_press_ms",
       "TinklaAutoResumeACC",
-      "ExperimentalMode",
       "XNOR_V234_AUTORESUME",
       ">= 1000",
     ):
       self.assertIn(marker, controls)
+    # Auto Resume ACC now applies to both Hybrid and normal Tesla OP-long and
+    # is intentionally independent of ExperimentalMode.
+    latch_start = controls.index("tesla_op_long_brake_latch =")
+    latch = controls[latch_start:latch_start + 2200]
+    self.assertIn("self.CP.openpilotLongitudinalControl", latch)
+    self.assertNotIn("self.CP.pcmCruise", latch)
+    self.assertNotIn("_xnor_experimental_mode", latch)
 
   def test_v279_live_ui_writes_only_the_manual_param(self):
     ui = (ROOT / "openpilot/selfdrive/ui/onroad/manual_speed_limit.py").read_text()
