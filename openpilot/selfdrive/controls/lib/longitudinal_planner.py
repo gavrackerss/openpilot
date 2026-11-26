@@ -397,7 +397,7 @@ class LongitudinalPlanner:
       self._xnor_ls2_diag_frames += 1
       if self._xnor_ls2_diag_frames % 20 == 0:
         cloudlog.info(
-          f"[XNOR_LS2_PARITY] dec=bypassed release=bypassed "
+          "[XNOR_LS2_PARITY] dec=bypassed release=bypassed "
           + f"e2e_a={float(output_a_target_e2e):.3f} mpc_a={float(output_a_target_mpc):.3f} "
           + f"cruise_a={float(self.a_cruise):.3f} final_a={float(self.output_a_target):.3f}"
         )
