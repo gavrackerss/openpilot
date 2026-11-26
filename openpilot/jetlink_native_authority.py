@@ -18,7 +18,7 @@ from __future__ import annotations
 import socket
 from typing import Any
 
-VERSION = '5.9.3-r5-native-jetlink-v58-camera-warp'
+VERSION = '5.9.4-r1-native-modeld-warp-parity'
 MODEL_W, MODEL_H = 512, 256
 PIXEL_SERVER_TIMEOUT_S = 20.0
 JETLINK_FRAME_FAILURE_S = 0.20  # Native Jetlink's existing peer-dead limit, NOT a hold budget.
@@ -96,44 +96,78 @@ def _pixel_transport(host: str, port: int):
 
 
 
-class ExistingCameraWarp:
-  """Adapter for the V5.8/V5.9.2 NV12 preprocessor already used on real frames.
+class NativeModeldWarp:
+  """Run the exact compiled 0.11.2 modeld camera warp used by the resident model.
 
-  JetlinkModelState needs start(address,address,matrix,matrix), wait(), output.
-  The proven _CameraWarp instead accepts camera buffer views and matrices.
-  This thin adapter copies neither full camera frames nor the warped output.
-  It deliberately does NOT invoke any Tinygrad/JIT build or GPU buffer API.
+  Zoompilot/Clarity keep camera preprocessing on the comma and feed the remote
+  model the byte output of openpilot's own driving warp. XNOR previously
+  reimplemented that step with the V5.8 CPU warp_indices path. This adapter
+  deliberately reuses ModelState.warp, its transform tensors, QCOM device and
+  NV12 geometry so LS2 receives exactly the same current-frame tensor the
+  local 0.11.2 modeld preprocessing would produce.
   """
 
-  def __init__(self, cam_w: int, cam_h: int, frame_size: int):
-    from openpilot.jetlink_authority import _CameraWarp
+  def __init__(self, model):
     import numpy as np
-    self._cam_w, self._cam_h = int(cam_w), int(cam_h)
-    self._frame_size = int(frame_size)
-    if self._cam_w <= 0 or self._cam_h <= 0 or self._frame_size <= 0:
-      raise ValueError('Invalid camera dimensions or NV12 buffer size')
-    self._camera = _CameraWarp(self._cam_w, self._cam_h)
-    self.output = self._camera.output
-    assert self.output.shape == (2, 6, 128, 256) and self.output.dtype == np.uint8
+
+    required = ("warp", "WARP_DEV", "input_queues", "npy", "frame_buf_params")
+    missing = [name for name in required if not hasattr(model, name)]
+    if missing:
+      raise RuntimeError(f"Resident ModelState cannot provide native camera warp: {missing}")
+    for name in ("img", "big_img"):
+      if name not in model.frame_buf_params:
+        raise RuntimeError(f"Resident ModelState has no {name} NV12 geometry")
+    self._model = model
+    self._frame_size = {
+      name: int(model.frame_buf_params[name][3]) for name in ("img", "big_img")
+    }
+    self._blob_cache = {}
+    self.output = np.empty((2, 6, 128, 256), dtype=np.uint8)
+
+  def _frame_tensor(self, name: str, address: int):
+    from tinygrad.tensor import Tensor
+
+    if not isinstance(address, int) or address <= 0:
+      raise ValueError(f"Invalid {name} camera address")
+    key = (name, address)
+    tensor = self._blob_cache.get(key)
+    if tensor is None:
+      tensor = Tensor.from_blob(address, (self._frame_size[name],),
+                                dtype="uint8", device=self._model.WARP_DEV)
+      self._blob_cache[key] = tensor
+    return tensor
 
   def start(self, frame: int, big_frame: int, tfm, big_tfm) -> None:
-    import ctypes
-    from types import SimpleNamespace
-    # modeld's native _address() returns the NV12 buffer address, which
-    # remains owned and valid by VisionIPC during this synchronous operation.
-    if not isinstance(frame, int) or not isinstance(big_frame, int) or frame <= 0 or big_frame <= 0:
-      raise ValueError('Invalid native camera addresses')
-    frame_data = (ctypes.c_uint8 * self._frame_size).from_address(frame)
-    big_data = (ctypes.c_uint8 * self._frame_size).from_address(big_frame)
-    self._camera.run(
-      {'img': SimpleNamespace(data=frame_data, width=self._cam_w, height=self._cam_h),
-       'big_img': SimpleNamespace(data=big_data, width=self._cam_w, height=self._cam_h)},
-      {'img': tfm, 'big_img': big_tfm})
+    import numpy as np
+    from openpilot.selfdrive.modeld.compile_modeld import WARP_INPUTS
+
+    tfm = np.asarray(tfm, dtype=np.float32)
+    big_tfm = np.asarray(big_tfm, dtype=np.float32)
+    if tfm.shape != (3, 3) or big_tfm.shape != (3, 3):
+      raise ValueError("Invalid modeld camera transform shape")
+    if not np.isfinite(tfm).all() or not np.isfinite(big_tfm).all():
+      raise ValueError("Non-finite modeld camera transform")
+
+    # These are the exact NPY-backed transform tensors ModelState.run uses.
+    self._model.npy["tfm"][:, :] = tfm
+    self._model.npy["big_tfm"][:, :] = big_tfm
+    warped = self._model.warp(
+      **{k: self._model.input_queues[k] for k in WARP_INPUTS},
+      frame=self._frame_tensor("img", frame),
+      big_frame=self._frame_tensor("big_img", big_frame),
+    )
+
+    # numpy() synchronizes the compiled QCOM warp before Jetlink sends it.
+    # Keep a stable host buffer because the transport may retain views until
+    # infer_begin returns.
+    value = warped.numpy()
+    if value.shape != self.output.shape or value.dtype != np.uint8:
+      raise RuntimeError(f"Native modeld warp returned {value.shape} {value.dtype}")
+    np.copyto(self.output, value)
 
   def wait(self) -> None:
-    # The legacy CPU warp is synchronous: output is ready on return of start.
+    # start() synchronizes through warped.numpy().
     return None
-
 
 def attach_native(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock'):
   """Stage a native Jetlink model; Zoompilot owns all swaps and demotions."""
@@ -151,10 +185,9 @@ def attach_native(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock')
     raise RuntimeError(f'Native LS2 adapter not qualified for local runner {runner!r}')
   stock = Stock()
   face = stock.model_face()
-  # Existing V5.8/V5.9.2 preprocessing from the real onroad shadow tests.
-  # Deliberately avoid the incompatible custom QCOM warp and its pickle.
-  warp = ExistingCameraWarp(int(cam_w), int(cam_h),
-                            face.frame_size(int(cam_w), int(cam_h)))
+  # Match Zoompilot/Clarity's architecture: preprocessing stays on the comma
+  # and uses the fork's own compiled modeld warp. No parallel V5.8 warp math.
+  warp = NativeModeldWarp(small_model)
 
   def connect(should_stop=None):
     if should_stop is not None and should_stop():
@@ -183,7 +216,7 @@ def attach_native(small_model, cam_w: int, cam_h: int, *, runner: str = 'stock')
     return JetlinkModelState(client, spec, warp, face=face,
                              log=cloudlog, event=cloudlog.event)
 
-  cloudlog.warning('xnor-jetlink: native Jetlink client + V5.8 camera warp staged; stock fallback retained; offroad-only validation pending')
+  cloudlog.warning('xnor-jetlink: native Jetlink client + exact 0.11.2 modeld warp staged; stock fallback retained; parity validation required')
   return JoiningModelState(_Small(small_model, normalize_stock_views=True), connect, build,
                            reset_small=lambda: _reset_small(small_model),
                            progress=_Progress(), log=cloudlog,
