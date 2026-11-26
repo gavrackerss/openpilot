@@ -26,14 +26,16 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8", authority)
     self.assertIn("AUTHORITY_ENABLED", authority)
     self.assertIn("LS2_AUTHORITY_QUALIFIED", authority)
-    self.assertIn("5.9.3-r4-native-jetlink-v58-camera-warp", native)
+    self.assertIn("5.9.3-r5-native-jetlink-v58-camera-warp", native)
     self.assertIn("JoiningModelState", native)
     self.assertIn("JetlinkModelState", native)
+    self.assertIn("if msg_type == P.Msg.INFER_REQ and self.datagrams:", native)
+    self.assertIn("self.send_datagrams(msg_type, seq, parts, flags)", native)
 
     native_bytes = (ROOT / "openpilot/jetlink_native_authority.py").read_bytes()
     git_blob = b"blob " + str(len(native_bytes)).encode() + b"\0" + native_bytes
     self.assertEqual(hashlib.sha1(git_blob, usedforsecurity=False).hexdigest(),
-                     "41a05abeaba6e84ae728b9d42e7032f5027f413f")
+                     "3aa0510127f0ee235ee36a8fc7b748e7dae0bb37")
 
   def test_0112_adapter_changes_only_the_resident_small_model_boundary(self):
     authority = (ROOT / "openpilot/jetlink_authority.py").read_text()
@@ -42,7 +44,7 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn('hasattr(model, "npy")', authority)
     self.assertIn("value = self._model.run(bufs, transforms, inputs)", authority)
     self.assertIn('for name in ("img_q", "big_img_q", "feat_q", "desire_q"):', authority)
-    self.assertIn("buf.copyin(memoryview(bytearray(buf.nbytes)))", authority)
+    self.assertIn("tensor.assign(0).realize()", authority)
     self.assertIn("from openpilot.cereal import messaging", authority)
 
   def test_modeld_keeps_stock_behavior_separate_from_ls2_behavior(self):
