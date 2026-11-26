@@ -322,16 +322,26 @@ class LongitudinalPlanner:
     # V232 release assist from 0.11.1, bounded by BOTH 0.11.2 base candidates.
     model_x, model_v, _ = self.parse_model(sm['modelV2'])
     model_3s_v = float(np.interp(3.0, T_IDXS_MPC, model_v))
-    prev_e2e_stop = bool(self._xnor_release_prev_e2e_stop)
-    stop_dwell_frames = int(self._xnor_release_stop_frames)
-    release_edge = bool(prev_e2e_stop and not bool(output_should_stop_e2e)
-                        and stop_dwell_frames >= int(_RELEASE_STOP_MIN_FRAMES))
-
-    if bool(output_should_stop_e2e):
-      self._xnor_release_stop_frames = min(10000, stop_dwell_frames + 1)
-    else:
+    if ls2_parity_active:
+      # Do not let V232 state accumulate behind the LS2 bypass and then fire
+      # on the first small-model fallback frame.
+      prev_e2e_stop = False
+      stop_dwell_frames = 0
+      release_edge = False
+      self._xnor_release_prev_e2e_stop = False
       self._xnor_release_stop_frames = 0
-    self._xnor_release_prev_e2e_stop = bool(output_should_stop_e2e)
+      self._xnor_release_boost_frames = 0
+    else:
+      prev_e2e_stop = bool(self._xnor_release_prev_e2e_stop)
+      stop_dwell_frames = int(self._xnor_release_stop_frames)
+      release_edge = bool(prev_e2e_stop and not bool(output_should_stop_e2e)
+                          and stop_dwell_frames >= int(_RELEASE_STOP_MIN_FRAMES))
+
+      if bool(output_should_stop_e2e):
+        self._xnor_release_stop_frames = min(10000, stop_dwell_frames + 1)
+      else:
+        self._xnor_release_stop_frames = 0
+      self._xnor_release_prev_e2e_stop = bool(output_should_stop_e2e)
 
     brake_pressed = bool(getattr(sm['carState'], 'brakePressed', False))
     gas_pressed = bool(getattr(sm['carState'], 'gasPressed', False))
