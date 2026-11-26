@@ -176,7 +176,7 @@ class NativeModeldWarp:
       big_tfm,
     )
 
-  def run_arrays(self, frame, big_frame, tfm, big_tfm) -> np.ndarray:
+  def run_arrays(self, frame, big_frame, tfm, big_tfm):
     """Recorded-parity path: explicitly upload ordinary host NV12 arrays to QCOM."""
     import numpy as np
     from tinygrad.tensor import Tensor
@@ -185,8 +185,8 @@ class NativeModeldWarp:
     wide = np.ascontiguousarray(big_frame, dtype=np.uint8).reshape(-1)
     if road.size != self._frame_size["img"] or wide.size != self._frame_size["big_img"]:
       raise ValueError(
-        f"Recorded NV12 size changed: {road.size}/{wide.size}, "
-        f"expected {self._frame_size['img']}/{self._frame_size['big_img']}"
+        "Recorded NV12 size changed: "
+        f"{road.size}/{wide.size}, expected {self._frame_size['img']}/{self._frame_size['big_img']}"
       )
     self._run_tensors(
       Tensor(road, device=self._model.WARP_DEV).realize(),
