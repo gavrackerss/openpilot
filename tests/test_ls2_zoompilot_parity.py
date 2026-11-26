@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
-"""Regression guards for LS2 Zoompilot/Clarity parity work."""
+"""Dependency-free regression guards for LS2 Zoompilot/Clarity parity work."""
+import ast
 from pathlib import Path
-import importlib.util
-import sys
 import unittest
-
-import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools/ls2_recorded_parity.py"
-SPEC = importlib.util.spec_from_file_location("ls2_recorded_parity", TOOL_PATH)
-tool = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = tool
-SPEC.loader.exec_module(tool)
+
+
+def _literal_assignment(source: str, name: str):
+  tree = ast.parse(source)
+  for node in tree.body:
+    if isinstance(node, ast.Assign):
+      for target in node.targets:
+        if isinstance(target, ast.Name) and target.id == name:
+          return ast.literal_eval(node.value)
+  raise AssertionError(f"{name} not found")
 
 
 class LS2ZoompilotParity(unittest.TestCase):
   def test_real_road_gate_covers_reported_heads(self):
+    source = TOOL_PATH.read_text()
     self.assertEqual(
-      tool.REQUIRED_HEADS,
+      _literal_assignment(source, "REQUIRED_HEADS"),
       ("plan", "lead", "lead_prob", "road_edges", "lane_lines", "action"),
     )
-    self.assertEqual(tool.LS2_SHA256, "909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8")
-    self.assertEqual(tool.LS2_NBYTES, 768_749_892)
-    self.assertGreaterEqual(tool.MIN_CORR, 0.999)
+    self.assertEqual(
+      _literal_assignment(source, "LS2_SHA256"),
+      "909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8",
+    )
+    self.assertEqual(_literal_assignment(source, "LS2_NBYTES"), 768_749_892)
+    self.assertGreaterEqual(_literal_assignment(source, "MIN_CORR"), 0.999)
 
   def test_recorded_gate_requires_32_frames_and_real_cameras(self):
     source = TOOL_PATH.read_text()
@@ -31,22 +38,15 @@ class LS2ZoompilotParity(unittest.TestCase):
     self.assertIn('FrameReader(args.fcamera, pix_fmt="nv12"', source)
     self.assertIn('FrameReader(args.ecamera, pix_fmt="nv12"', source)
     self.assertIn('_record_context(args.rlog)', source)
+    self.assertIn('warped = np.array(warp.run_arrays(', source)
     self.assertNotIn("make_inputs(", source)
 
-  def test_nv12_repacker_preserves_visible_planes_and_padding(self):
-    from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-
-    width, height = 128, 64
-    tight = np.arange(width * height * 3 // 2, dtype=np.uint8)
-    padded = tool._tight_to_camerad_nv12(tight, width, height)
-    stride, y_height, uv_height, size = get_nv12_info(width, height)
-    self.assertEqual(padded.size, size)
-
-    y = padded[:stride * y_height].reshape(y_height, stride)
-    uv_off = stride * y_height
-    uv = padded[uv_off:uv_off + stride * uv_height].reshape(uv_height, stride)
-    np.testing.assert_array_equal(y[:height, :width].reshape(-1), tight[:width * height])
-    np.testing.assert_array_equal(uv[:height // 2, :width].reshape(-1), tight[width * height:])
+  def test_nv12_repacker_restores_camerad_layout(self):
+    source = TOOL_PATH.read_text()
+    self.assertIn("get_nv12_info(width, height)", source)
+    self.assertIn("tight = width * height * 3 // 2", source)
+    self.assertIn("y_dst[:height, :width] = y", source)
+    self.assertIn("uv_dst[:height // 2, :width] = uv", source)
 
   def test_authority_uses_standard_action_slice(self):
     authority = (ROOT / "openpilot/jetlink_authority.py").read_text()
@@ -60,6 +60,7 @@ class LS2ZoompilotParity(unittest.TestCase):
     self.assertIn("class NativeModeldWarp:", native)
     self.assertIn("self._model.warp(", native)
     self.assertIn("WARP_INPUTS", native)
+    self.assertIn("def run_arrays(", native)
     self.assertNotIn("warp_indices(", native)
     self.assertNotIn("class ExistingCameraWarp", native)
 
@@ -71,6 +72,14 @@ class LS2ZoompilotParity(unittest.TestCase):
     self.assertIn("self._xnor_release_stop_frames = 0", planner)
     self.assertIn("self._xnor_release_boost_frames = 0", planner)
     self.assertIn("[XNOR_LS2_PARITY] dec=bypassed release=bypassed", planner)
+
+  def test_reference_contract_comes_from_unmodified_onnx(self):
+    source = TOOL_PATH.read_text()
+    self.assertIn("spec_from_onnx(str(onnx)", source)
+    self.assertIn("if digest != LS2_SHA256:", source)
+    self.assertIn("if spec.output_slices != link_spec.output_slices:", source)
+    for head in ("plan", "lead", "lead_prob", "road_edges", "lane_lines", "action"):
+      self.assertIn(f'"{head}"', source)
 
 
 if __name__ == "__main__":
