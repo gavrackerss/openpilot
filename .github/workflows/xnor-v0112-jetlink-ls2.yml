@@ -6,8 +6,11 @@ on:
       - "jetlink/**"
       - "openpilot/jetlink_*.py"
       - "openpilot/selfdrive/modeld/modeld.py"
+      - "openpilot/selfdrive/controls/lib/longitudinal_planner.py"
       - "openpilot/system/manager/process_config.py"
+      - "tools/ls2_recorded_parity.py"
       - "tests/test_xnor_v0112_jetlink*.py"
+      - "tests/test_ls2_zoompilot_parity.py"
       - ".github/workflows/xnor-v0112-jetlink-ls2.yml"
   workflow_dispatch:
 
@@ -25,8 +28,12 @@ jobs:
             openpilot/jetlink_shadow_bench.py \
             openpilot/jetlink_xnor_probe.py \
             openpilot/selfdrive/modeld/modeld.py \
-            openpilot/system/manager/process_config.py
+            openpilot/selfdrive/controls/lib/longitudinal_planner.py \
+            openpilot/system/manager/process_config.py \
+            tools/ls2_recorded_parity.py
       - name: Run passive compatibility contract
         run: python3 tests/test_xnor_v0112_jetlink_contract.py -v
       - name: Run live 0.11.1 parity contract
         run: python3 tests/test_xnor_v0112_jetlink_live_parity.py -v
+      - name: Run Zoompilot/Clarity real-road parity contract
+        run: python3 tests/test_ls2_zoompilot_parity.py -v
