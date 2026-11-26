@@ -317,14 +317,24 @@ def _captured_count(directory: Path, stem: str) -> int:
 
 def reference(args) -> int:
   import onnxruntime as ort
-  from jetlink.spec import ModelSpec, DRIVING_OUTPUT
+  from jetlink.spec import ModelSpec, DRIVING_OUTPUT, spec_from_onnx
 
   d = Path(args.dir)
-  spec = ModelSpec.load(d / "spec.json")
+  link_spec = ModelSpec.load(d / "spec.json")
   onnx = Path(args.onnx)
   digest = _sha256(onnx)
   if digest != LS2_SHA256:
     raise SystemExit(f"wrong ONNX: sha256 {digest}, expected LS2 {LS2_SHA256}")
+
+  # Derive the complete recurrent graph contract from the untouched ONNX.
+  # The Pixel's ENGINE_RESP is still checked for the wire-facing contract, but
+  # the reference must not guess which state_<q>/next_state_<q> tensors exist.
+  spec = spec_from_onnx(str(onnx), frame_skip=link_spec.frame_skip,
+                        sha256=digest, nbytes=onnx.stat().st_size)
+  if spec.output_slices != link_spec.output_slices:
+    raise SystemExit("LS2 ONNX output_slices do not match the Pixel engine spec")
+  if spec.model_hw != link_spec.model_hw:
+    raise SystemExit(f"LS2 ONNX model geometry {spec.model_hw} != Pixel {link_spec.model_hw}")
 
   n = _captured_count(d, "in_warped")
   if n < 32:
