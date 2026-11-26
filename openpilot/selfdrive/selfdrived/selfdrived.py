@@ -242,13 +242,6 @@ class SelfdriveD:
         self.CP.brand, bool(self.CP.openpilotLongitudinalControl)
       )
       car_events = self.car_events.update(CS, self.CS_prev, self.sm['carControl']).to_msg()
-      if tesla_brake_long_only:
-        # Tesla OP-long keeps lateral engaged independently of the native cruise
-        # latch. Hybrid still uses the native cruise rising edge for initial
-        # engagement, but a brake/native TACC drop must not emit pcmDisable and
-        # tear down lateral. CANCEL remains a buttonCancel USER_DISABLE and real
-        # faults retain their normal disable events.
-        car_events = [e for e in car_events if e.name.raw != EventName.pcmDisable]
       self.events.add_from_msg(car_events)
 
       if self.CP.notCar:
