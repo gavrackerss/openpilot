@@ -18,7 +18,7 @@ from __future__ import annotations
 import socket
 from typing import Any
 
-VERSION = '5.9.3-r4-native-jetlink-v58-camera-warp'
+VERSION = '5.9.3-r5-native-jetlink-v58-camera-warp'
 MODEL_W, MODEL_H = 512, 256
 PIXEL_SERVER_TIMEOUT_S = 20.0
 JETLINK_FRAME_FAILURE_S = 0.20  # Native Jetlink's existing peer-dead limit, NOT a hold budget.
@@ -45,6 +45,7 @@ def _pixel_transport(host: str, port: int):
   comma); our existing custom Android app is at 10.169.232.180 over usb0.
   Route verification is repeated by the connector BEFORE constructing this.
   """
+  from jetlink import protocol as P
   from jetlink.transport.tcp import TcpTransport, datagrams
   from jetlink.transport.base import LinkError
   from openpilot.jetlink_shadow_bench import udp_sendmmsg
@@ -59,6 +60,19 @@ def _pixel_transport(host: str, port: int):
       # Native Jetlink phone-dialled mode uses kind=cable instead; passing
       # that through here can silently suppress the phone's UDP offer.
       return {'kind': 'usb'}
+
+    def send(self, msg_type: int, seq: int, parts=(), flags: int = 0,
+             timeout: float | None = None) -> None:
+      # The custom Pixel V5.8 server receives inference uploads over its
+      # negotiated UDP frame channel. The generic Jetlink client normally
+      # sends frame 1 over the control stream because there is no prior output
+      # to hold yet; that ~393 KB TCP send can block until the 200 ms model
+      # deadline and kill the first handover. Route every inference upload,
+      # including frame 1, through the already-negotiated USB datagram path.
+      if msg_type == P.Msg.INFER_REQ and self.datagrams:
+        self.send_datagrams(msg_type, seq, parts, flags)
+        return
+      super().send(msg_type, seq, parts, flags, timeout)
 
     def send_datagrams(self, msg_type: int, seq: int, parts=(), flags: int = 0) -> None:
       if self._udp is None:
