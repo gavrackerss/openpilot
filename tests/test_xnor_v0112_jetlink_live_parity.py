@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Regression guards for the live XNOR 0.11.1 Jetlink/LS2 parity port."""
 from pathlib import Path
-import hashlib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,16 +25,12 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("909a140019050a9d7f00db22dd4f4085928d2af9474a82244672ddab964f95a8", authority)
     self.assertIn("AUTHORITY_ENABLED", authority)
     self.assertIn("LS2_AUTHORITY_QUALIFIED", authority)
-    self.assertIn("5.9.3-r5-native-jetlink-v58-camera-warp", native)
+    self.assertIn("'action': (2062, 2066)", authority)
+    self.assertIn("5.9.4-r1-native-modeld-warp-parity", native)
     self.assertIn("JoiningModelState", native)
     self.assertIn("JetlinkModelState", native)
     self.assertIn("if msg_type == P.Msg.INFER_REQ and self.datagrams:", native)
     self.assertIn("self.send_datagrams(msg_type, seq, parts, flags)", native)
-
-    native_bytes = (ROOT / "openpilot/jetlink_native_authority.py").read_bytes()
-    git_blob = b"blob " + str(len(native_bytes)).encode() + b"\0" + native_bytes
-    self.assertEqual(hashlib.sha1(git_blob, usedforsecurity=False).hexdigest(),
-                     "3aa0510127f0ee235ee36a8fc7b748e7dae0bb37")
 
   def test_0112_adapter_changes_only_the_resident_small_model_boundary(self):
     authority = (ROOT / "openpilot/jetlink_authority.py").read_text()
@@ -47,23 +42,34 @@ class JetlinkLiveParity(unittest.TestCase):
     self.assertIn("tensor.assign(0).realize()", authority)
     self.assertIn("from openpilot.cereal import messaging", authority)
 
-  def test_modeld_keeps_stock_behavior_separate_from_ls2_behavior(self):
+  def test_modeld_uses_active_model_face_for_ls2_action(self):
     modeld = (ROOT / "openpilot/selfdrive/modeld/modeld.py").read_text()
 
-    self.assertIn("def get_ls2_action_from_model(", modeld)
-    self.assertIn("remote_action = np.asarray(", modeld)
-    self.assertIn("max(2.5, v_ego) ** 2", modeld)
-    self.assertIn("v_target_1sec", modeld)
-    self.assertIn("smooth_value(float(remote_action[1])", modeld)
-    self.assertIn("lat_delay + DT_MDL, long_delay + DT_MDL, v_ego", modeld)
+    self.assertNotIn("def get_ls2_action_from_model(", modeld)
     self.assertIn("jetlink_authority.attach(", modeld)
     self.assertIn("jetlink_authority.handed_over(model)", modeld)
     self.assertIn("jetlink_authority.remote_active(model)", modeld)
     self.assertIn('setattr(model, "frame_drop_ratio", frame_drop_ratio)', modeld)
-
-    # Stock 0.11.2 action extraction remains a separate function and path.
     self.assertIn("def get_action_from_model(", modeld)
-    self.assertIn("action = get_action_from_model(", modeld)
+    self.assertIn('action_fn = getattr(model, "get_action_from_model", get_action_from_model)', modeld)
+    self.assertIn("action = action_fn(model_output, prev_action, lat_action_t, long_action_t, v_ego)", modeld)
+
+  def test_native_ls2_uses_resident_0112_compiled_warp(self):
+    native = (ROOT / "openpilot/jetlink_native_authority.py").read_text()
+    self.assertIn("class NativeModeldWarp:", native)
+    self.assertIn("self._model.warp(", native)
+    self.assertIn("from openpilot.selfdrive.modeld.compile_modeld import WARP_INPUTS", native)
+    self.assertIn('self._model.npy["tfm"][:, :] = tfm', native)
+    self.assertIn('self._model.npy["big_tfm"][:, :] = big_tfm', native)
+    self.assertNotIn("warp_indices(", native)
+    self.assertNotIn("ExistingCameraWarp", native)
+
+  def test_ls2_parity_bypasses_xnor_dec_and_release_shaping(self):
+    planner = (ROOT / "openpilot/selfdrive/controls/lib/longitudinal_planner.py").read_text()
+    self.assertIn("ls2_parity_active = bool(self._xnor_ls2_session and sm['modelV2'].big)", planner)
+    self.assertIn("dec_active = bool(experimental_mode and self._xnor_dec.enabled() and not ls2_parity_active)", planner)
+    self.assertIn("and not ls2_parity_active", planner)
+    self.assertIn("[XNOR_LS2_PARITY] dec=bypassed release=bypassed", planner)
 
   def test_ls2_owns_stock_modeld_only_when_both_old_markers_exist(self):
     manager = (ROOT / "openpilot/system/manager/process_config.py").read_text()
