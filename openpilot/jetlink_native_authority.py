@@ -139,7 +139,7 @@ class NativeModeldWarp:
       self._blob_cache[key] = tensor
     return tensor
 
-  def start(self, frame: int, big_frame: int, tfm, big_tfm) -> None:
+  def _run_tensors(self, frame_tensor, big_frame_tensor, tfm, big_tfm) -> None:
     import numpy as np
     from openpilot.selfdrive.modeld.compile_modeld import WARP_INPUTS
 
@@ -155,8 +155,8 @@ class NativeModeldWarp:
     self._model.npy["big_tfm"][:, :] = big_tfm
     warped = self._model.warp(
       **{k: self._model.input_queues[k] for k in WARP_INPUTS},
-      frame=self._frame_tensor("img", frame),
-      big_frame=self._frame_tensor("big_img", big_frame),
+      frame=frame_tensor,
+      big_frame=big_frame_tensor,
     )
 
     # numpy() synchronizes the compiled QCOM warp before Jetlink sends it.
@@ -166,6 +166,35 @@ class NativeModeldWarp:
     if value.shape != self.output.shape or value.dtype != np.uint8:
       raise RuntimeError(f"Native modeld warp returned {value.shape} {value.dtype}")
     np.copyto(self.output, value)
+
+  def start(self, frame: int, big_frame: int, tfm, big_tfm) -> None:
+    # Live modeld gives us QCOM-importable VisionIPC buffer addresses.
+    self._run_tensors(
+      self._frame_tensor("img", frame),
+      self._frame_tensor("big_img", big_frame),
+      tfm,
+      big_tfm,
+    )
+
+  def run_arrays(self, frame, big_frame, tfm, big_tfm) -> np.ndarray:
+    """Recorded-parity path: explicitly upload ordinary host NV12 arrays to QCOM."""
+    import numpy as np
+    from tinygrad.tensor import Tensor
+
+    road = np.ascontiguousarray(frame, dtype=np.uint8).reshape(-1)
+    wide = np.ascontiguousarray(big_frame, dtype=np.uint8).reshape(-1)
+    if road.size != self._frame_size["img"] or wide.size != self._frame_size["big_img"]:
+      raise ValueError(
+        f"Recorded NV12 size changed: {road.size}/{wide.size}, "
+        f"expected {self._frame_size['img']}/{self._frame_size['big_img']}"
+      )
+    self._run_tensors(
+      Tensor(road, device=self._model.WARP_DEV).realize(),
+      Tensor(wide, device=self._model.WARP_DEV).realize(),
+      tfm,
+      big_tfm,
+    )
+    return self.output
 
   def wait(self) -> None:
     # start() synchronizes through warped.numpy().
