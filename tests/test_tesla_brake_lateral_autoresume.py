@@ -38,6 +38,13 @@ class TeslaBrakeLateralAutoResume(unittest.TestCase):
     self.assertNotIn("_xnor_experimental_mode", block)
     self.assertIn("(now_ms - self._xnor_tesla_brake_last_press_ms) >= 1000", block)
 
+  def test_hybrid_native_tacc_rearm_uses_same_autoresume_toggle(self):
+    source = (ROOT / "opendbc_repo/opendbc/car/tesla/carcontroller.py").read_text()
+    start = source.index("def _v241_auto_resume_stalk(")
+    block = source[start:start + 5200]
+    self.assertIn("self._cached_auto_resume_acc", block)
+    self.assertNotIn("_cached_experimental_mode", block)
+
   def test_physical_main_resume_accepts_legacy_release_edge(self):
     source = (ROOT / "openpilot/selfdrive/controls/controlsd.py").read_text()
     start = source.index("physical_resume = any(")
