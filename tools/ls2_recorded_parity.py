@@ -271,8 +271,7 @@ def capture(args) -> int:
     for n, idx in enumerate(range(start, end)):
       road = _tight_to_camerad_nv12(fcam.get(idx), fcam.w, fcam.h)
       wide = _tight_to_camerad_nv12(ecam.get(idx), ecam.w, ecam.h)
-      warp.start(road.ctypes.data, wide.ctypes.data, main_tfm, wide_tfm)
-      warped = np.array(warp.output, copy=True)
+      warped = np.array(warp.run_arrays(road, wide, main_tfm, wide_tfm), copy=True)
       packed = _packed_inputs(spec, context["is_rhd"], n)
       pred = client.infer(warped, packed, frame_id=n, reset=(n == 0))
 
