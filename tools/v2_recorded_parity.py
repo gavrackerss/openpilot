@@ -382,21 +382,25 @@ def reference(args) -> int:
   if n < 32:
     raise SystemExit(f"need >=32 captured frames, found {n}")
 
-  so = ort.SessionOptions()
-  so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-  so.intra_op_num_threads = 1
-  so.inter_op_num_threads = 1
-  so.enable_cpu_mem_arena = False
-  so.enable_mem_pattern = False
-  so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-  try:
-    so.add_session_config_entry("session.intra_op.allow_spinning", "0")
-    so.add_session_config_entry("session.inter_op.allow_spinning", "0")
-  except Exception:
-    pass
-  print("creating low-memory ONNX Runtime CPU session...", flush=True)
-  sess = ort.InferenceSession(str(onnx), sess_options=so, providers=["CPUExecutionProvider"])
-  print("ONNX Runtime session ready", flush=True)
+  if args.ort_mode == "default":
+    print("creating DEFAULT ONNX Runtime CPU session (normal graph optimisations/arena)...", flush=True)
+    sess = ort.InferenceSession(str(onnx), providers=["CPUExecutionProvider"])
+  else:
+    so = ort.SessionOptions()
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    so.intra_op_num_threads = 1
+    so.inter_op_num_threads = 1
+    so.enable_cpu_mem_arena = False
+    so.enable_mem_pattern = False
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    try:
+      so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+      so.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    except Exception:
+      pass
+    print("creating LOWMEM ONNX Runtime CPU session...", flush=True)
+    sess = ort.InferenceSession(str(onnx), sess_options=so, providers=["CPUExecutionProvider"])
+  print(f"ONNX Runtime session ready ({args.ort_mode})", flush=True)
   dtypes = _ort_feed_dtypes(sess)
   shapes = {i.name: tuple(i.shape) for i in sess.get_inputs()}
 
@@ -570,6 +574,8 @@ def main() -> int:
   p = sub.add_parser("reference")
   p.add_argument("--onnx", required=True)
   p.add_argument("--dir", required=True)
+  p.add_argument("--ort-mode", choices=("lowmem", "default"), default="lowmem",
+                 help="reference session: lowmem fits comma RAM; default reproduces normal ORT execution")
 
   p = sub.add_parser("compare")
   p.add_argument("--dir", required=True)
