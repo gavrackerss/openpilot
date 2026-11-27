@@ -357,7 +357,8 @@ def reference(args) -> int:
   link_spec = ModelSpec.load(d / "spec.json")
   onnx = Path(args.onnx)
   digest = _sha256(onnx)
-  if digest != V2_SHA256:\n    raise SystemExit(f"wrong ONNX: sha256 {digest}, expected Cinque Terre V2 {V2_SHA256}")
+  if digest != V2_SHA256:
+    raise SystemExit(f"wrong ONNX: sha256 {digest}, expected Cinque Terre V2 {V2_SHA256}")
 
   # Derive the complete recurrent graph contract from the untouched ONNX.
   # The Pixel's ENGINE_RESP is still checked for the wire-facing contract, but
