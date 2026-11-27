@@ -350,6 +350,14 @@ def _captured_count(directory: Path, stem: str) -> int:
 
 
 def reference(args) -> int:
+  # Keep the comma reference run within its RAM budget.  The default ORT
+  # session enables graph rewrites, the CPU arena and memory-pattern
+  # preallocation; for this ~766 MB queued model that can push session startup
+  # over the device's available memory.  These options change allocation and
+  # execution scheduling only, not the ONNX graph or comparison thresholds.
+  import os
+  os.environ.setdefault("OMP_NUM_THREADS", "1")
+  os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
   import onnxruntime as ort
   from jetlink.spec import ModelSpec, DRIVING_OUTPUT, spec_from_onnx
 
@@ -374,7 +382,21 @@ def reference(args) -> int:
   if n < 32:
     raise SystemExit(f"need >=32 captured frames, found {n}")
 
-  sess = ort.InferenceSession(str(onnx), providers=["CPUExecutionProvider"])
+  so = ort.SessionOptions()
+  so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+  so.intra_op_num_threads = 1
+  so.inter_op_num_threads = 1
+  so.enable_cpu_mem_arena = False
+  so.enable_mem_pattern = False
+  so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+  try:
+    so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    so.add_session_config_entry("session.inter_op.allow_spinning", "0")
+  except Exception:
+    pass
+  print("creating low-memory ONNX Runtime CPU session...", flush=True)
+  sess = ort.InferenceSession(str(onnx), sess_options=so, providers=["CPUExecutionProvider"])
+  print("ONNX Runtime session ready", flush=True)
   dtypes = _ort_feed_dtypes(sess)
   shapes = {i.name: tuple(i.shape) for i in sess.get_inputs()}
 
