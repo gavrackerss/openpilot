@@ -112,6 +112,14 @@ def capture(args) -> int:
   )
   try:
     hello = client.hello(timeout=3.0)
+    server_backend = hello.get("backend")
+    server_device = hello.get("device")
+    server_runtime = hello.get("runtime_version", hello.get("trt_version"))
+    print(f"server: backend={server_backend} device={server_device} runtime={server_runtime}")
+    if args.expect_backend is not None and server_backend != args.expect_backend:
+      raise RuntimeError(f"Pixel backend {server_backend!r} != expected {args.expect_backend!r}")
+    if args.expect_device is not None and server_device != args.expect_device:
+      raise RuntimeError(f"Pixel device {server_device!r} != expected {args.expect_device!r}")
     if not client.t.datagrams:
       raise RuntimeError("Pixel did not negotiate USB datagram frame upload")
     spec = client.ensure_engine(
@@ -339,6 +347,8 @@ def main() -> int:
   c.add_argument("--seed", type=int, default=0)
   c.add_argument("--host")
   c.add_argument("--port", type=int, default=5599)
+  c.add_argument("--expect-backend", help="abort unless HELLO reports this backend (for A/B qualification)")
+  c.add_argument("--expect-device", help="abort unless HELLO reports this device/profile (for A/B qualification)")
 
   r = sub.add_parser("reference")
   r.add_argument("--onnx", required=True)
