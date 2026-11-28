@@ -120,6 +120,8 @@ def capture(args) -> int:
       raise RuntimeError(f"Pixel backend {server_backend!r} != expected {args.expect_backend!r}")
     if args.expect_device is not None and server_device != args.expect_device:
       raise RuntimeError(f"Pixel device {server_device!r} != expected {args.expect_device!r}")
+    if args.expect_device_prefix is not None and not str(server_device or "").startswith(args.expect_device_prefix):
+      raise RuntimeError(f"Pixel device {server_device!r} does not start with expected prefix {args.expect_device_prefix!r}")
     if not client.t.datagrams:
       raise RuntimeError("Pixel did not negotiate USB datagram frame upload")
     spec = client.ensure_engine(
@@ -348,7 +350,8 @@ def main() -> int:
   c.add_argument("--host")
   c.add_argument("--port", type=int, default=5599)
   c.add_argument("--expect-backend", help="abort unless HELLO reports this backend (for A/B qualification)")
-  c.add_argument("--expect-device", help="abort unless HELLO reports this device/profile (for A/B qualification)")
+  c.add_argument("--expect-device", help="abort unless HELLO reports this exact device tag (for A/B qualification)")
+  c.add_argument("--expect-device-prefix", help="abort unless HELLO device tag starts with this prefix")
 
   r = sub.add_parser("reference")
   r.add_argument("--onnx", required=True)
