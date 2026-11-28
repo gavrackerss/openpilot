@@ -130,6 +130,12 @@ def capture(args) -> int:
       fetch=True, ref=V2_REF,
     )
     _validate_v2_spec(spec)
+    engine_accelerator = (client._engine_state or {}).get("accelerator")
+    print(f"engine: accelerator={engine_accelerator}")
+    if args.expect_accelerator is not None and engine_accelerator != args.expect_accelerator:
+      raise RuntimeError(
+        f"Pixel engine accelerator {engine_accelerator!r} != expected {args.expect_accelerator!r}"
+      )
     (out / "spec.json").write_text(json.dumps(spec.to_dict(), indent=2))
     (out / "capture.json").write_text(json.dumps({
       "model_sha256": V2_SHA256,
@@ -352,6 +358,7 @@ def main() -> int:
   c.add_argument("--expect-backend", help="abort unless HELLO reports this backend (for A/B qualification)")
   c.add_argument("--expect-device", help="abort unless HELLO reports this exact device tag (for A/B qualification)")
   c.add_argument("--expect-device-prefix", help="abort unless HELLO device tag starts with this prefix")
+  c.add_argument("--expect-accelerator", help="abort unless the ready engine reports this actual accelerator")
 
   r = sub.add_parser("reference")
   r.add_argument("--onnx", required=True)
